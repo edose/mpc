@@ -2,8 +2,12 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
 from collections import OrderedDict
 import os
+from random import randint
+from time import sleep
+from webbrowser import open_new_tab
+
 import requests
-from bs4 import BeautifulSoup
+import pandas as pd
 
 MPC_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -12,6 +16,7 @@ PAYLOAD_DICT_TEMPLATE = OrderedDict([
     ('TextArea', ''),  # the MP IDs
     ('d', '20181122'),  # first date
     ('l', '14'),  # number of dates/times
+    # TODO: should be one line for every 30 minutes, not for every 1 hour.
     ('i', '1'),  # interval between ephemerides
     ('u', 'h'),  # units of interval; 'h' for hours, 'd' for days
     ('uto', '0'),  # UTC offset in hours if u=d
@@ -42,6 +47,47 @@ MAX_SUN_ALTITUDE = -12
 MAX_V_MAG = 20
 
 
+def get_100_candidates(mp_start=100000, date='20181125'):
+    all_dict_list = []
+    html_start = mp_start
+    for i_html in range(100):  # limit number of calls to MPC to get this done:
+        if i_html > 0:
+            sleep(randint(3, 7))  # delay for 3 to 7 seconds (playing nicely with MPC server).
+        this_dict_list = scan_one_html(html_start, date)
+        if len(all_dict_list) >= MAX_MP_PER_HTML:
+            break
+        all_dict_list.extend(this_dict_list)
+        print(str(i_html) + ' ' +
+              str(html_start) + '  + ' +
+              str(len(this_dict_list)) + '   total: ' +
+              str(len(all_dict_list)))
+        html_start += MAX_MP_PER_HTML
+    all_dict_list = all_dict_list[:MAX_MP_PER_HTML]  # truncate if we got a few more than needed.
+
+    # Construct URL and display condensed MPC results in browser:
+    payload_dict = PAYLOAD_DICT_TEMPLATE.copy()
+    mp_list = [item['number'] for item in all_dict_list]
+    payload_dict['TextArea'] = '%0D%0A'.join(mp_list)
+    payload_dict['d'] = date
+    payload_dict['long'] = payload_dict['long'].replace("+", "%2B")  # make safe
+    payload_dict['lat'] = payload_dict['lat'].replace("+", "%2B")    # make safe
+    payload_string = '&'.join([k + '=' + v for (k, v) in payload_dict.items()])
+    url = MPC_URL_STUB + payload_string
+    open_new_tab(url)
+
+
+def scan_one_html(mp_start=100000, date='20181125'):
+    mp_dict_list = []
+    lines = get_one_html(start=mp_start, date=date)
+    mp_block_limits = chop_html(lines)
+    for limits in mp_block_limits:
+        mp_dict = extract_mp_data(lines, limits)
+        if mp_dict.get('v_mag', None) is not None:
+            mp_dict_list.append(mp_dict)
+            print(mp_dict['number'])
+    return mp_dict_list
+
+
 def get_one_html(start=200000, n=MAX_MP_PER_HTML, date='20181122'):
     """ Gets MPC HTML text, returns list of strings """
     payload_dict = PAYLOAD_DICT_TEMPLATE.copy()
@@ -62,6 +108,7 @@ def get_one_html(start=200000, n=MAX_MP_PER_HTML, date='20181122'):
     url = MPC_URL_STUB + payload_string
 
     # Make GET call, parse return text.
+    print(url)
     r = requests.get(url, headers=GET_HEADER)
     return r.text.splitlines()
 
@@ -141,6 +188,7 @@ def extract_mp_data(html_lines, mp_block_limits):
                 max_mp_alt = mp_alt
                 v_mag = float(line.split()[14])
                 sun_alt = float(line.split()[19])
+                # TODO: Also get uncertainty in arcsec (from corrected URL in line) & 'if' on that as well.
                 if mp_alt >= MIN_ALTITUDE and v_mag <= MAX_V_MAG and sun_alt <= MAX_SUN_ALTITUDE:
                     motion = float(line.split()[15])
                     mp_dict['v_mag'] = v_mag
