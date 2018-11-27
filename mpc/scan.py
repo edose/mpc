@@ -67,6 +67,7 @@ def go(mp_start=100000, date_utc=None, max_mps=10000, max_candidates=100):
         html_dict_list = parse_html_lines(lines)
         all_dict_list.extend(html_dict_list)
         html_base += MAX_MP_PER_HTML
+
         print(' --> ' + str(len(all_dict_list)))
     print('Done.')
     return pd.DataFrame(all_dict_list)
@@ -182,7 +183,6 @@ def extract_mp_data(html_lines, mp_block_limits):
             v_mag = float(line_split[14])
             sun_alt = float(line_split[19])
             moon_dist = float(line_split[21])
-            motion = float(line_split[15])
             if mp_alt >= MIN_ALTITUDE and v_mag <= MAX_V_MAG and sun_alt <= MAX_SUN_ALTITUDE and \
                 moon_dist >= MIN_MOON_DIST:
                 if max_mp_alt is None:
@@ -191,12 +191,15 @@ def extract_mp_data(html_lines, mp_block_limits):
                     this_mp_alt_is_max_so_far = (mp_alt > max_mp_alt)
                 if this_mp_alt_is_max_so_far:
                     max_mp_alt = mp_alt
-                    mp_dict['v_mag'] = v_mag
-                    mp_dict['motion'] = motion
-                    mp_dict['mp_alt'] = mp_alt
                     mp_dict['utc'] = ' '.join(line_split[0:4])
                     mp_dict['ra'] = ':'.join(line_split[4:7])
                     mp_dict['dec'] = ':'.join(line_split[7:10])
+                    mp_dict['mp_alt'] = mp_alt
+                    mp_dict['v_mag'] = v_mag
+                    mp_dict['motion'] = float(line_split[15])
+                    mp_dict['motion_pa'] = float(line_split[16])
+                    mp_dict['moon_phase'] = float(line_split[20])
+                    mp_dict['moon_alt'] = float(line_split[22])
                     uncertainty_raw_url = line_split[-1]
     if mp_dict.get('v_mag', None) is not None:
         uncertainty = get_uncertainty(uncertainty_raw_url)
