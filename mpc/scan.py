@@ -42,12 +42,33 @@ PAYLOAD_DICT_TEMPLATE = OrderedDict([
 MAX_MP_PER_HTML = 100
 MPC_URL_STUB = 'https://cgi.minorplanetcenter.net/cgi-bin/mpeph2.cgi/?'
 GET_HEADER = {'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:64.0) Gecko/20100101 Firefox/64.0'}
-MIN_TABLE_WORDS = 25
-MIN_ALTITUDE = 30
+MIN_TABLE_WORDS = 25  # any line with this many white-space-delimited words presumed an ephem table line.
+MIN_MP_ALTITUDE = 40
 MAX_SUN_ALTITUDE = -12
-MAX_V_MAG = 19.0  # slightly optimistic for 3-min exposure, but this would be through Clear filter (not V).
+MAX_V_MAG = 19.0  # requires 3 x 5-min stack in R, but really this will be through Clear filter (not R).
 MIN_UNCERTAINTY = 2  # minimum orbit uncertainty to consider following up (in arcseconds).
-MIN_MOON_DIST = 30
+MIN_MOON_DIST = 45
+R_MAG_FOR_EXPOSURE = 13.4
+DF_COLUMN_ORDER = ['number', 'name', 'code', 'last_obs', 'status', 'uncert', 'v_mag',
+                   'motion', 'motion_pa', 'mp_alt', 'moon_phase', 'moon_alt',
+                   'ra', 'dec', 'utc', 'comments', 'roster']
+
+PET_MPS = [(588, 'Achilles'),
+           (911, 'Agamemnon'),
+           (1404, 'Ajax'),
+           (209, 'Dido'),
+           (435, 'Ella'),
+           (4954, 'Eric'),
+           (23989, 'Farpoint'),
+           (2415, 'Ganesa'),
+           (1309, 'Hyperborea'),
+           (3124, 'Kansas'),
+           (2278, 'Pannekoek'),
+           (6480, 'Scarlatti'),
+           (54439, 'Topeka'),
+           (2554, 'Skiff')]
+
+PET_KEYWORDS = ['farpoint', 'eskridge', 'hug', 'dose', 'sandlot']
 
 
 def go(mp_start=100000, date_utc=None, max_mps=10000, max_candidates=100):
@@ -70,7 +91,9 @@ def go(mp_start=100000, date_utc=None, max_mps=10000, max_candidates=100):
 
         print(' --> ' + str(len(all_dict_list)))
     print('Done.')
-    return pd.DataFrame(all_dict_list)
+    # This sort order in case LST zero comes in middle of night:
+    df = pd.DataFrame(all_dict_list).reindex(columns=DF_COLUMN_ORDER).sort_values(by=['utc', 'ra'])
+    return df
 
 
 def parse_html_lines(lines):
@@ -78,6 +101,8 @@ def parse_html_lines(lines):
     mp_block_limits = chop_html(lines)
     for limits in mp_block_limits:
         mp_dict = extract_mp_data(lines, limits)
+        if any([v is None for v in mp_dict.values()]):
+            print(mp_dict)
         if mp_dict.get('v_mag', None) is not None:
             mp_dict_list.append(mp_dict)
             # print(mp_dict['number'])
@@ -145,11 +170,13 @@ def extract_mp_data(html_lines, mp_block_limits):
     :return: dict of MP data, keys=number, name, code, last_obs, status, v_mag, motion, mp_alt.
     """
     mp_dict = dict()
+    mp_dict['comments'] = ''
+    mp_is_pet = False
 
     # Handle one-per-MP items:
     for i_line in range(mp_block_limits[0], mp_block_limits[1]):
         line = html_lines[i_line]
-        if line.strip().startswith('<b>('):
+        if line.strip().startswith('<b>'):
             mp_dict['number'] = line.split(')')[0].split('(')[-1].strip()
             mp_dict['name'] = line.split(')')[-1].split('<')[0].strip()
         if line.strip().startswith('Last observed on'):
@@ -163,6 +190,17 @@ def extract_mp_data(html_lines, mp_block_limits):
                 mp_dict['status'] = 'no'
             if line.strip().split('>')[3].strip().lower().startswith('useful'):
                 mp_dict['status'] = 'USEFUL'
+        if 'discovery site' in line.lower():
+            this_site = line.strip().split(':', maxsplit=1)[1].strip()
+            if this_site.lower() in PET_KEYWORDS:
+                mp_dict['comments'] = mp_dict['comments'] + this_site + '; '
+                mp_is_pet = True
+        if 'discoverer(s)' in line.lower():
+            discoverer = line.strip().split(':', maxsplit=1)[1].strip()
+            if any([p in discoverer.lower() for p in PET_KEYWORDS]):
+                mp_dict['comments'] = mp_dict['comments'] + discoverer + '; '
+                mp_is_pet = True
+
     mp_dict_short = mp_dict.copy()
 
     # Handle items in ephemeris table. Use line with highest altitude:
@@ -183,8 +221,9 @@ def extract_mp_data(html_lines, mp_block_limits):
             v_mag = float(line_split[14])
             sun_alt = float(line_split[19])
             moon_dist = float(line_split[21])
-            if mp_alt >= MIN_ALTITUDE and v_mag <= MAX_V_MAG and sun_alt <= MAX_SUN_ALTITUDE and \
-                moon_dist >= MIN_MOON_DIST:
+            moon_alt = float(line_split[22])
+            if mp_is_pet or (mp_alt >= MIN_MP_ALTITUDE and v_mag <= MAX_V_MAG and sun_alt <= MAX_SUN_ALTITUDE and \
+                (moon_dist >= MIN_MOON_DIST or moon_alt < 0)):
                 if max_mp_alt is None:
                     this_mp_alt_is_max_so_far = True
                 else:
@@ -194,17 +233,23 @@ def extract_mp_data(html_lines, mp_block_limits):
                     mp_dict['utc'] = ' '.join(line_split[0:4])
                     mp_dict['ra'] = ':'.join(line_split[4:7])
                     mp_dict['dec'] = ':'.join(line_split[7:10])
-                    mp_dict['mp_alt'] = mp_alt
-                    mp_dict['v_mag'] = v_mag
-                    mp_dict['motion'] = float(line_split[15])
-                    mp_dict['motion_pa'] = float(line_split[16])
-                    mp_dict['moon_phase'] = float(line_split[20])
-                    mp_dict['moon_alt'] = float(line_split[22])
+                    mp_dict['mp_alt'] = '{:d}'.format(round(mp_alt))
+                    mp_dict['v_mag'] = '{:.1f}'.format(v_mag)
+                    mp_dict['motion'] = line_split[15]
+                    mp_dict['motion_pa'] = line_split[16]
+                    mp_dict['moon_phase'] = line_split[20]
+                    mp_dict['moon_alt'] = '{:d}'.format(round(moon_alt))
+                    mp_dict['roster'] = 'IMAGE MP_' + mp_dict['number'].zfill(6) + \
+                                        '  R=' + str(R_MAG_FOR_EXPOSURE) + '(1)' + \
+                                        '  ' + mp_dict['ra'] +\
+                                        '  ' + mp_dict['dec']
                     uncertainty_raw_url = line_split[-1]
+    if mp_dict['comments'] == '':
+        mp_dict['comments'] = '-'
     if mp_dict.get('v_mag', None) is not None:
         uncertainty = get_uncertainty(uncertainty_raw_url)
-        if uncertainty >= MIN_UNCERTAINTY:
-            mp_dict['uncert'] = uncertainty
+        if (uncertainty >= MIN_UNCERTAINTY) or mp_is_pet:
+            mp_dict['uncert'] = '{:.1f}'.format(uncertainty)
         else:
             mp_dict = mp_dict_short
     return mp_dict
@@ -228,7 +273,7 @@ def get_uncertainty(raw_url):
                 this_uncertainty_2 = float(words[0])**2 + float(words[1])**2
                 uncertainties_2.append(this_uncertainty_2)
     uncertainties_2.sort(reverse=True)  # in-place.
-    return sqrt(uncertainties_2[0] + uncertainties_2[1])
+    return sqrt((uncertainties_2[0] + uncertainties_2[1])/2.0)
 
 
 def t():
@@ -255,41 +300,3 @@ def web(start=200000, n=50, date='20181201'):
 if __name__ == "__main__":
     get_one_html()
 
-
-# *******************************************************************************************
-    # for i_html in range(100):  # limit number of calls to MPC to get this done:
-    #     if i_html > 0:
-    #         sleep(randint(3, 7))  # delay for 3 to 7 seconds (playing nicely with MPC server).
-    #     this_dict_list = scan_one_html(html_start, date)
-    #     if len(all_dict_list) >= MAX_MP_PER_HTML:
-    #         break
-    #     all_dict_list.extend(this_dict_list)
-    #     print(str(i_html) + ' ' +
-    #           str(html_start) + '  + ' +
-    #           str(len(this_dict_list)) + '   total: ' +
-    #           str(len(all_dict_list)))
-    #     html_start += MAX_MP_PER_HTML
-    # all_dict_list = all_dict_list[:MAX_MP_PER_HTML]  # truncate if we got a few more than needed.
-    #
-    # # Construct URL and display condensed MPC results in browser:
-    # payload_dict = PAYLOAD_DICT_TEMPLATE.copy()
-    # mp_list = [item['number'] for item in all_dict_list]
-    # payload_dict['TextArea'] = '%0D%0A'.join(mp_list)
-    # payload_dict['d'] = date
-    # payload_dict['long'] = payload_dict['long'].replace("+", "%2B")  # make safe
-    # payload_dict['lat'] = payload_dict['lat'].replace("+", "%2B")    # make safe
-    # payload_string = '&'.join([k + '=' + v for (k, v) in payload_dict.items()])
-    # url = MPC_URL_STUB + payload_string
-    # open_new_tab(url)
-#
-#
-# def scan_one_html(mp_start=100000, date='20181125'):
-#     mp_dict_list = []
-#     lines = get_one_html(start=mp_start, date=date)
-#     mp_block_limits = chop_html(lines)
-#     for limits in mp_block_limits:
-#         mp_dict = extract_mp_data(lines, limits)
-#         if mp_dict.get('v_mag', None) is not None:
-#             mp_dict_list.append(mp_dict)
-#             print(mp_dict['number'])
-#     return mp_dict_list
