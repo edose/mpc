@@ -5,7 +5,7 @@ import os
 from random import randint
 from time import sleep
 from webbrowser import open_new_tab
-from math import sqrt
+from math import sqrt, log, exp
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -46,49 +46,101 @@ MIN_TABLE_WORDS = 25  # any line with this many white-space-delimited words pres
 MIN_MP_ALTITUDE = 40
 MAX_SUN_ALTITUDE = -12
 MAX_V_MAG = 19.0  # requires 3 x 5-min stack in R, but really this will be through Clear filter (not R).
-MIN_UNCERTAINTY = 2  # minimum orbit uncertainty to consider following up (in arcseconds).
+MIN_UNCERTAINTY = 2.1  # minimum orbit uncertainty to consider following up (in arcseconds).
 MIN_MOON_DIST = 45
-R_MAG_FOR_EXPOSURE = 13.4
-DF_COLUMN_ORDER = ['number', 'name', 'code', 'last_obs', 'status', 'uncert', 'v_mag',
+DF_COLUMN_ORDER = ['number', 'name', 'score', 'code', 'last_obs', 'status', 'uncert', 'v_mag',
                    'motion', 'motion_pa', 'mp_alt', 'moon_phase', 'moon_alt',
                    'ra', 'dec', 'utc', 'comments', 'roster']
 
-PET_MPS = [(588, 'Achilles'),
-           (911, 'Agamemnon'),
-           (1404, 'Ajax'),
-           (209, 'Dido'),
-           (435, 'Ella'),
-           (4954, 'Eric'),
-           (23989, 'Farpoint'),
-           (2415, 'Ganesa'),
-           (1309, 'Hyperborea'),
-           (3124, 'Kansas'),
-           (2278, 'Pannekoek'),
-           (6480, 'Scarlatti'),
-           (54439, 'Topeka'),
-           (2554, 'Skiff')]
+# PET_MPS = [(588, 'Achilles'),
+#            (911, 'Agamemnon'),
+#            (1404, 'Ajax'),
+#            (209, 'Dido'),
+#            (435, 'Ella'),
+#            (4954, 'Eric'),
+#            (23989, 'Farpoint'),
+#            (2415, 'Ganesa'),
+#            (1309, 'Hyperborea'),
+#            (3124, 'Kansas'),
+#            (2278, 'Pannekoek'),
+#            (6480, 'Scarlatti'),
+#            (54439, 'Topeka'),
+#            (2554, 'Skiff')]
 
 PET_KEYWORDS = ['farpoint', 'eskridge', 'hug', 'dose', 'sandlot']
 
+UNCERTAINTY_TARGET = 0.5  # arcseconds below which uncertainty is presumed not to be reduced
+TARGET_OVERHEAD = 60  # seconds to start new target
+IMAGE_OVERHEAD = 19  # seconds to start, download, solve new image
+PROCESSING_OVERHEAD = 300  # penalty (seconds) for processing data from one target
+EXP_TIME_TABLE = [(16, 120), (17, 240), (18, 420), (19, 600)]  # entry = (v_mag, exp_time in sec).
+MP_FILTER_NAME = 'Clear'
 
-def go(mp_start=100000, date_utc=None, max_mps=10000, max_candidates=100):
+
+def calc_exp_time(v_mag):
+    # Check for outside limits:
+    if v_mag < EXP_TIME_TABLE[0][0]:
+        return EXP_TIME_TABLE[0][1]
+    n = len(EXP_TIME_TABLE)
+    # Check for equals an entry:
+    if v_mag > EXP_TIME_TABLE[n-1][0]:
+        return EXP_TIME_TABLE[n-1][1]
+    for (v_mag_i, t_i) in EXP_TIME_TABLE:
+        if v_mag == v_mag_i:
+            return t_i
+    # Usual case: linear interpolation in mag (& thus in log(i)):
+    for i, entry in enumerate(EXP_TIME_TABLE[:-1]):
+        v_mag_i, t_i = entry
+        v_mag_next, t_next = EXP_TIME_TABLE[i + 1]
+        if v_mag < v_mag_next:
+            slope = log(t_next / t_i) / (v_mag_next - v_mag_i)
+            log_t = log(t_i) + (v_mag - v_mag_i) * slope
+            return exp(log_t)
+
+
+def calc_score(v_mag, uncert):
+    # benefit is roughly: improvement in arcsec uncertainty.
+    # cost is roughly hours of scope+user time.
+    benefit = uncert - UNCERTAINTY_TARGET
+    cost_in_hours = (3 * (TARGET_OVERHEAD + 3 * (calc_exp_time(v_mag) + IMAGE_OVERHEAD)) +
+                       PROCESSING_OVERHEAD) / 3600.0
+    return benefit / cost_in_hours
+
+
+MIN_SCORE = calc_score(v_mag=18, uncert=4)  # scores less than this do not get included.
+# MIN_SCORE = 0  # for test only
+
+
+def go(mp_list=None, mp_start=100000, date_utc=None, max_mps=10000, max_candidates=100):
+    print('min score =', '{:.1f}'.format(MIN_SCORE))
     if date_utc is None:
         target_date = datetime.now(timezone.utc) + timedelta(days=1)
         date_string = '{0:04d}{1:02d}{2:02d}'.format(target_date.year, target_date.month, target_date.day)
     else:
         date_string = date_utc
     all_dict_list = []
-    html_base = mp_start
+    first_index_next_html = 0
     last_mp = mp_start + max_mps - 1
-    while html_base <= last_mp and len(all_dict_list) < max_candidates:
-        n_mps_this_html = min(last_mp - html_base + 1, MAX_MP_PER_HTML)
-        print(str(html_base), str(html_base + n_mps_this_html - 1), str(n_mps_this_html),
-              end='', flush=True)
-        lines = get_one_html(start=html_base, n=n_mps_this_html, date=date_string)
+    while len(all_dict_list) < max_candidates:
+        if mp_list is not None:
+            mp_list_next_html = mp_list[first_index_next_html:][:100]
+            n_mps_this_html = len(mp_list_next_html)
+            if n_mps_this_html >= 1:
+                print(str(n_mps_this_html) + ' MPs', end='', flush=True)
+        else:
+            n_mps_this_html = min(last_mp - (mp_start + first_index_next_html) + 1, MAX_MP_PER_HTML)
+            mp_list_next_html = list(range(mp_start + first_index_next_html,
+                                           mp_start + first_index_next_html + n_mps_this_html))
+            if n_mps_this_html >= 1:
+                print(str(mp_list_next_html[0]), str(mp_list_next_html[-1]), str(n_mps_this_html),
+                    end='', flush=True)
+        if n_mps_this_html <= 0:
+            break
+        lines = get_one_html_from_list(mp_list_next_html, date=date_string)
         html_dict_list = parse_html_lines(lines)
+        # html_dict_list = mp_list_next_html[0:2]  # TEST ONLY
         all_dict_list.extend(html_dict_list)
-        html_base += MAX_MP_PER_HTML
-
+        first_index_next_html += n_mps_this_html
         print(' --> ' + str(len(all_dict_list)))
     print('Done.')
     # This sort order in case LST zero comes in middle of night:
@@ -103,20 +155,30 @@ def parse_html_lines(lines):
         mp_dict = extract_mp_data(lines, limits)
         if any([v is None for v in mp_dict.values()]):
             print(mp_dict)
-        if mp_dict.get('v_mag', None) is not None:
-            mp_dict_list.append(mp_dict)
-            # print(mp_dict['number'])
-            # print(mp_dict)
+        if mp_dict.get('v_mag', None) is not None and mp_dict.get('uncert', None) is not None:
+            score = calc_score(float(mp_dict['v_mag']), float(mp_dict['uncert']))
+            if score > MIN_SCORE:
+                mp_dict_list.append(mp_dict)
+                # print(mp_dict['number'])
+                # print(mp_dict)
     return mp_dict_list
 
 
-def get_one_html(start=200000, n=MAX_MP_PER_HTML, date='20181122'):
+def get_one_html_contiguous(start=200000, n=MAX_MP_PER_HTML, date='20181122'):
     """ Gets MPC HTML text, returns list of strings """
     payload_dict = PAYLOAD_DICT_TEMPLATE.copy()
 
     # Construct TextArea field:
     mp_list = [str(i) for i in range(start, start + n)]
-    text_area = '%0D%0A'.join(mp_list)
+    return get_one_html_from_list(mp_list, date)
+
+
+def get_one_html_from_list(mp_list=None, date='20181122'):
+    """ Gets MPC HTML text, returns list of strings """
+    payload_dict = PAYLOAD_DICT_TEMPLATE.copy()
+
+    # Construct TextArea field:
+    text_area = '%0D%0A'.join([str(mp) for mp in mp_list])
     payload_dict['TextArea'] = text_area
 
     payload_dict['d'] = date
@@ -222,8 +284,8 @@ def extract_mp_data(html_lines, mp_block_limits):
             sun_alt = float(line_split[19])
             moon_dist = float(line_split[21])
             moon_alt = float(line_split[22])
-            if mp_is_pet or (mp_alt >= MIN_MP_ALTITUDE and v_mag <= MAX_V_MAG and sun_alt <= MAX_SUN_ALTITUDE and \
-                (moon_dist >= MIN_MOON_DIST or moon_alt < 0)):
+            if (mp_alt >= MIN_MP_ALTITUDE and v_mag <= MAX_V_MAG and sun_alt <= MAX_SUN_ALTITUDE and
+               (moon_dist >= MIN_MOON_DIST or moon_alt < 0)):
                 if max_mp_alt is None:
                     this_mp_alt_is_max_so_far = True
                 else:
@@ -239,8 +301,9 @@ def extract_mp_data(html_lines, mp_block_limits):
                     mp_dict['motion_pa'] = line_split[16]
                     mp_dict['moon_phase'] = line_split[20]
                     mp_dict['moon_alt'] = '{:d}'.format(round(moon_alt))
+                    exp_time = calc_exp_time(v_mag)
                     mp_dict['roster'] = 'IMAGE MP_' + mp_dict['number'].zfill(6) + \
-                                        '  R=' + str(R_MAG_FOR_EXPOSURE) + '(1)' + \
+                                        '  ' + MP_FILTER_NAME + '={:.0f}'.format(exp_time) + 'sec(3)' + \
                                         '  ' + mp_dict['ra'] +\
                                         '  ' + mp_dict['dec']
                     uncertainty_raw_url = line_split[-1]
@@ -248,8 +311,9 @@ def extract_mp_data(html_lines, mp_block_limits):
         mp_dict['comments'] = '-'
     if mp_dict.get('v_mag', None) is not None:
         uncertainty = get_uncertainty(uncertainty_raw_url)
-        if (uncertainty >= MIN_UNCERTAINTY) or mp_is_pet:
+        if uncertainty >= MIN_UNCERTAINTY:
             mp_dict['uncert'] = '{:.1f}'.format(uncertainty)
+            mp_dict['score'] = '{:.1f}'.format(calc_score(float(mp_dict['v_mag']), uncertainty))
         else:
             mp_dict = mp_dict_short
     return mp_dict
@@ -286,7 +350,7 @@ def t():
 
 
 def web(start=200000, n=50, date='20181201'):
-    lines = get_one_html(start, n, date)
+    lines = get_one_html_contiguous(start, n, date)
     mp_block_limits = chop_html(lines)
     data = []
     for limits in mp_block_limits:
@@ -298,5 +362,5 @@ def web(start=200000, n=50, date='20181201'):
 
 
 if __name__ == "__main__":
-    get_one_html()
+    get_one_html_contiguous()
 
