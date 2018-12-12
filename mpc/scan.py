@@ -10,6 +10,11 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 import pandas as pd
+import astropy.units as u
+from astropy.time import Time
+from astropy.coordinates import SkyCoord
+from astroplan import Observer
+
 
 MPC_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -21,9 +26,10 @@ PAYLOAD_DICT_TEMPLATE = OrderedDict([
     ('i', '30'),  # interval between ephemerides (str of integer)
     ('u', 'm'),  # units of interval; 'h' for hours, 'd' for days, 'm' for minutes
     ('uto', '0'),  # UTC offset in hours if u=d
+    ('c', ''),   # observatory code
     ('long', '-107.55'),  # longitude in deg; make plus sign safe in code below
     ('lat', '+35.45'),  # latitude in deg; make plus sign safe in code below
-    ('alt', '2200'),  # altitude in m
+    ('alt', '2200'),  # elevation (MPC "altitude") in m
     ('raty', 'a'),  # 'a' = full sexigesimal, 'x' for decimal degrees
     ('s', 't'),  # N/A (total motion and direction)
     ('m', 'm'),  # N/A (motion in arcsec/minute)
@@ -40,17 +46,18 @@ PAYLOAD_DICT_TEMPLATE = OrderedDict([
     ('js', 'f')  # N/A
 ])
 MAX_MP_PER_HTML = 100
-MPC_URL_STUB = 'https://cgi.minorplanetcenter.net/cgi-bin/mpeph2.cgi/?'
+MPC_URL_STUB = 'https://cgi.minorplanetcenter.net/cgi-bin/mpeph2.cgi'
 GET_HEADER = {'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:64.0) Gecko/20100101 Firefox/64.0'}
 MIN_TABLE_WORDS = 25  # any line with this many white-space-delimited words presumed an ephem table line.
 MIN_MP_ALTITUDE = 40
 MAX_SUN_ALTITUDE = -12
-MAX_V_MAG = 19.0  # requires 3 x 5-min stack in R, but really this will be through Clear filter (not R).
+MAX_V_MAG = 19.0  # in Clear filter
 MIN_UNCERTAINTY = 2.1  # minimum orbit uncertainty to consider following up (in arcseconds).
 MIN_MOON_DIST = 45
-DF_COLUMN_ORDER = ['number', 'name', 'score', 'code', 'last_obs', 'status', 'uncert', 'v_mag',
-                   'motion', 'motion_pa', 'mp_alt', 'moon_phase', 'moon_alt',
-                   'ra', 'dec', 'utc', 'comments', 'roster']
+DF_COLUMN_ORDER = ['number', 'score', 'transit', 'acp', 'minutes', 'uncert', 'v_mag',
+                   'comments', 'last_obs', 'motion',
+                   'name', 'code', 'status', 'motion_pa', 'mp_alt',
+                   'moon_phase', 'moon_alt', 'ra', 'dec', 'utc']
 
 # PET_MPS = [(588, 'Achilles'),
 #            (911, 'Agamemnon'),
@@ -69,12 +76,19 @@ DF_COLUMN_ORDER = ['number', 'name', 'score', 'code', 'last_obs', 'status', 'unc
 
 PET_KEYWORDS = ['farpoint', 'eskridge', 'hug', 'dose', 'sandlot']
 
-UNCERTAINTY_TARGET = 0.5  # arcseconds below which uncertainty is presumed not to be reduced
+UNCERTAINTY_AFTER_OBS = 0.5  # arcseconds below which uncertainty is presumed not to be reduced
 TARGET_OVERHEAD = 60  # seconds to start new target
 IMAGE_OVERHEAD = 19  # seconds to start, download, solve new image
 PROCESSING_OVERHEAD = 300  # penalty (seconds) for processing data from one target
-EXP_TIME_TABLE = [(16, 120), (17, 240), (18, 420), (19, 600)]  # entry = (v_mag, exp_time in sec).
+EXP_TIME_TABLE = [(16, 40), (17, 70), (18, 140), (19, 300)]  # entry = (v_mag, exp_time sec).
 MP_FILTER_NAME = 'Clear'
+
+THIS_LONGITUDE = float(PAYLOAD_DICT_TEMPLATE['long'])
+THIS_LATITUDE = float(PAYLOAD_DICT_TEMPLATE['lat'])
+THIS_ELEVATION = float(PAYLOAD_DICT_TEMPLATE['alt'])  # MPC's "alt" is really elevation ASL.
+THIS_LOCATION = Observer(latitude=THIS_LATITUDE,
+                         longitude=THIS_LONGITUDE,
+                         elevation=THIS_ELEVATION * u.m)
 
 
 def calc_exp_time(v_mag):
@@ -98,12 +112,15 @@ def calc_exp_time(v_mag):
             return exp(log_t)
 
 
+def calc_seconds_per_stack(v_mag):
+    return TARGET_OVERHEAD + 3 * (calc_exp_time(v_mag) + IMAGE_OVERHEAD)
+
+
 def calc_score(v_mag, uncert):
     # benefit is roughly: improvement in arcsec uncertainty.
     # cost is roughly hours of scope+user time.
-    benefit = uncert - UNCERTAINTY_TARGET
-    cost_in_hours = (3 * (TARGET_OVERHEAD + 3 * (calc_exp_time(v_mag) + IMAGE_OVERHEAD)) +
-                       PROCESSING_OVERHEAD) / 3600.0
+    benefit = uncert - UNCERTAINTY_AFTER_OBS
+    cost_in_hours = (3 * calc_seconds_per_stack(v_mag) + PROCESSING_OVERHEAD) / 3600.0
     return benefit / cost_in_hours
 
 
@@ -112,12 +129,13 @@ MIN_SCORE = calc_score(v_mag=18, uncert=4)  # scores less than this do not get i
 
 
 def go(mp_list=None, mp_start=100000, date_utc=None, max_mps=10000, max_candidates=100):
-    print('min score =', '{:.1f}'.format(MIN_SCORE))
+    print('minimum score =', '{:.1f}'.format(MIN_SCORE))
     if date_utc is None:
         target_date = datetime.now(timezone.utc) + timedelta(days=1)
         date_string = '{0:04d}{1:02d}{2:02d}'.format(target_date.year, target_date.month, target_date.day)
     else:
         date_string = date_utc
+    print('UTC date =', date_string)
     all_dict_list = []
     first_index_next_html = 0
     last_mp = mp_start + max_mps - 1
@@ -144,8 +162,31 @@ def go(mp_list=None, mp_start=100000, date_utc=None, max_mps=10000, max_candidat
         print(' --> ' + str(len(all_dict_list)))
     print('Done.')
     # This sort order in case LST zero comes in middle of night:
-    df = pd.DataFrame(all_dict_list).reindex(columns=DF_COLUMN_ORDER).sort_values(by=['utc', 'ra'])
+    df = pd.DataFrame(all_dict_list).reindex(columns=DF_COLUMN_ORDER).sort_values(by=['transit', 'ra'])
     return df
+
+
+def combine(df_list):
+    return pd.concat(df_list, ignore_index=True).sort_values(by=['transit', 'ra'])
+
+
+def append(df1, df2):
+    return df1.append(df2, ignore_index=True).sort_values(by=['transit', 'ra'])
+
+
+def get_transit_time(ra, dec, date_string):
+    """  Return UTC transit time for obj at RA,Dec for ~midnight on date_string date.
+    :param ra: (degrees) [float]
+    :param dec: (degrees) [float]
+    :param date_string: e.g., '20181211' [string]
+    :return:
+    """
+    year = int(date_string[0:4])
+    month = int(date_string[4:6])
+    day = int(date_string[6:8])
+    dt = datetime(year, month, day, 6)
+    coord = SkyCoord(ra, dec, unit='deg')
+    return THIS_LOCATION.target_meridian_transit_time(dt, coord).to_datetime()
 
 
 def parse_html_lines(lines):
@@ -187,13 +228,20 @@ def get_one_html_from_list(mp_list=None, date='20181122'):
     payload_dict['long'] = payload_dict['long'].replace("+", "%2B")
     payload_dict['lat'] = payload_dict['lat'].replace("+", "%2B")
 
-    # Construct URL and header for GET call:
+    # ##################  GET VERSION.  ######################
+    # # Construct URL and header for GET call:
     payload_string = '&'.join([k + '=' + v for (k, v) in payload_dict.items()])
-    url = MPC_URL_STUB + payload_string
-
+    url = MPC_URL_STUB + '/?' + payload_string
     # Make GET call, parse return text.
-    # print(url)
     r = requests.get(url, headers=GET_HEADER)
+    # ################# End GET VERSION. #####################
+
+    # ##################  POST VERSION.  ######################
+    # url = MPC_URL_STUB
+    # # Make POST call, parse return text.
+    # r = requests.get(url, data=payload_dict)
+    # ################# End GET VERSION. #####################
+
     return r.text.splitlines()
 
 
@@ -301,12 +349,19 @@ def extract_mp_data(html_lines, mp_block_limits):
                     mp_dict['motion_pa'] = line_split[16]
                     mp_dict['moon_phase'] = line_split[20]
                     mp_dict['moon_alt'] = '{:d}'.format(round(moon_alt))
+                    mp_dict['minutes'] = '{:d}'.format(round(calc_seconds_per_stack(v_mag) / 60.0))
                     exp_time = calc_exp_time(v_mag)
-                    mp_dict['roster'] = 'IMAGE MP_' + mp_dict['number'].zfill(6) + \
+                    mp_dict['acp'] = 'IMAGE MP_' + mp_dict['number'].zfill(6) + \
                                         '  ' + MP_FILTER_NAME + '={:.0f}'.format(exp_time) + 'sec(3)' + \
                                         '  ' + mp_dict['ra'] +\
                                         '  ' + mp_dict['dec']
-                    uncertainty_raw_url = line_split[-1]
+                    uncertainty_raw_url = [word for word in line_split
+                                           if 'cgi.minorplanetcenter.net/cgi' in word][1]
+                    ra_degrees = ra_as_degrees(mp_dict['ra'])
+                    dec_degrees = dec_as_degrees(mp_dict['dec'])
+                    date_string = ''.join(line_split[0:3])
+                    transit_time = get_transit_time(ra_degrees, dec_degrees, date_string)
+                    mp_dict['transit'] = '{0:02d}{1:02d}'.format(transit_time.hour, transit_time.minute)
     if mp_dict['comments'] == '':
         mp_dict['comments'] = '-'
     if mp_dict.get('v_mag', None) is not None:
@@ -321,7 +376,8 @@ def extract_mp_data(html_lines, mp_block_limits):
 
 def get_uncertainty(raw_url):
     url = raw_url.split('href=\"')[-1].split('&OC')[0]
-    # print(url)
+    # print(url)  # for test
+    # return 1    # for test
     lines = requests.get(url, headers=GET_HEADER).text.splitlines()
     pre_line_found = False
     uncertainties_2 = []
@@ -340,27 +396,88 @@ def get_uncertainty(raw_url):
     return sqrt((uncertainties_2[0] + uncertainties_2[1])/2.0)
 
 
-def t():
-    lines = get_html_from_file()
-    mp_block_limits = chop_html(lines)
-    for limits in mp_block_limits:
-        mp_dict = extract_mp_data(lines, limits)
-        #if mp_dict.get('v_mag') is not None:
-        print(mp_dict)
+def ra_as_degrees(ra_string):
+    """
+    :param ra_string: string in either full hex ("12:34:56.7777" or "12 34 56.7777"),
+               or degrees ("234.55")
+    :return float of Right Ascension in degrees between 0 and 360.
+    """
+    ra_list = parse_hex(ra_string)
+    if len(ra_list) == 1:
+        ra_degrees = float(ra_list[0])  # input assumed to be in degrees.
+    elif len(ra_list) == 2:
+        ra_degrees = 15 * (float(ra_list[0]) + float(ra_list[1])/60.0)  # input assumed in hex.
+    else:
+        ra_degrees = 15 * (float(ra_list[0]) + float(ra_list[1]) / 60.0 +
+                           float(ra_list[2])/3600.0)  # input assumed in hex.
+    if (ra_degrees < 0) | (ra_degrees > 360):
+        ra_degrees = None
+    return ra_degrees
 
 
-def web(start=200000, n=50, date='20181201'):
-    lines = get_one_html_contiguous(start, n, date)
-    mp_block_limits = chop_html(lines)
-    data = []
-    for limits in mp_block_limits:
-        mp_dict = extract_mp_data(lines, limits)
-        data.append(mp_dict)
-        print(mp_dict['number'])
-    for mp_dict in data:
-        print(mp_dict)
+def dec_as_degrees(dec_string):
+    """ Input: string in either full hex ("-12:34:56.7777") or degrees ("-24.55")
+        Returns: float of Declination in degrees, required to be -90 to +90, inclusive.
+    """
+    dec_degrees = hex_degrees_as_degrees(dec_string)
+    if (dec_degrees < -90) | (dec_degrees > +90):
+        dec_degrees = None
+    return dec_degrees
 
 
-if __name__ == "__main__":
-    get_one_html_contiguous()
+def hex_degrees_as_degrees(hex_degrees_string):
+    """
+    :param hex_degrees_string: string in either full hex ("-12:34:56.7777", or "-12 34 56.7777"),
+        or degrees ("-24.55")
+    :return float of degrees (not limited)
+    """
+    # dec_list = hex_degrees_string.split(":")
+    dec_list = parse_hex(hex_degrees_string)
+    # dec_list = [dec.strip() for dec in dec_list]
+    if dec_list[0].startswith("-"):
+        sign = -1
+    else:
+        sign = 1
+    if len(dec_list) == 1:
+        dec_degrees = float(dec_list[0])  # input assumed to be in degrees.
+    elif len(dec_list) == 2:
+        dec_degrees = sign * (abs(float(dec_list[0])) + float(dec_list[1])/60.0)  # input is hex.
+    else:
+        dec_degrees = sign * (abs(float(dec_list[0])) + float(dec_list[1]) / 60.0 +
+                              float(dec_list[2])/3600.0)  # input is hex.
+    return dec_degrees
+
+
+def parse_hex(hex_string):
+    """
+    Helper function for RA and Dec parsing, takes hex string, returns list of floats.
+    :param hex_string: string in either full hex ("12:34:56.7777" or "12 34 56.7777"),
+               or degrees ("234.55")
+    :return: list of strings representing floats (hours:min:sec or deg:arcmin:arcsec).
+    """
+    colon_list = hex_string.split(':')
+    space_list = hex_string.split()  # multiple spaces act as one delimiter
+    if len(colon_list) >= len(space_list):
+        return [x.strip() for x in colon_list]
+    return space_list
+
+
+# def t():
+#     lines = get_html_from_file()
+#     mp_block_limits = chop_html(lines)
+#     for limits in mp_block_limits:
+#         mp_dict = extract_mp_data(lines, limits)
+#         print(mp_dict)
+#
+#
+# def web(start=200000, n=50, date='20181201'):
+#     lines = get_one_html_contiguous(start, n, date)
+#     mp_block_limits = chop_html(lines)
+#     data = []
+#     for limits in mp_block_limits:
+#         mp_dict = extract_mp_data(lines, limits)
+#         data.append(mp_dict)
+#         print(mp_dict['number'])
+#     for mp_dict in data:
+#         print(mp_dict)
 
