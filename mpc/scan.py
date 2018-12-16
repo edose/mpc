@@ -7,6 +7,7 @@ from time import sleep
 from webbrowser import open_new_tab
 from math import sqrt, log, exp
 from datetime import datetime, timezone, timedelta
+import webbrowser
 
 import requests
 import pandas as pd
@@ -17,6 +18,9 @@ from astroplan import Observer
 
 
 MPC_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+MPC_HTML_MONTH_CODES = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+                        'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12}
 
 PAYLOAD_DICT_TEMPLATE = OrderedDict([
     ('ty', 'e'),  # e = 'Return Ephemerides'
@@ -54,32 +58,46 @@ MAX_SUN_ALTITUDE = -12
 MAX_V_MAG = 19.0  # in Clear filter
 MIN_UNCERTAINTY = 2.1  # minimum orbit uncertainty to consider following up (in arcseconds).
 MIN_MOON_DIST = 45
-DF_COLUMN_ORDER = ['number', 'score', 'transit', 'acp', 'minutes', 'uncert', 'v_mag',
+DF_COLUMN_ORDER = ['number', 'score', 'transit', 'ACP', 'min9', 'uncert', 'v_mag',
                    'comments', 'last_obs', 'motion',
                    'name', 'code', 'status', 'motion_pa', 'mp_alt',
                    'moon_phase', 'moon_alt', 'ra', 'dec', 'utc']
 
-# PET_MPS = [(588, 'Achilles'),
-#            (911, 'Agamemnon'),
-#            (1404, 'Ajax'),
-#            (209, 'Dido'),
-#            (435, 'Ella'),
-#            (4954, 'Eric'),
-#            (23989, 'Farpoint'),
-#            (2415, 'Ganesa'),
-#            (1309, 'Hyperborea'),
-#            (3124, 'Kansas'),
-#            (2278, 'Pannekoek'),
-#            (6480, 'Scarlatti'),
-#            (54439, 'Topeka'),
-#            (2554, 'Skiff')]
+PET_MPS = [(588, 'Achilles'),
+           (911, 'Agamemnon'),
+           (1404, 'Ajax'),
+           (209, 'Dido'),
+           (435, 'Ella'),
+           (4954, 'Eric'),
+           (23989, 'Farpoint'),
+           (2415, 'Ganesa'),
+           (3124, 'Kansas'),
+           (6480, 'Scarlatti'),
+           (54439, 'Topeka'),
+           (8900, 'AAVSO'),
+           (396, 'Aeolia'),
+           (13053, 'Bertrandrussell'),
+           (121022, 'Galliano'),
+           (100027, 'Hannaharendt'),
+           (33529, 'Henden'),
+           (361450, 'Houellebecq'),
+           (1172, 'Aneas'),
+           (221150, ' Jerryfoote'),
+           (25594, 'Kessler'),
+           (10221, 'Kubrick'),
+           (15072, 'Landolt'),
+           (218692, 'Leesnyder'),
+           (1647, 'Menelaus'),
+           (367732, 'Mikesimonsen'),
+           (1143, 'Odysseus')]
 
 PET_KEYWORDS = ['farpoint', 'eskridge', 'hug', 'dose', 'sandlot']
 
 UNCERTAINTY_AFTER_OBS = 0.5  # arcseconds below which uncertainty is presumed not to be reduced
 TARGET_OVERHEAD = 60  # seconds to start new target
 IMAGE_OVERHEAD = 19  # seconds to start, download, solve new image
-PROCESSING_OVERHEAD = 300  # penalty (seconds) for processing data from one target
+EXPOSURES_PER_BLOCK = 9  # assuming 3 stacks of 3 exposures (thus 9 images taken consecutively).
+PROCESSING_OVERHEAD = 600  # penalty (seconds) for processing data from one target
 EXP_TIME_TABLE = [(16, 40), (17, 70), (18, 140), (19, 300)]  # entry = (v_mag, exp_time sec).
 MP_FILTER_NAME = 'Clear'
 
@@ -112,15 +130,15 @@ def calc_exp_time(v_mag):
             return exp(log_t)
 
 
-def calc_seconds_per_stack(v_mag):
-    return TARGET_OVERHEAD + 3 * (calc_exp_time(v_mag) + IMAGE_OVERHEAD)
+def calc_seconds_per_block(v_mag):
+    return TARGET_OVERHEAD + EXPOSURES_PER_BLOCK * (calc_exp_time(v_mag) + IMAGE_OVERHEAD)
 
 
 def calc_score(v_mag, uncert):
     # benefit is roughly: improvement in arcsec uncertainty.
     # cost is roughly hours of scope+user time.
     benefit = uncert - UNCERTAINTY_AFTER_OBS
-    cost_in_hours = (3 * calc_seconds_per_stack(v_mag) + PROCESSING_OVERHEAD) / 3600.0
+    cost_in_hours = (calc_seconds_per_block(v_mag) + PROCESSING_OVERHEAD) / 3600.0
     return benefit / cost_in_hours
 
 
@@ -128,14 +146,19 @@ MIN_SCORE = calc_score(v_mag=18, uncert=4)  # scores less than this do not get i
 # MIN_SCORE = 0  # for test only
 
 
-def go(mp_list=None, mp_start=100000, date_utc=None, max_mps=10000, max_candidates=100):
-    print('minimum score =', '{:.1f}'.format(MIN_SCORE))
+def go(mp_list=None, mp_start=100000, date_utc=None, max_mps=100, max_candidates=100,
+       keep_useful_only=True, include_old_in_years=1):
+    print('Minimum score =', '{:.1f}'.format(MIN_SCORE))
     if date_utc is None:
-        target_date = datetime.now(timezone.utc) + timedelta(days=1)
-        date_string = '{0:04d}{1:02d}{2:02d}'.format(target_date.year, target_date.month, target_date.day)
+        date_string = next_date_utc()
     else:
         date_string = date_utc
     print('UTC date =', date_string)
+    print('Keep Useful Only = ', str(keep_useful_only))
+    if include_old_in_years is None:
+        print('No inclusion for old obs.')
+    else:
+        print('Include any MP w/last obs >=', str(include_old_in_years), 'years ago.')
     all_dict_list = []
     first_index_next_html = 0
     last_mp = mp_start + max_mps - 1
@@ -151,26 +174,34 @@ def go(mp_list=None, mp_start=100000, date_utc=None, max_mps=10000, max_candidat
                                            mp_start + first_index_next_html + n_mps_this_html))
             if n_mps_this_html >= 1:
                 print(str(mp_list_next_html[0]), str(mp_list_next_html[-1]), str(n_mps_this_html),
-                    end='', flush=True)
+                      end='', flush=True)
         if n_mps_this_html <= 0:
             break
         lines = get_one_html_from_list(mp_list_next_html, date=date_string)
-        html_dict_list = parse_html_lines(lines)
-        # html_dict_list = mp_list_next_html[0:2]  # TEST ONLY
+        html_dict_list = parse_html_lines(lines, keep_useful_only, include_old_in_years)
         all_dict_list.extend(html_dict_list)
         first_index_next_html += n_mps_this_html
         print(' --> ' + str(len(all_dict_list)))
     print('Done.')
     # This sort order in case LST zero comes in middle of night:
     df = pd.DataFrame(all_dict_list).reindex(columns=DF_COLUMN_ORDER).sort_values(by=['transit', 'ra'])
-    return df
+    pd.set_option('display.width', 108)  # default is 80
+    pd.set_option('display.max_colwidth', 100)
+    if len(df) >= 1:
+        print(df.reindex(columns=['score', 'ACP', 'min9', 'last_obs']))
+        return df
+    else:
+        print('No MPs found.')
+        return None
 
 
 def combine(df_list):
+    # Usage: df_20181214 = combine([df1, df2, df3])
     return pd.concat(df_list, ignore_index=True).sort_values(by=['transit', 'ra'])
 
 
 def append(df1, df2):
+    # Usage: df_20181214 = append(df_20181214, df1)
     return df1.append(df2, ignore_index=True).sort_values(by=['transit', 'ra'])
 
 
@@ -189,7 +220,7 @@ def get_transit_time(ra, dec, date_string):
     return THIS_LOCATION.target_meridian_transit_time(dt, coord).to_datetime()
 
 
-def parse_html_lines(lines):
+def parse_html_lines(lines, keep_useful_only=False, include_old_in_years=None):
     mp_dict_list = []
     mp_block_limits = chop_html(lines)
     for limits in mp_block_limits:
@@ -198,10 +229,18 @@ def parse_html_lines(lines):
             print(mp_dict)
         if mp_dict.get('v_mag', None) is not None and mp_dict.get('uncert', None) is not None:
             score = calc_score(float(mp_dict['v_mag']), float(mp_dict['uncert']))
-            if score > MIN_SCORE:
+            useful = 'useful' in mp_dict.get('status', '').lower()
+            if include_old_in_years is None:
+                old_enough = False
+            else:
+                years_old = get_years_old(mp_dict['last_obs'])
+                old_enough = (years_old >= include_old_in_years > 0)
+            worth_including = ((score > MIN_SCORE) or old_enough) and (useful or (not keep_useful_only))
+            if worth_including:
                 mp_dict_list.append(mp_dict)
                 # print(mp_dict['number'])
                 # print(mp_dict)
+
     return mp_dict_list
 
 
@@ -332,8 +371,11 @@ def extract_mp_data(html_lines, mp_block_limits):
             sun_alt = float(line_split[19])
             moon_dist = float(line_split[21])
             moon_alt = float(line_split[22])
-            if (mp_alt >= MIN_MP_ALTITUDE and v_mag <= MAX_V_MAG and sun_alt <= MAX_SUN_ALTITUDE and
-               (moon_dist >= MIN_MOON_DIST or moon_alt < 0)):
+            high_enough = mp_alt >= MIN_MP_ALTITUDE
+            bright_enough = v_mag <= MAX_V_MAG
+            sun_low_enough = sun_alt <= MAX_SUN_ALTITUDE
+            moon_distant_enough = (moon_dist >= MIN_MOON_DIST or moon_alt < 0)
+            if high_enough and bright_enough and sun_low_enough and moon_distant_enough:
                 if max_mp_alt is None:
                     this_mp_alt_is_max_so_far = True
                 else:
@@ -349,12 +391,8 @@ def extract_mp_data(html_lines, mp_block_limits):
                     mp_dict['motion_pa'] = line_split[16]
                     mp_dict['moon_phase'] = line_split[20]
                     mp_dict['moon_alt'] = '{:d}'.format(round(moon_alt))
-                    mp_dict['minutes'] = '{:d}'.format(round(calc_seconds_per_stack(v_mag) / 60.0))
+                    mp_dict['min9'] = '{:d}'.format(round(calc_seconds_per_block(v_mag) / 60.0))
                     exp_time = calc_exp_time(v_mag)
-                    mp_dict['acp'] = 'IMAGE MP_' + mp_dict['number'].zfill(6) + \
-                                        '  ' + MP_FILTER_NAME + '={:.0f}'.format(exp_time) + 'sec(3)' + \
-                                        '  ' + mp_dict['ra'] +\
-                                        '  ' + mp_dict['dec']
                     uncertainty_raw_url = [word for word in line_split
                                            if 'cgi.minorplanetcenter.net/cgi' in word][1]
                     ra_degrees = ra_as_degrees(mp_dict['ra'])
@@ -362,15 +400,19 @@ def extract_mp_data(html_lines, mp_block_limits):
                     date_string = ''.join(line_split[0:3])
                     transit_time = get_transit_time(ra_degrees, dec_degrees, date_string)
                     mp_dict['transit'] = '{0:02d}{1:02d}'.format(transit_time.hour, transit_time.minute)
+                    mp_dict['ACP'] = 'IMAGE MP_' + mp_dict['number'].zfill(6) + \
+                                     '_t' + mp_dict['transit'] + \
+                                     '  ' + MP_FILTER_NAME + '={:.0f}'.format(exp_time) + 'sec(9)' + \
+                                     '  ' + mp_dict['ra'] + \
+                                     '  ' + mp_dict['dec']
     if mp_dict['comments'] == '':
         mp_dict['comments'] = '-'
     if mp_dict.get('v_mag', None) is not None:
         uncertainty = get_uncertainty(uncertainty_raw_url)
-        if uncertainty >= MIN_UNCERTAINTY:
-            mp_dict['uncert'] = '{:.1f}'.format(uncertainty)
-            mp_dict['score'] = '{:.1f}'.format(calc_score(float(mp_dict['v_mag']), uncertainty))
-        else:
-            mp_dict = mp_dict_short
+        mp_dict['uncert'] = '{:.1f}'.format(uncertainty)
+        mp_dict['score'] = '{:.1f}'.format(calc_score(float(mp_dict['v_mag']), uncertainty))
+    else:
+        mp_dict = mp_dict_short
     return mp_dict
 
 
@@ -394,6 +436,60 @@ def get_uncertainty(raw_url):
                 uncertainties_2.append(this_uncertainty_2)
     uncertainties_2.sort(reverse=True)  # in-place.
     return sqrt((uncertainties_2[0] + uncertainties_2[1])/2.0)
+
+
+def html(mp_list=None, mp_start=None, df=None, date_utc=None):
+    if mp_list is None and df is None and mp_start is None:  # sentinel.
+        print('Please provide df= or mp_list= or mp_start.')
+        return
+    if mp_list is not None:
+        pass  # use this.
+    elif mp_start is not None:
+        mp_list = list(range(mp_start, mp_start+100))
+    else:
+        mp_list = df['number']
+    if date_utc is None:
+        date_utc = next_date_utc()
+
+    payload_dict = PAYLOAD_DICT_TEMPLATE.copy()
+    # Construct TextArea field:
+    text_area = '%0D%0A'.join([str(mp) for mp in mp_list])
+    payload_dict['TextArea'] = text_area
+    payload_dict['d'] = date_utc
+    # date = ''.join(df['utc'][0].split()[0:3])
+    # payload_dict['d'] = date
+    # Make longitude and latitude safe (from '+' characters)
+    payload_dict['long'] = payload_dict['long'].replace("+", "%2B")
+    payload_dict['lat'] = payload_dict['lat'].replace("+", "%2B")
+
+    # ##################  GET VERSION.  ######################
+    # # Construct URL and header for GET call:
+    payload_string = '&'.join([str(k) + '=' + str(v) for (k, v) in payload_dict.items()])
+    url = MPC_URL_STUB + '/?' + payload_string
+    webbrowser.open_new(url)
+
+
+def pets(date_utc=None):
+    html([mp for (mp, name) in PET_MPS], date_utc=date_utc)
+
+
+UTILITY_FUNCTIONS___________________________________ = 0
+
+
+def get_years_old(last_obs_string):
+    words = last_obs_string.split()
+    year = int(words[0])
+    month = MPC_HTML_MONTH_CODES[words[1][0:3].lower()]
+    day = int(words[2])
+    dt_obs = datetime(year=year, month=month, day=day, hour=12).replace(tzinfo=timezone.utc)
+    dt_now = datetime.now(timezone.utc)
+    return (dt_now - dt_obs).total_seconds() / 365.25 / 24 / 3600
+
+
+def next_date_utc():
+    target_date = datetime.now(timezone.utc) + timedelta(days=1)
+    date_utc = '{0:04d}{1:02d}{2:02d}'.format(target_date.year, target_date.month, target_date.day)
+    return date_utc
 
 
 def ra_as_degrees(ra_string):
@@ -462,22 +558,5 @@ def parse_hex(hex_string):
     return space_list
 
 
-# def t():
-#     lines = get_html_from_file()
-#     mp_block_limits = chop_html(lines)
-#     for limits in mp_block_limits:
-#         mp_dict = extract_mp_data(lines, limits)
-#         print(mp_dict)
-#
-#
-# def web(start=200000, n=50, date='20181201'):
-#     lines = get_one_html_contiguous(start, n, date)
-#     mp_block_limits = chop_html(lines)
-#     data = []
-#     for limits in mp_block_limits:
-#         mp_dict = extract_mp_data(lines, limits)
-#         data.append(mp_dict)
-#         print(mp_dict['number'])
-#     for mp_dict in data:
-#         print(mp_dict)
+
 
