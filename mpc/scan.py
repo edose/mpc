@@ -58,6 +58,7 @@ MAX_SUN_ALTITUDE = -12
 MAX_V_MAG = 19.0  # in Clear filter
 MIN_UNCERTAINTY = 2.1  # minimum orbit uncertainty to consider following up (in arcseconds).
 MIN_MOON_DIST = 45
+FORCE_INCLUDE_IN_YEARS = 2.0
 DF_COLUMN_ORDER = ['number', 'score', 'transit', 'ACP', 'min9', 'uncert', 'v_mag',
                    'comments', 'last_obs', 'motion',
                    'name', 'code', 'status', 'motion_pa', 'mp_alt',
@@ -89,7 +90,16 @@ PET_MPS = [(588, 'Achilles'),
            (218692, 'Leesnyder'),
            (1647, 'Menelaus'),
            (367732, 'Mikesimonsen'),
-           (1143, 'Odysseus')]
+           (1143, 'Odysseus'),
+           (120218, 'Richardberry'),
+           (13092, 'Schrodinger'),
+           (4856, 'Seaborg'),
+           (19019, 'Sunflower'),
+           (18281, 'Tros'),
+           (22791, 'Twarog'),
+           (13069, 'Umbertoeco'),
+           (340071, 'Vanmunster'),
+           (274301, 'Wikipedia')]
 
 PET_KEYWORDS = ['farpoint', 'eskridge', 'hug', 'dose', 'sandlot']
 
@@ -147,7 +157,7 @@ MIN_SCORE = calc_score(v_mag=18, uncert=4)  # scores less than this do not get i
 
 
 def go(mp_list=None, mp_start=100000, date_utc=None, max_mps=100, max_candidates=100,
-       keep_useful_only=True, include_old_in_years=1):
+       keep_useful_only=True, include_old_in_years=FORCE_INCLUDE_IN_YEARS):
     print('Minimum score =', '{:.1f}'.format(MIN_SCORE))
     if date_utc is None:
         date_string = next_date_utc()
@@ -224,7 +234,7 @@ def parse_html_lines(lines, keep_useful_only=False, include_old_in_years=None):
     mp_dict_list = []
     mp_block_limits = chop_html(lines)
     for limits in mp_block_limits:
-        mp_dict = extract_mp_data(lines, limits)
+        mp_dict = extract_mp_data(lines, limits, keep_useful_only, include_old_in_years)
         if any([v is None for v in mp_dict.values()]):
             print(mp_dict)
         if mp_dict.get('v_mag', None) is not None and mp_dict.get('uncert', None) is not None:
@@ -235,12 +245,17 @@ def parse_html_lines(lines, keep_useful_only=False, include_old_in_years=None):
             else:
                 years_old = get_years_old(mp_dict['last_obs'])
                 old_enough = (years_old >= include_old_in_years > 0)
-            worth_including = ((score > MIN_SCORE) or old_enough) and (useful or (not keep_useful_only))
+            # worth_including = ((score > MIN_SCORE) or old_enough) and (useful or (not keep_useful_only))
+            if old_enough:
+                worth_including = True  # overrides all if so.
+            elif not (not useful and keep_useful_only):  # skip if required to be MPC-useful but is not.
+                worth_including = False
+            else:
+                worth_including = score >= MIN_SCORE
             if worth_including:
                 mp_dict_list.append(mp_dict)
                 # print(mp_dict['number'])
                 # print(mp_dict)
-
     return mp_dict_list
 
 
@@ -312,7 +327,7 @@ def chop_html(html_lines):
     return mp_block_limits
 
 
-def extract_mp_data(html_lines, mp_block_limits):
+def extract_mp_data(html_lines, mp_block_limits, keep_useful_only, include_old_in_years):
     """ Get data out of a HTML text block devoted to one MP.
     :param html_lines:
     :param mp_block_limits:
@@ -320,7 +335,7 @@ def extract_mp_data(html_lines, mp_block_limits):
     """
     mp_dict = dict()
     mp_dict['comments'] = ''
-    mp_is_pet = False
+    mp_dict['status'] = ''  # default in case 'Futher observations?' line is missing (rare).
 
     # Handle one-per-MP items:
     for i_line in range(mp_block_limits[0], mp_block_limits[1]):
@@ -334,7 +349,6 @@ def extract_mp_data(html_lines, mp_block_limits):
             if i_line + 1 < mp_block_limits[1]:
                 mp_dict['code'] = html_lines[i_line + 1].strip().split()[0]
         if 'further observations?' in line.lower():
-            mp_dict['status'] = ''
             if line.strip().split('>')[3].strip().lower().startswith('not necessary'):
                 mp_dict['status'] = 'no'
             if line.strip().split('>')[3].strip().lower().startswith('useful'):
@@ -343,14 +357,22 @@ def extract_mp_data(html_lines, mp_block_limits):
             this_site = line.strip().split(':', maxsplit=1)[1].strip()
             if this_site.lower() in PET_KEYWORDS:
                 mp_dict['comments'] = mp_dict['comments'] + this_site + '; '
-                mp_is_pet = True
         if 'discoverer(s)' in line.lower():
             discoverer = line.strip().split(':', maxsplit=1)[1].strip()
             if any([p in discoverer.lower() for p in PET_KEYWORDS]):
                 mp_dict['comments'] = mp_dict['comments'] + discoverer + '; '
-                mp_is_pet = True
+        if mp_dict['comments'] == '':
+            mp_dict['comments'] = '-'
 
+    # Return now if no need to parse table & look up uncertainty data (major speed advantage).
     mp_dict_short = mp_dict.copy()
+    is_useful = (mp_dict['status'].lower() == 'useful')
+    if include_old_in_years is None:
+        old_enough_to_force = True
+    else:
+        old_enough_to_force = (get_years_old(mp_dict['last_obs']) >= include_old_in_years)
+    if (keep_useful_only and not is_useful) and (not old_enough_to_force):  # i.e., if no need to keep
+        return mp_dict_short
 
     # Handle items in ephemeris table. Use line with highest altitude:
     # Find line limits of ephemeris table (slight superset from <pre> and </pre> HTML tags:
@@ -405,10 +427,9 @@ def extract_mp_data(html_lines, mp_block_limits):
                                      '  ' + MP_FILTER_NAME + '={:.0f}'.format(exp_time) + 'sec(9)' + \
                                      '  ' + mp_dict['ra'] + \
                                      '  ' + mp_dict['dec']
-    if mp_dict['comments'] == '':
-        mp_dict['comments'] = '-'
     if mp_dict.get('v_mag', None) is not None:
         uncertainty = get_uncertainty(uncertainty_raw_url)
+        # print('\n', mp_dict['number'], 'get_uncertainty()', mp_dict['utc'])
         mp_dict['uncert'] = '{:.1f}'.format(uncertainty)
         mp_dict['score'] = '{:.1f}'.format(calc_score(float(mp_dict['v_mag']), uncertainty))
     else:
@@ -471,6 +492,11 @@ def html(mp_list=None, mp_start=None, df=None, date_utc=None):
 
 def pets(date_utc=None):
     html([mp for (mp, name) in PET_MPS], date_utc=date_utc)
+
+
+def go_pets(years=0.5):
+    df = go(mp_list=[mp for (mp, x) in PET_MPS],
+            keep_useful_only=False, include_old_in_years=years)
 
 
 UTILITY_FUNCTIONS___________________________________ = 0
