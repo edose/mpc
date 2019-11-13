@@ -12,7 +12,7 @@ from scipy.interpolate import UnivariateSpline
 from statistics import median
 from mpc.mpctools import *
 from photrix.image import Image, FITS, Aperture
-from photrix.util import RaDec, jd_from_datetime_utc, degrees_as_hex
+from photrix.util import RaDec, jd_from_datetime_utc, degrees_as_hex, ra_as_hours
 
 MP_COMP_RADEC_ERROR_MAX = 1.0  # in arcseconds
 MP_COLOR_BV_MIN = 0.68  # defines color range for comps (a bit wider than normal MP color range).
@@ -29,6 +29,7 @@ MP_TOP_DIRECTORY = 'J:/Astro/Images/MP Photometry/'
 PHOTRIX_TOP_DIRECTORY = 'C:/Astro/Borea Photrix/'
 UR_LIST_PATH = 'Photometry/File-renaming.txt'
 DF_MP_MASTER_FILENAME = 'df_mp_master.csv'
+DF_COMPS_AND_MP_FILENAME = 'df_comps_and_mp.csv'
 
 
 def canopus(mp_top_directory=MP_TOP_DIRECTORY, rel_directory=None):
@@ -64,8 +65,7 @@ def canopus(mp_top_directory=MP_TOP_DIRECTORY, rel_directory=None):
 
 
 
-NEW_WORKFLOW_______________________________________________________ = 0
-
+NEW_WORKFLOW________________________________________________ = 0
 # ***********************
 #  The PROPOSED WORKFLOW...below are elements that can later be strung together:
 #  OK: From photrix: df_master, extract stds data as df_stds.
@@ -106,9 +106,8 @@ def make_z_curves(df_ext_stds):
     for filter in std_filters:
         transform = state_dict['transform'][filter]
         extinction = state_dict['extinction'][filter]
-        z_curve[filter] = ZCurve(filter, df_ext_stds, transform, extinction)
+        z_curves[filter] = ZCurve(filter, df_ext_stds, transform, extinction)
     return z_curves
-
 
 
 def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
@@ -149,19 +148,40 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
     pixels_to_corner = sqrt(image_list[0].xsize**2 + image_list[0].ysize**2) / 2.0  # from center to corner
     degrees_to_corner = plate_scale * pixels_to_corner
 
-    # Get comps:
+    # Get all APASS 10 comps that might fall within images:
     comp_search_radius = 1.05*degrees_to_corner
     df_comps = get_apass10_comps(degRA, degDec, comp_search_radius,
                                  r_min=COMPS_MIN_R_MAG, r_max=COMPS_MAX_R_MAG, mp_color_only=True)
-    print(str(len(df_comps)), 'qualifying APASS comps found within',
-          '{:.4f}'.format(comp_search_radius), 'deg of', degrees_as_hex(degRA), degrees_as_hex(degDec))
+    df_comps['Type'] = 'Comp'
+    print(str(len(df_comps)), 'qualifying APASS10 comps found within',
+          '{:.3f}'.format(comp_search_radius) + u'\N{DEGREE SIGN}' + ' of',
+          ra_as_hours(degRA) + 'h', degrees_as_hex(degDec) + u'\N{DEGREE SIGN}')
 
-    # Add all comp apertures to each image:
+    # Make df_comps_and_mp by adding MP row to df_comps:
+    dict_mp_row = dict()
+    for colname in df_comps.columns:
+        dict_mp_row[colname] = [None]
+    dict_mp_row['ID'] = ['MP_' + mp_string]
+    dict_mp_row['Type'] = ['MP']
+    df_mp_row = pd.DataFrame(dict_mp_row, index=[dict_mp_row['ID']])
+    df_comps_and_mp = pd.concat([df_mp_row, df_comps])
+
+    # Move some of df_comps_and_mp's columns to its left, leave the rest in original order:
+    left_columns = ['ID', 'Type', 'degRA', 'degDec', 'R_estimate', 'e_R_estimate']
+    new_column_order = left_columns + [col_name for col_name in df_comps_and_mp.columns
+                                       if col_name not in left_columns]
+    df_comps_and_mp = df_comps_and_mp[new_column_order]
+    del df_comps, df_mp_row  # obsolete.
+
+    # Add all comp apertures to every image:
+    print(str(len(image_list)), 'images:')
     for image in image_list:
-        for comp_id, ra, dec in zip(df_comps['StarID'], df_comps['degRA'], df_comps['degDec']):
-            x0, y0 = image.fits.xy_from_radec(RaDec(ra, dec))
-            image.add_aperture(comp_id, x0, y0)
-    print(str(len(image_list)), 'images found.')
+        for comp_id, type, ra, dec in zip(df_comps_and_mp['ID'], df_comps_and_mp['Type'],
+                                          df_comps_and_mp['degRA'], df_comps_and_mp['degDec']):
+            if type == 'Comp':
+                x0, y0 = image.fits.xy_from_radec(RaDec(ra, dec))
+                image.add_aperture(comp_id, x0, y0)
+        print(image.fits.filename + ':', str(len(image.apertures)), 'apertures.')
 
     # Get time range of all MP images:
     utc_mids = [i.fits.utc_mid for i in image_list]
@@ -170,7 +190,7 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
     mid_session_utc = min_session_utc + (max_session_utc - min_session_utc) / 2
 
     # Get MP ra,dec and motion from MPC page:
-    # TODO: could later get utc0, ra0, and dec0 from early-image and late-image RA,Dec supplied by user.
+    # TODO: could instead get utc0, ra0, and dec0 from early-image and late-image RA,Dec supplied by user.
     utc_string = '{0:04d}{1:02d}{2:02d}'.format(mid_session_utc.year,
                                                 mid_session_utc.month, mid_session_utc.day)
     x = get_one_html_from_list([mp_int], utc_string)
@@ -210,7 +230,7 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
         for ap_name in ap_names:
             ap_list.append(dict(image.results_from_aperture(ap_name)))
         df_apertures = pd.DataFrame(ap_list, index=ap_names)  # constructor: list of dicts
-        df_apertures['StarID'] = df_apertures.index
+        df_apertures['ID'] = df_apertures.index
         df_apertures.rename(columns={'r_disc': 'DiscRadius',
                                      'r_inner': 'SkyRadiusInner',
                                      'r_outer': 'SkyRadiusOuter',
@@ -249,8 +269,8 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
             df_apertures.loc[star_id, 'MaxADU_Ur'] = ap.max_adu
 
         # Get and merge in catalog star data from df_comps:
-        df_one_image = pd.merge(df_apertures, df_comps, how='left', on='StarID')
-        df_one_image.index = df_one_image['StarID']  # just to be sure.
+        df_one_image = pd.merge(df_apertures, df_comps_and_mp, how='left', on='ID')
+        df_one_image.index = df_one_image['ID']  # just to be sure.
 
         # Add image-specific data to all rows of df_one_image:
         df_one_image['Filename'] = image.fits.filename
@@ -268,44 +288,155 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
         df_one_image_list.append(df_one_image)
 
     df_mp_master = pd.DataFrame(pd.concat(df_one_image_list, ignore_index=True))
-    df_mp_master.sort_values(['JD_mid', 'StarID'], inplace=True)
-    # df_mp_master.drop([])
+    df_mp_master.sort_values(['JD_mid', 'ID'], inplace=True)
     df_mp_master.insert(0, 'Serial', range(1, 1 + len(df_mp_master)))  # inserts in place
-    df_mp_master['Type'] = ['MP' if id == mp_id else 'Comp' for id in df_mp_master['StarID']]
+    df_mp_master['Type'] = ['MP' if id == mp_id else 'Comp' for id in df_mp_master['ID']]
     df_mp_master.index = list(df_mp_master['Serial'])
     n_comps = sum([type == 'Comp' for type in df_mp_master['Type']])
     n_mps = len(df_mp_master) - n_comps
-    print('Apertures made for', str(n_comps), 'comps and', str(n_mps), 'MPs.')
+    print('Apertures retained for', str(n_comps), 'comps and', str(n_mps), 'MPs.')
 
     # Fill in the JD_fract and JD_fract2 columns:
     jd_floor = floor(df_mp_master['JD_mid'].min())  # requires that all JD_mid values be known.
     df_mp_master['JD_fract'] = df_mp_master['JD_mid'] - jd_floor
 
     # Move some of the columns to the Dataframe's left, leave the rest in original order:
-    left_columns = ['Serial', 'Filename', 'Type', 'StarID', 'JD_mid',
+    left_columns = ['Serial', 'Filename', 'Type', 'ID', 'JD_mid',
                     'InstMag', 'InstMagSigma', 'Exposure', 'R_estimate']
     new_column_order = left_columns + [col_name for col_name in df_mp_master.columns
                                        if col_name not in left_columns]
     df_mp_master = df_mp_master[new_column_order]
 
-    # Remove obviously bad comp obs:
+    # Remove obviously bad comp and MP observations (dataframe rows) and summarize for user::
     is_comp = pd.Series([type == 'Comp' for type in df_mp_master['Type']])
-    saturated_comp = pd.Series([adu > ADU_UR_SATURATED for adu in df_mp_master['MaxADU_Ur']])
-    low_snr_comp = pd.Series([ims > (1.0 / COMPS_MIN_SNR) for ims in df_mp_master['InstMagSigma']])
-    to_keep = list(~(is_comp & (saturated_comp | low_snr_comp)))
+    is_mp = ~is_comp
+    is_saturated = pd.Series([adu > ADU_UR_SATURATED for adu in df_mp_master['MaxADU_Ur']])
+    is_low_snr = pd.Series([ims > (1.0 / COMPS_MIN_SNR) for ims in df_mp_master['InstMagSigma']])
+    print('Starting with', str(sum(is_comp)), 'comp obs,', str(sum(is_mp)), 'MP obs:')
+    # Identify bad comp observations:
+    is_saturated_comp_obs = is_saturated & is_comp
+    is_low_snr_comp_obs = is_low_snr & is_comp
+    is_bad_comp_obs = is_saturated_comp_obs | is_low_snr_comp_obs
+    print('   Comp obs: removing',
+          str(sum(is_saturated_comp_obs)), 'saturated, ',
+          str(sum(is_low_snr_comp_obs)), 'low SNR.')
+    # Identify bad MP observations:
+    is_saturated_mp_obs = is_saturated & is_mp
+    is_low_snr_mp_obs = is_low_snr & is_mp
+    is_bad_mp_obs = is_saturated_mp_obs | is_low_snr_mp_obs
+    print('     MP obs: removing',
+          str(sum(is_saturated_mp_obs)), 'saturated, ',
+          str(sum(is_low_snr_mp_obs)), 'low SNR.')
+    # Perform the removal:
+    to_remove = is_bad_comp_obs | is_bad_mp_obs
+    to_keep = list[~to_remove]
     df_mp_master = df_mp_master.loc[to_keep, :]
-    print('Comps:', str(sum(saturated_comp & is_comp)), 'saturated, and',
-          str(sum(low_snr_comp & is_comp)), 'low SNR.')
-    n_comps = sum([type == 'Comp' for type in df_mp_master['Type']])
-    n_mps = len(df_mp_master) - n_comps
-    print('Retaining:', str(n_comps), 'comps and', str(n_mps), 'MPs.')
+    is_comp = pd.Series([type == 'Comp' for type in df_mp_master['Type']])  # remake; rows have changed
+    is_mp = ~is_comp  # remake; rows have changed
+    print('Keeping', str(sum(is_comp)), 'comp obs,', str(sum(is_mp)), 'MP obs.\n')
+
+    # Write df_comps_and_mp to file:
+    fullpath = os.path.join(mp_directory, DF_COMPS_AND_MP_FILENAME)
+    df_comps_and_mp.to_csv(fullpath, sep=';', quotechar='"',
+                           quoting=2, index=False)  # quoting=2-->quotes around non-numerics.
+    print('df_comps_and_mp written to', fullpath)
+    # do not return df_comps_and_mp...it is stored in file.
 
     # Write df_master to file:
     fullpath = os.path.join(mp_directory, DF_MP_MASTER_FILENAME)
     df_mp_master.to_csv(fullpath, sep=';', quotechar='"',
                         quoting=2, index=False)  # quoting=2-->quotes around non-numerics.
     print('df_mp_master written to', fullpath)
-    # return df_mp_master  # do not return...it is stored in file
+    # do not return df_mp_master...it is stored in file.
+
+
+def do_phot(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+    mp_string = str(mp_number)
+    df_mp_master = get_df_mp_master(mp_top_directory, mp_string, an_string)
+    df_comps_and_mp = get_df_comps_and_mp(mp_top_directory, mp_string, an_string)
+    state = get_session_state()
+
+    # Make temporary df_VRI, one row per MP-field image in V, R, or I.
+    is_VRI = list([filter in ['V', 'R', 'I'] for filter in df_mp_master['Filter']])
+    VRI_filenames = df_mp_master.loc[is_VRI, 'Filename'].copy().drop_duplicates()  # index is correct too.
+    VRI_serials = list(VRI_filenames.index)
+    df_VRI = pd.DataFrame({'Serial': VRI_serials}, index=VRI_serials)
+    df_VRI['Filename'] = VRI_filenames
+    df_VRI['JD_mid'] = list(df_mp_master.loc[VRI_serials, 'JD_mid'])
+    df_VRI['UTC_mid'] = list(df_mp_master.loc[VRI_serials, 'UTC_mid'])
+    df_VRI['Filter'] = list(df_mp_master.loc[VRI_serials, 'Filter'])
+    df_VRI['Airmass'] = list(df_mp_master.loc[VRI_serials, 'Airmass'])
+
+    # Calculate zero-point "Z" value for each VRI image, add to df_VRI:
+    df_ext_stds = make_df_ext_stds(an_string)
+    z_curves = make_z_curves(df_ext_stds)  # each dict entry is 'filter': ZCurve object.
+    z_values = [z_curves[filter].at_jd(jd) for filter, jd in zip(df_VRI['Filter'], df_VRI['JD_mid'])]
+    df_VRI['Z'] = z_values
+
+    # Get list of comp and MP IDs that exist in *every* image in df_mp_master, then discard all the rest:
+    id_list = df_mp_master['ID'].copy().drop_duplicates()
+    n_filenames = len(df_mp_master['Filename'].copy().drop_duplicates())
+    qualified_id_list = []
+    for this_id in id_list:
+        n_this_id = sum([df_mp_master['ID'] == this_id])
+        if n_this_id == n_filenames:
+            qualified_id_list.append(this_id)
+    to_keep = [id in qualified_id_list for id in df_mp_master['ID']]
+    df_qualified_obs = df_mp_master.loc[to_keep, :]  # all images now have same set of comps and MPs.
+
+    # Calculate best untransformed mag for each MP and comp, write to df_comps_and_mp:
+    for filter in ['V', 'R', 'I']:
+        new_column_name = 'Best_untr_mag_' + filter
+        df_comps_and_mp[new_column_name] = None
+        extinction = state['extinction'][filter]
+        untransformed_mag_dict = dict()
+        for id in qualified_id_list:
+            untransformed_mag_dict[id] = []
+        for idx in df_VRI.index:
+            if df_VRI.loc[idx, 'Filter'] == filter:
+                zero_point = df_VRI.loc[idx, 'Z']
+                airmass = df_VRI.loc[idx, 'Airmass']
+                for id in qualified_id_list:
+                    filename = df_VRI.loc[idx, 'Filename']
+                    instrumental_mag = df_mp_master.loc[filename, 'InstMag']
+                    untransformed_mag = instrumental_mag - extinction * airmass - zero_point
+                    untransformed_mag_dict[id].append(untransformed_mag)
+        for id in qualified_id_list:
+            best_untransformed_mag = sum(untransformed_mag_dict[id]) / len(untransformed_mag_dict[id])
+            df_comps_and_mp.loc[id, new_column_name] = best_untransformed_mag
+
+    # Solve for best (transformed) V-I color index for each comp and MP, write to df_comps_and_mp:
+    df_comps_and_mp['Best_CI'] = None
+    v_transform = state['transform']['V']
+    i_transform = state['transform']['I']
+    for id in qualified_id_list:
+        best_color_index = (df_comps_and_mp.loc[id, 'Best_untr_mag_V'] -
+                            df_comps_and_mp.loc[id, 'Best_untr_mag_I']) /\
+                           (1.0 + v_transform - i_transform)
+        df_comps_and_mp.loc[id, 'Best_CI'] = best_color_index
+
+    # Generate best *transformed* R magnitude for every comp (not necessary for MP):
+    df_comps_and_mp['Best_R_mag'] = None
+    r_transform = state['transform']['R']
+    for id in qualified_id_list:
+        best_r_mag = df_comps_and_mp.loc[id, 'Best_untr_mag_V'] - \
+                     r_transform * df_comps_and_mp.loc[id, 'Best_CI']
+
+    # Compare best R mags with catalog R-estimates as a diagnostic:
+
+    # Use Clear-filter images to get transformed R-mag estimates for MP and comps:
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 SUPPORT_______________________________________________________ = 0
@@ -326,13 +457,28 @@ def get_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_strin
     return df_mp_master
 
 
+def get_df_comps_and_mp(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+    """  Simple utility to read df_comps.csf file and return the original DataFrame.
+    :param mp_top_directory: path to top directory [string].
+    :param mp_number: number of target Minor Planet [string or int].
+    :param an_string: Astronight (not UTC) date designation, e.g., '20191105' [string].
+    :return: df_comps_and_mp from mp_phot() [pandas Dataframe]
+    """
+    mp_string = str(mp_number)
+    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
+    fullpath = os.path.join(mp_directory, DF_COMPS_FILENAME)
+    df_comps_and_mp = pd.read_csv(fullpath, sep=';')
+    df_comps_and_mp.index = df_comps_and_mp['CompID']
+    return df_comps_and_mp
+
+
 class ZCurve:
     def __init__(self, filter, df_ext_stds, transform, extinction):
         is_in_filter = (df_ext_stds['Filter'] == filter)
         df_filter = df_ext_stds[is_in_filter].sort_values(by='JD_mid')
         self.jds = df_filter['JD_mid'].copy().drop_duplicates().sort_values().values  # all unique JDs.
         self.n = len(self.jds)
-        print(self.n, self.jds)
+        # print(self.n, self.jds)
 
         # Calculate Z at each JD where it's needed (to parallel list self.jds):
         self.z_values_jd = []
@@ -349,7 +495,7 @@ class ZCurve:
                 this_z_value = instmag - catalog_mag - corrections
                 z_values.append(this_z_value)
             self.z_values_jd.append(median(z_values))
-        print(self.z_values_jd)
+        # print(self.z_values_jd)
 
         # Set up appropriate interpolation for future calls to .at_jd():
         if self.n <= 0:
@@ -407,8 +553,8 @@ def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=Tru
     df = df.rename(columns={'radeg': 'degRA', 'raerr(")': 'e_RA', 'decdeg': 'degDec', 'decerr(")': 'e_Dec',
                             'Johnson_V (V)': 'Vmag', 'Verr': 'e_Vmag',
                             'Johnson_B (B)': 'Bmag', 'Berr': 'e_Bmag'})
-    df['StarID'] = df.index
-    columns_to_keep = ['StarID', 'degRA', 'e_RA', 'degDec', 'e_Dec', 'Vmag', 'e_Vmag', 'Vnobs', 'Bmag',
+    df['ID'] = df.index
+    columns_to_keep = ['ID', 'degRA', 'e_RA', 'degDec', 'e_Dec', 'Vmag', 'e_Vmag', 'Vnobs', 'Bmag',
                        'e_Bmag', 'Bnobs']
     df = df[columns_to_keep]
     df = df[df['e_RA'] < MP_COMP_RADEC_ERROR_MAX]
