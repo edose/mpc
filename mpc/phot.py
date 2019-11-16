@@ -22,6 +22,7 @@ COMPS_MAX_R_MAG = 15.5  # a guess; probably needs to be customized per-MP, even 
 ERR_R_ESTIMATE_MAX = 0.2  # we need to find the best value for this; starting with 0.1 mag.
 COMPS_MIN_SNR = 25  # min signal/noise for use comp obs (SRN defined here as InstMag / InstMagSigma).
 ADU_UR_SATURATED = 54000  # This probably should go in Instrument class, but ok for now.
+COLOR_VI_VARIABLE_RISK = 1.5  # greater VI values risk being a variable star, thus unsuitable as comp star.
 
 DEGREES_PER_RADIAN = 180.0 / pi
 
@@ -359,10 +360,12 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
     # do not return df_mp_master...it is stored in file.
 
 
-def do_phot(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
-    """  Perform main photometric reduction on previously gathered instrumental magnitudes and comps data.
-    Use df_mp_master (one row per observation) and df_comps_and_mp (one row per comp and minor planet).
-
+def prep_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+    """  Prepare all data for comp stars, using instrumental magnitudes and other comp data.
+         Make preliminary comp-star selections, esp. qualifying comps as being observed in every MP image.
+         Make plots to assist user in further screening comp stars.
+    From make_df_master(), use:df_mp_master (one row per observation) and
+                               df_comps_and_mp (one row per comp and minor planet).
     :param mp_top_directory: path of lowest directory common to all MP photometry FITS, e.g.,
                'J:/Astro/Images/MP Photometry' [string]
     :param mp_number: number of target MP, e.g., 1602 for Indiana. [integer or string].
@@ -370,11 +373,12 @@ def do_phot(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     :return: [None] Write updated df_mp_master and df_comps_and_mp to files.
     """
     mp_string = str(mp_number)
-    # ================ Start testing code block. ====================
+    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
+
+    # ================ Start TESTING CODE block. ====================
     # Copy backup files (direct from make_df_mp_master()) to files by mp_phot().
     # For testing only:
     print('***** Using SAVED copies of df_comps_and_mp.csv and df_mp_master.csv.')
-    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
     old_path = os.path.join(mp_directory, 'df_comps_and_mp - Copy.csv')
     new_path = os.path.join(mp_directory, 'df_comps_and_mp.csv')
     os.remove(new_path)
@@ -383,14 +387,14 @@ def do_phot(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     new_path = os.path.join(mp_directory, 'df_mp_master.csv')
     os.remove(new_path)
     shutil.copy2(old_path, new_path)
-    # ================= End of testing code block. ===================
+    # ================= End of TESTING CODE block. ===================
 
-    # Load data as normally:
+    # Load data:
     df_mp_master = get_df_mp_master(mp_top_directory, mp_string, an_string)
     df_comps_and_mp = get_df_comps_and_mp(mp_top_directory, mp_string, an_string)
     state = get_session_state()  # for extinction and transform values.
 
-    # Make temporary df_VRI, one row per MP-field image in V, R, or I.
+    # Make df_VRI, local to this function, one row per MP-field image in V, R, or I.
     is_VRI = list([filter in ['V', 'R', 'I'] for filter in df_mp_master['Filter']])
     VRI_filenames = df_mp_master.loc[is_VRI, 'Filename'].copy().drop_duplicates()  # index is correct too.
     VRI_obs_ids = list(VRI_filenames.index)
@@ -403,12 +407,12 @@ def do_phot(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     print(str(len(df_VRI)), 'VRI images.')
 
     # Calculate zero-point "Z" value for each VRI image, add to df_VRI:
-    df_ext_stds = make_df_ext_stds(an_string)
+    df_ext_stds = make_df_ext_stds(an_string)  # stds data come from photrix:df_master.
     z_curves = make_z_curves(df_ext_stds)  # each dict entry is 'filter': ZCurve object.
     z_values = [z_curves[filter].at_jd(jd) for filter, jd in zip(df_VRI['Filter'], df_VRI['JD_mid'])]
     df_VRI['Z'] = z_values  # new column.
 
-    # Get list of comp and MP IDs that exist in *every* image in df_mp_master, discard all the others:
+    # Qualify only comps and MP IDs that exist in *every* image in df_mp_master:
     id_list = df_mp_master['ID'].copy().drop_duplicates()
     n_filenames = len(df_mp_master['Filename'].copy().drop_duplicates())
     qualified_id_list = []
@@ -423,13 +427,14 @@ def do_phot(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     print('obs: ', str(len(df_qualified_obs)), 'kept in df_qualified_obs from',
           str(len(df_mp_master)), 'in df_mp_master.')
 
-    # Add qualifying column 'InAllImages' to df_comps_and_mp and to df_mp_master:
+    # Add column 'InAllImages' to df_comps_and_mp and to df_mp_master:
     qualified_comps_and_mp = [id in qualified_id_list for id in df_comps_and_mp['ID']]
     df_comps_and_mp['InAllImages'] = qualified_comps_and_mp
     df_mp_master = pd.merge(df_mp_master, df_comps_and_mp[['ID', 'InAllImages']].copy(),
                             how='left', on='ID').set_index('ObsID', drop=False)
 
     # From VRI images, calculate best untransformed mag for each MP and comp, write to df_comps_and_mp:
+    # Columns are named 'Best_untr_mag_V', etc.
     for filter in ['V', 'R', 'I']:
         new_column_name = 'Best_untr_mag_' + filter  # for new column in df_comps_and_mp.
         df_comps_and_mp[new_column_name] = None
@@ -472,12 +477,10 @@ def do_phot(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     # Reorder columns in df_comps_and_mp, then write it file:
     df_comps_and_mp = reorder_df_columns(df_comps_and_mp, ['ID', 'Type', 'InAllImages',
                                                            'Best_R_mag', 'Best_CI'])
-    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
     fullpath = os.path.join(mp_directory, DF_COMPS_AND_MP_FILENAME)
     df_comps_and_mp.to_csv(fullpath, sep=';', quotechar='"',
                            quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
     print('Updated df_comps_and_mp written to', fullpath)
-    # do not return df_comps_and_mp...it is stored in file.
 
     # Reorder columns in df_master, then write it to file:
     df_mp_master = reorder_df_columns(df_mp_master, ['ObsID', 'ID', 'Type', 'InAllImages'])
@@ -485,45 +488,90 @@ def do_phot(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     df_mp_master.to_csv(fullpath, sep=';', quotechar='"',
                         quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
     print('Updated df_mp_master written to', fullpath)
-    # do not return df_mp_master...it is stored in file.
-
-    # Compare best R mags with catalog R-estimates as a diagnostic:
 
 
-
-
-    # Use Clear-filter images to get transformed R-mag estimates for MP and comps:
-
-def plot_r_mags(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
-    """ Plot experimental R mag (from VRI images) vs expected R mag (from APASS B & V).
-    :param df_comps_and_mp: [pandas Dataframe]
-    :return: None.
+def plot_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+    """  Make plots supporting user's final selection of comp stars for this MP session.
+    :param mp_top_directory:
+    :param mp_number:
+    :param an_string:
+    :return: [None]
     """
-    mp_string = str(mp_number)
-    df_comps_and_mp = get_df_comps_and_mp(mp_top_directory, mp_string, an_string)
-
-    # Construct plot:
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(ncols=1, nrows=1, figsize=(12, 8))  # (width, height) in "inches"
-    ax.grid(True, color='lightgray', zorder=-1000)
-    ax.set_title('Plot of R magnitudes: experimental vs expected (' + mp_string + '  ' + an_string,
-                 color='darkblue', fontsize=20, weight='bold')
-    ax.set_xlabel('R mag estimated from APASS B & V')
-    ax.set_ylabel('R mag experimental')
-    obs_point_colors = ['darkgreen' if type == 'Comp' else 'darkred' for type in df_comps_and_mp['Type']]
-    ax.scatter(x=df_comps_and_mp['R_estimate'], y=df_comps_and_mp['Best_R_mag'],
-               alpha=0.6, color=obs_point_colors, zorder=+1000)
 
-    # Add annotation: number of observations:
-    fig.text(x=0.5, y=0.87,
-             s=str(len(df_comps_and_mp['R_estimate'])) + ' comps and MP.',
-             verticalalignment='top', horizontalalignment='center',
-             fontsize=12)
-    fig.canvas.set_window_title('R mag plot: ' + mp_number + '  ' + an_string)
+    mp_string = str(mp_number)
+    # mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
+    df_comps_and_mp = get_df_comps_and_mp(mp_top_directory, mp_string, an_string)
+    df_mp_master = get_df_mp_master(mp_top_directory, mp_string, an_string)
+    if 'InAllImages' not in list(df_comps_and_mp.columns):
+        print('\n***** ERROR: Please run prep_comps() then come back to plot_comps().')
+        return
+
+    df_qualified = df_comps_and_mp[df_comps_and_mp['InAllImages']]
+    df_qualified_comps_only = df_qualified[df_qualified['Type'] == 'Comp']
+    mp_color = 'darkred'
+    comp_color = 'black'
+    colors = [mp_color if type == 'MP' else comp_color for type in df_comps_and_mp['Type']]
+
+    # FIGURE 1: (multiplot): One point per comp star, plots in a grid within one figure (page).
+    fig, axes = plt.subplots(ncols=2, nrows=2, figsize=(14, 9))  # (width, height) in "inches"
+
+    # Local support function for *this* grid of plots:
+    def make_labels(ax, title, xlabel, ylabel, zero_line=False):
+        ax.set_title(title, y=0.89)
+        ax.set_xlabel(xlabel, labelpad=-27)
+        ax.set_ylabel(ylabel, labelpad=-8)
+        if zero_line is True:
+            ax.axhline(y=0, color='lightgray', linewidth=1, zorder=-100)
+
+    # "Canopus comp plot" (R InstMag from VRI image *vs* R mag estimate from catalog):
+    ax = axes[0, 0]  # at upper left.
+    make_labels(ax, 'Canopus (CSS) comp plot', 'R_estimate from catalog B & V', 'InstMag(R) from VRI')
+    is_instmag_r = df_mp_master['Filter'] == 'R'
+    x = df_mp_master.loc[is_instmag_r, 'R_estimate']
+    y = df_mp_master.loc[is_instmag_r, 'InstMag']
+    this_color = [mp_color if type == 'MP' else comp_color
+                  for type in df_mp_master.loc[is_instmag_r, 'Type']]
+    ax.scatter(x=x, y=y, alpha=0.5, color=comp_color)
+    margin = 0.08
+    x_range = max(x) - min(x)
+    y_range = max(y) - min(y)
+    x_low, x_high = min(x) - margin * x_range, max(x) + margin * x_range
+    y_low, y_high = min(y) - margin * y_range, max(y) + margin * y_range
+    ax.plot([x_low, x_high], [y_low, y_high], color='black', zorder=-100, linewidth=1)
+
+    # "R-shift plot" (Best R mag - R estimate from catalog vs R estimate from catalog):
+    ax = axes[0, 1]  # next plot to the right.
+    make_labels(ax, 'R-shift plot', 'R_estimate from catalog B & V',
+                'Best R mag - first R_estimate',
+                zero_line=True)
+    ax.scatter(x=df_qualified_comps_only['R_estimate'],
+               y=df_qualified_comps_only['Best_R_mag'] - df_qualified_comps_only['R_estimate'],
+               alpha=0.6, color=colors)
+
+    # Color index plot:
+    ax = axes[1, 0]
+    make_labels(ax, 'Best R mag (from VRI images)', 'R_estimate from catalog B & V', 'InstMag(R) from VRI')
+    ax.scatter(x=df_qualified_comps_only['Best_R_mag'],
+               y=df_qualified_comps_only['Best_CI'],
+               alpha=0.6, color=colors)
+    # ax.axhline(y=COLOR_VI_VARIABLE_RISK, color='red', linewidth=1, zorder=-100)
+
+    # Finish the figure, and show the entire plot:
+    fig.tight_layout(rect=(0, 0, 1, 0.925))
+    fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.25)
+    fig.suptitle('Comp Star Diagnostics    ::     MP_' + mp_string + '   AN' + an_string,
+                 color='darkblue', fontsize=20, weight='bold')
+    fig.canvas.set_window_title('Comp star diagnostic plots')
     plt.show()
 
 
+    # Write diagnostics to console:
+    # (these data may better go into a file, later)
 
+
+
+    # Write select_comps.txt stub to mp_directory (using statistics--e.g. from above plots?):
 
 
 
