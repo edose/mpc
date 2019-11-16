@@ -15,12 +15,16 @@ from photrix.image import Image, FITS, Aperture
 from photrix.util import RaDec, jd_from_datetime_utc, degrees_as_hex, ra_as_hours
 
 MP_COMP_RADEC_ERROR_MAX = 1.0  # in arcseconds
-MP_COLOR_BV_MIN = 0.68  # defines color range for comps (a bit wider than normal MP color range).
-MP_COLOR_BV_MAX = 1.00  # "
-COMPS_MIN_R_MAG = 11    # a guess
+# MP_COLOR_BV_MIN = 0.68  # defines color range for comps (a bit wider than normal MP color range).
+MP_COLOR_BV_MIN = 0.2  # a different guess (more inclusive)
+MP_COLOR_BV_MAX = 1.2  # "
+COMPS_MIN_R_MAG = 10.5    # a guess
 COMPS_MAX_R_MAG = 15.5  # a guess; probably needs to be customized per-MP, even per-session.
-ERR_R_ESTIMATE_MAX = 0.2  # we need to find the best value for this; starting with 0.1 mag.
-COMPS_MIN_SNR = 25  # min signal/noise for use comp obs (SRN defined here as InstMag / InstMagSigma).
+R_ESTIMATE_V_COEFF = 0.975  # from regression on Best_R_mag
+R_ESTIMATE_BV_COLOR_COEFF = -0.419  # "
+R_ESTIMATE_INTERCEPT = 0  # "
+ERR_R_ESTIMATE_MAX = 0.25  # this can be fairly high (inclusive), as there will be more screens, later.
+COMPS_MIN_SNR = 25  # min signal/noise for use comp obs (SNR defined here as InstMag / InstMagSigma).
 ADU_UR_SATURATED = 54000  # This probably should go in Instrument class, but ok for now.
 COLOR_VI_VARIABLE_RISK = 1.5  # greater VI values risk being a variable star, thus unsuitable as comp star.
 
@@ -31,6 +35,8 @@ PHOTRIX_TOP_DIRECTORY = 'C:/Astro/Borea Photrix/'
 UR_LIST_PATH = 'Photometry/File-renaming.txt'
 DF_MP_MASTER_FILENAME = 'df_mp_master.csv'
 DF_COMPS_AND_MP_FILENAME = 'df_comps_and_mp.csv'
+DF_QUALIFIED_OBS_FILENAME = 'df_qual_obs.csv'
+DF_QUALIFIED_COMPS_AND_MP_FILENAME = 'df_qual_comps_and_mp.csv'
 
 
 def canopus(mp_top_directory=MP_TOP_DIRECTORY, rel_directory=None):
@@ -378,15 +384,15 @@ def prep_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None
     # ================ Start TESTING CODE block. ====================
     # Copy backup files (direct from make_df_mp_master()) to files by mp_phot().
     # For testing only:
-    print('***** Using SAVED copies of df_comps_and_mp.csv and df_mp_master.csv.')
-    old_path = os.path.join(mp_directory, 'df_comps_and_mp - Copy.csv')
-    new_path = os.path.join(mp_directory, 'df_comps_and_mp.csv')
-    os.remove(new_path)
-    shutil.copy2(old_path, new_path)
-    old_path = os.path.join(mp_directory, 'df_mp_master - Copy.csv')
-    new_path = os.path.join(mp_directory, 'df_mp_master.csv')
-    os.remove(new_path)
-    shutil.copy2(old_path, new_path)
+    # print('***** Using SAVED copies of df_comps_and_mp.csv and df_mp_master.csv.')
+    # old_path = os.path.join(mp_directory, 'df_comps_and_mp - Copy.csv')
+    # new_path = os.path.join(mp_directory, 'df_comps_and_mp.csv')
+    # os.remove(new_path)
+    # shutil.copy2(old_path, new_path)
+    # old_path = os.path.join(mp_directory, 'df_mp_master - Copy.csv')
+    # new_path = os.path.join(mp_directory, 'df_mp_master.csv')
+    # os.remove(new_path)
+    # shutil.copy2(old_path, new_path)
     # ================= End of TESTING CODE block. ===================
 
     # Load data:
@@ -412,7 +418,7 @@ def prep_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None
     z_values = [z_curves[filter].at_jd(jd) for filter, jd in zip(df_VRI['Filter'], df_VRI['JD_mid'])]
     df_VRI['Z'] = z_values  # new column.
 
-    # Qualify only comps and MP IDs that exist in *every* image in df_mp_master:
+    # Make list of only comp and MP IDs that have qualified data in *every* image in df_mp_master:
     id_list = df_mp_master['ID'].copy().drop_duplicates()
     n_filenames = len(df_mp_master['Filename'].copy().drop_duplicates())
     qualified_id_list = []
@@ -420,24 +426,32 @@ def prep_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None
         n_this_id = sum([id == this_id for id in df_mp_master['ID']])
         if n_this_id == n_filenames:
             qualified_id_list.append(this_id)
-    obs_to_keep = [id in qualified_id_list for id in df_mp_master['ID']]
-    df_qualified_obs = df_mp_master.loc[obs_to_keep, :]  # new df; all images have same comps and MPs.
     print('IDs: ', str(len(qualified_id_list)), 'qualified from',
           str(len(id_list)), 'in df_comps_and_mp.')
-    print('obs: ', str(len(df_qualified_obs)), 'kept in df_qualified_obs from',
+
+    # Make new df_qual_obs (subset of df_mp_master):
+    obs_to_keep = [id in qualified_id_list for id in df_mp_master['ID']]
+    df_qual_obs = df_mp_master.loc[obs_to_keep, :]  # new df; all images have same comps and MPs.
+    print('obs: ', str(len(df_qual_obs)), 'kept in df_qual_obs from',
           str(len(df_mp_master)), 'in df_mp_master.')
+    del df_mp_master  # trigger error if used below.
+
+    # Make new df_qual_comps_and_mp (subset of df_comps_and_mp):
+    rows_to_keep = [id in qualified_id_list for id in df_comps_and_mp['ID']]
+    df_qual_comps_and_mp = df_comps_and_mp[rows_to_keep]
+    del df_comps_and_mp  # trigger error if used below.
 
     # Add column 'InAllImages' to df_comps_and_mp and to df_mp_master:
-    qualified_comps_and_mp = [id in qualified_id_list for id in df_comps_and_mp['ID']]
-    df_comps_and_mp['InAllImages'] = qualified_comps_and_mp
-    df_mp_master = pd.merge(df_mp_master, df_comps_and_mp[['ID', 'InAllImages']].copy(),
-                            how='left', on='ID').set_index('ObsID', drop=False)
+    # qualified_comps_and_mp = [id in qualified_id_list for id in df_comps_and_mp['ID']]
+    # df_comps_and_mp['InAllImages'] = qualified_comps_and_mp
+    # df_mp_master = pd.merge(df_mp_master, df_comps_and_mp[['ID', 'InAllImages']].copy(),
+    #                         how='left', on='ID').set_index('ObsID', drop=False)
 
     # From VRI images, calculate best untransformed mag for each MP and comp, write to df_comps_and_mp:
     # Columns are named 'Best_untr_mag_V', etc.
     for filter in ['V', 'R', 'I']:
         new_column_name = 'Best_untr_mag_' + filter  # for new column in df_comps_and_mp.
-        df_comps_and_mp[new_column_name] = None
+        df_qual_comps_and_mp[new_column_name] = None
         extinction = state['extinction'][filter]
         untransformed_mag_dict = dict()
         for id in qualified_id_list:
@@ -449,45 +463,45 @@ def prep_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None
                 for id in qualified_id_list:
                     filename = df_VRI.loc[idx, 'Filename']
                     obs_id = filename + '_' + id
-                    instrumental_mag = df_mp_master.loc[obs_id, 'InstMag']
+                    instrumental_mag = df_qual_obs.loc[obs_id, 'InstMag']
                     untransformed_mag = instrumental_mag - extinction * airmass - zero_point
                     untransformed_mag_dict[id].append(untransformed_mag)
         for id in qualified_id_list:
             best_untransformed_mag = sum(untransformed_mag_dict[id]) / len(untransformed_mag_dict[id])
-            df_comps_and_mp.loc[id, new_column_name] = best_untransformed_mag
+            df_qual_comps_and_mp.loc[id, new_column_name] = best_untransformed_mag
 
     # Solve for best (transformed) V-I color index for each comp and MP, write to df_comps_and_mp:
-    df_comps_and_mp['Best_CI'] = None
+    df_qual_comps_and_mp['Best_CI'] = None
     v_transform = state['transform']['V']
     i_transform = state['transform']['I']
     for id in qualified_id_list:
-        best_color_index = (df_comps_and_mp.loc[id, 'Best_untr_mag_V'] -
-                            df_comps_and_mp.loc[id, 'Best_untr_mag_I']) /\
+        best_color_index = (df_qual_comps_and_mp.loc[id, 'Best_untr_mag_V'] -
+                            df_qual_comps_and_mp.loc[id, 'Best_untr_mag_I']) /\
                            (1.0 + v_transform - i_transform)
-        df_comps_and_mp.loc[id, 'Best_CI'] = best_color_index
+        df_qual_comps_and_mp.loc[id, 'Best_CI'] = best_color_index
 
     # Generate best *transformed* R magnitude for every comp (not necessary for MP):
-    df_comps_and_mp['Best_R_mag'] = None
+    df_qual_comps_and_mp['Best_R_mag'] = None
     r_transform = state['transform']['R']
     for id in qualified_id_list:
-        best_r_mag = df_comps_and_mp.loc[id, 'Best_untr_mag_V'] - \
-                     r_transform * df_comps_and_mp.loc[id, 'Best_CI']
-        df_comps_and_mp.loc[id, 'Best_R_mag'] = best_r_mag
+        best_r_mag = df_qual_comps_and_mp.loc[id, 'Best_untr_mag_R'] - \
+                     r_transform * df_qual_comps_and_mp.loc[id, 'Best_CI']
+        df_qual_comps_and_mp.loc[id, 'Best_R_mag'] = best_r_mag
 
-    # Reorder columns in df_comps_and_mp, then write it file:
-    df_comps_and_mp = reorder_df_columns(df_comps_and_mp, ['ID', 'Type', 'InAllImages',
-                                                           'Best_R_mag', 'Best_CI'])
-    fullpath = os.path.join(mp_directory, DF_COMPS_AND_MP_FILENAME)
-    df_comps_and_mp.to_csv(fullpath, sep=';', quotechar='"',
+    # Reorder columns in df_qual_comps_and_mp, then write it file:
+    df_qual_comps_and_mp = reorder_df_columns(df_qual_comps_and_mp,
+                                              ['ID', 'Type', 'Best_R_mag', 'Best_CI'])
+    fullpath = os.path.join(mp_directory, DF_QUALIFIED_COMPS_AND_MP_FILENAME)
+    df_qual_comps_and_mp.to_csv(fullpath, sep=';', quotechar='"',
                            quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
-    print('Updated df_comps_and_mp written to', fullpath)
+    print('New df_qual_comps_and_mp written to', fullpath)
 
-    # Reorder columns in df_master, then write it to file:
-    df_mp_master = reorder_df_columns(df_mp_master, ['ObsID', 'ID', 'Type', 'InAllImages'])
-    fullpath = os.path.join(mp_directory, DF_MP_MASTER_FILENAME)
-    df_mp_master.to_csv(fullpath, sep=';', quotechar='"',
+    # Reorder columns in df_qual_obs, then write it to file:
+    df_qual_obs = reorder_df_columns(df_qual_obs, ['ObsID', 'ID', 'Type'])
+    fullpath = os.path.join(mp_directory, DF_QUALIFIED_OBS_FILENAME)
+    df_qual_obs.to_csv(fullpath, sep=';', quotechar='"',
                         quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
-    print('Updated df_mp_master written to', fullpath)
+    print('New df_qual_obs written to', fullpath)
 
 
 def plot_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
@@ -500,61 +514,63 @@ def plot_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None
     import matplotlib.pyplot as plt
 
     mp_string = str(mp_number)
-    # mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
-    df_comps_and_mp = get_df_comps_and_mp(mp_top_directory, mp_string, an_string)
-    df_mp_master = get_df_mp_master(mp_top_directory, mp_string, an_string)
-    if 'InAllImages' not in list(df_comps_and_mp.columns):
-        print('\n***** ERROR: Please run prep_comps() then come back to plot_comps().')
-        return
+    df_qual_comps_and_mp = get_df_qual_comps_and_mp(mp_top_directory, mp_string, an_string)
+    df_qual_obs = get_df_qual_obs(mp_top_directory, mp_string, an_string)
 
-    df_qualified = df_comps_and_mp[df_comps_and_mp['InAllImages']]
-    df_qualified_comps_only = df_qualified[df_qualified['Type'] == 'Comp']
+    df_qual_comps_only = df_qual_comps_and_mp[df_qual_comps_and_mp['Type'] == 'Comp']
+    df_mp_only = df_qual_comps_and_mp[df_qual_comps_and_mp['Type'] == 'MP']
     mp_color = 'darkred'
     comp_color = 'black'
-    colors = [mp_color if type == 'MP' else comp_color for type in df_comps_and_mp['Type']]
 
     # FIGURE 1: (multiplot): One point per comp star, plots in a grid within one figure (page).
     fig, axes = plt.subplots(ncols=2, nrows=2, figsize=(14, 9))  # (width, height) in "inches"
 
     # Local support function for *this* grid of plots:
     def make_labels(ax, title, xlabel, ylabel, zero_line=False):
-        ax.set_title(title, y=0.89)
-        ax.set_xlabel(xlabel, labelpad=-27)
-        ax.set_ylabel(ylabel, labelpad=-8)
+        ax.set_title(title, y=0.91)
+        ax.set_xlabel(xlabel, labelpad=0)
+        ax.set_ylabel(ylabel, labelpad=0)
         if zero_line is True:
             ax.axhline(y=0, color='lightgray', linewidth=1, zorder=-100)
 
     # "Canopus comp plot" (R InstMag from VRI image *vs* R mag estimate from catalog):
+    # Data from df_mp_master, comp stars only.
     ax = axes[0, 0]  # at upper left.
     make_labels(ax, 'Canopus (CSS) comp plot', 'R_estimate from catalog B & V', 'InstMag(R) from VRI')
-    is_instmag_r = df_mp_master['Filter'] == 'R'
-    x = df_mp_master.loc[is_instmag_r, 'R_estimate']
-    y = df_mp_master.loc[is_instmag_r, 'InstMag']
-    this_color = [mp_color if type == 'MP' else comp_color
-                  for type in df_mp_master.loc[is_instmag_r, 'Type']]
+    is_instmag_r = df_qual_obs['Filter'] == 'R'
+    is_comp = df_qual_obs['Type'] == 'Comp'
+    use_in_plot = is_instmag_r & is_comp
+    x = df_qual_obs.loc[use_in_plot, 'R_estimate']
+    y = df_qual_obs.loc[use_in_plot, 'InstMag']
     ax.scatter(x=x, y=y, alpha=0.5, color=comp_color)
     margin = 0.08
     x_range = max(x) - min(x)
     y_range = max(y) - min(y)
     x_low, x_high = min(x) - margin * x_range, max(x) + margin * x_range
-    y_low, y_high = min(y) - margin * y_range, max(y) + margin * y_range
+    intercept = sum(y - x) / len(x)
+    y_low, y_high = x_low + intercept, x_high + intercept
+    # y_low, y_high = min(y) - margin * y_range, max(y) + margin * y_range
     ax.plot([x_low, x_high], [y_low, y_high], color='black', zorder=-100, linewidth=1)
 
     # "R-shift plot" (Best R mag - R estimate from catalog vs R estimate from catalog):
+    # Data from df_qual_comps_only, thus comp stars (no MP).
     ax = axes[0, 1]  # next plot to the right.
-    make_labels(ax, 'R-shift plot', 'R_estimate from catalog B & V',
-                'Best R mag - first R_estimate',
-                zero_line=True)
-    ax.scatter(x=df_qualified_comps_only['R_estimate'],
-               y=df_qualified_comps_only['Best_R_mag'] - df_qualified_comps_only['R_estimate'],
-               alpha=0.6, color=colors)
+    make_labels(ax, 'R-shift comp plot', 'R_estimate from catalog B & V',
+                'Best R mag - first R_estimate', zero_line=True)
+    ax.scatter(x=df_qual_comps_only['R_estimate'],
+               y=df_qual_comps_only['Best_R_mag'] - df_qual_comps_only['R_estimate'],
+               alpha=0.5, color=comp_color)
 
     # Color index plot:
+    # Comp stars and MP together.
     ax = axes[1, 0]
-    make_labels(ax, 'Best R mag (from VRI images)', 'R_estimate from catalog B & V', 'InstMag(R) from VRI')
-    ax.scatter(x=df_qualified_comps_only['Best_R_mag'],
-               y=df_qualified_comps_only['Best_CI'],
-               alpha=0.6, color=colors)
+    make_labels(ax, 'Color Index plot', 'Best R mag', 'Best CI (V-I)')
+    ax.scatter(x=df_qual_comps_only['Best_R_mag'],
+               y=df_qual_comps_only['Best_CI'],
+               alpha=0.5, color=comp_color)
+    ax.scatter(x=df_mp_only['Best_R_mag'],
+               y=df_mp_only['Best_CI'],
+               alpha=1.0, color=mp_color, marker='s', s=96)
     # ax.axhline(y=COLOR_VI_VARIABLE_RISK, color='red', linewidth=1, zorder=-100)
 
     # Finish the figure, and show the entire plot:
@@ -581,11 +597,12 @@ def plot_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None
 
 
 
+
 SUPPORT_______________________________________________________ = 0
 
 
 def get_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
-    """  Simple utility to read df_mp_master.csf file and return the original DataFrame.
+    """  Simple utility to read df_mp_master.csv file and return the original DataFrame.
     :param mp_top_directory: path to top directory [string].
     :param mp_number: number of target Minor Planet [string or int].
     :param an_string: Astronight (not UTC) date designation, e.g., '20191105' [string].
@@ -599,7 +616,7 @@ def get_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_strin
 
 
 def get_df_comps_and_mp(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
-    """  Simple utility to read df_comps.csf file and return the original DataFrame.
+    """  Simple utility to read df_comps.csv file and return the original DataFrame.
     :param mp_top_directory: path to top directory [string].
     :param mp_number: number of target Minor Planet [string or int].
     :param an_string: Astronight (not UTC) date designation, e.g., '20191105' [string].
@@ -610,6 +627,34 @@ def get_df_comps_and_mp(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_st
     fullpath = os.path.join(mp_directory, DF_COMPS_AND_MP_FILENAME)
     df_comps_and_mp = pd.read_csv(fullpath, sep=';', index_col=0)
     return df_comps_and_mp
+
+
+def get_df_qual_obs(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+    """  Simple utility to read df_qual_obs.csv file and return the original DataFrame.
+    :param mp_top_directory: path to top directory [string].
+    :param mp_number: number of target Minor Planet [string or int].
+    :param an_string: Astronight (not UTC) date designation, e.g., '20191105' [string].
+    :return: df_qual_obs from mp_phot() [pandas Dataframe]
+    """
+    mp_string = str(mp_number)
+    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
+    fullpath = os.path.join(mp_directory, DF_QUALIFIED_OBS_FILENAME)
+    df_qual_obs = pd.read_csv(fullpath, sep=';', index_col=0)
+    return df_qual_obs
+
+
+def get_df_qual_comps_and_mp(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+    """  Simple utility to read df_qual_comps_and_mp.csv file and return the original DataFrame.
+    :param mp_top_directory: path to top directory [string].
+    :param mp_number: number of target Minor Planet [string or int].
+    :param an_string: Astronight (not UTC) date designation, e.g., '20191105' [string].
+    :return: df_qual_comps_and_mp from mp_phot() [pandas Dataframe]
+    """
+    mp_string = str(mp_number)
+    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
+    fullpath = os.path.join(mp_directory, DF_QUALIFIED_COMPS_AND_MP_FILENAME)
+    df_qual_comps_and_mp = pd.read_csv(fullpath, sep=';', index_col=0)
+    return df_qual_comps_and_mp
 
 
 class ZCurve:
@@ -675,7 +720,7 @@ class ZCurve:
             return self.spline_function(jd)
 
 
-def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=True):
+def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=True, add_R_estimate=True):
     """  Renders a dataframe with all needed comp info, including estimated R mags.
     Tests OK ~ 20191106.
     :param ra: center Right Ascension for comp search, in degrees only [float].
@@ -684,6 +729,7 @@ def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=Tru
     :param r_min: minimum R magnitude (brightest limit) [float]. None = no limit.
     :param r_max: maximum R magnitude (faintest limit) [float]. None = no limit.
     :param mp_color_only: True means keep only comps close to typical MP color [boolean].
+    :param add_R_estimate: True means add R_estimate column and its error [boolean].
     :return: dataframe of comp data [pandas Dataframe].
     Columns = degRA, e_RA, degDec, e_Dec, Vmag, e_Vmag, Bmag, e_Bmag, R_estimate, e_R_estimate.
     """
@@ -707,13 +753,18 @@ def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=Tru
     df = df[~pd.isnull(df['e_Bmag'])]
     df['B-V'] = df['Bmag'] - df['Vmag']
     df['e_B-V'] = np.sqrt(df['e_Vmag'] ** 2 + df['e_Bmag'] ** 2)
-    df['R_estimate'] = df['Vmag'] - 0.5 * df['B-V']
-    df['e_R_estimate'] = np.sqrt(df['e_Vmag'] ** 2 + 0.25 * df['e_B-V'] ** 2)
-    if r_min is not None:
-        df = df[df['R_estimate'] >= r_min]
-    if r_max is not None:
-        df = df[df['R_estimate'] <= r_max]
-    df_comps = df[df['e_R_estimate'] <= ERR_R_ESTIMATE_MAX]
+    df_comps = df
+    if add_R_estimate:
+        df_comps['R_estimate'] = R_ESTIMATE_V_COEFF * df['Vmag'] +\
+                                 R_ESTIMATE_BV_COLOR_COEFF * df['B-V'] +\
+                                 R_ESTIMATE_INTERCEPT
+        df_comps['e_R_estimate'] = np.sqrt(R_ESTIMATE_V_COEFF**2 * df_comps['e_Vmag']**2 +
+                                           R_ESTIMATE_BV_COLOR_COEFF**2 * df_comps['e_B-V']**2)
+        if r_min is not None:
+            df = df[df['R_estimate'] >= r_min]
+        if r_max is not None:
+            df = df[df['R_estimate'] <= r_max]
+        df_comps = df[df['e_R_estimate'] <= ERR_R_ESTIMATE_MAX]
     if mp_color_only is True:
         above_min = MP_COLOR_BV_MIN <= df_comps['B-V']
         below_max = df_comps['B-V'] <= MP_COLOR_BV_MAX
@@ -749,6 +800,53 @@ def reorder_df_columns(df, left_column_list=[], right_column_list=[]):
                        right_column_list
     df = df[new_column_order]
     return df
+
+
+def try_reg():
+    """  This was used to get R_estimate coeffs, using catalog data to predict experimental Best_R_mag.
+    :return: [None]
+    """
+    df_comps_and_mp = get_df_comps_and_mp(mp_top_directory='J:/Astro/Images/MP Photometry/Test',
+                                          mp_number=1074, an_string='20191109')
+    dfc = df_comps_and_mp[df_comps_and_mp['Type'] == 'Comp']
+    dfc = dfc[dfc['InAllImages'] == True]
+
+    # from sklearn.linear_model import LinearRegression
+    # x = [[bv, v] for (bv, v) in zip(dfc['B-V'], dfc['Vmag'])]
+    # y = list(dfc['Best_R_mag'])
+    # reg = LinearRegression(fit_intercept=True)
+    # reg.fit(x, y)
+    # print('\nsklearn: ', reg.coef_, reg.intercept_)
+    #
+    # xx = dfc[['B-V', 'Vmag']]
+    # yy = dfc['Best_R_mag']
+    # reg.fit(xx, yy)
+    # print('\nsklearn2: ', reg.coef_, reg.intercept_)
+
+    # # statsmodel w/ formula api (R-style formulas) (fussy about column names):
+    # import statsmodels.formula.api as sm
+    # dfc['BV'] = dfc['B-V']  # column name B-V doesn't work in formula.
+    # result = sm.ols(formula='Best_R_mag ~ BV + Vmag', data=dfc).fit()
+    # print('\n' + 'sm.ols:')
+    # print(result.summary())
+
+    # statsmodel w/ dataframe-column api:
+    import statsmodels.api as sm
+    # make column BV as above
+    # result = sm.OLS(dfc['Best_R_mag'], dfc[['BV', 'Vmag']]).fit()  # <--- without constant term
+    result = sm.OLS(dfc['Best_R_mag'], sm.add_constant(dfc[['B-V', 'Vmag']])).fit()
+    print('\n' + 'sm.ols:')
+    print(result.summary())
+
+    # statsmodel w/ dataframe-column api:
+    import statsmodels.api as sm
+    # make column BV as above
+    # result = sm.OLS(dfc['Best_R_mag'], dfc[['BV', 'Vmag']]).fit()  # <--- without constant term
+    result = sm.OLS(dfc['Best_R_mag'], sm.add_constant(dfc[['R_estimate']])).fit()
+    print('\n' + 'sm.ols:')
+    print(result.summary())
+    # also available: result.params, .pvalues, .rsquared
+
 
 
 # *********************************************************************************************
