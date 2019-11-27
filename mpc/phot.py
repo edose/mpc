@@ -14,6 +14,7 @@ from mpc.mpctools import *
 from photrix.image import Image, FITS, Aperture
 from photrix.util import RaDec, jd_from_datetime_utc, degrees_as_hex, ra_as_hours
 
+MAX_FWHM = 14  # in pixels.
 MP_COMP_RADEC_ERROR_MAX = 1.0  # in arcseconds
 # MP_COLOR_BV_MIN = 0.68  # defines color range for comps (a bit wider than normal MP color range).
 MP_COLOR_BV_MIN = 0.2  # a different guess (more inclusive)
@@ -30,9 +31,11 @@ COLOR_VI_VARIABLE_RISK = 1.5  # greater VI values risk being a variable star, th
 
 DEGREES_PER_RADIAN = 180.0 / pi
 
-MP_TOP_DIRECTORY = 'J:/Astro/Images/MP Photometry/'
 PHOTRIX_TOP_DIRECTORY = 'C:/Astro/Borea Photrix/'
 UR_LIST_PATH = 'Photometry/File-renaming.txt'
+
+MP_TOP_DIRECTORY = 'J:/Astro/Images/MP Photometry/'
+LOG_FILENAME = 'mp_photometry.log'
 DF_MP_MASTER_FILENAME = 'df_mp_master.csv'
 DF_COMPS_AND_MP_FILENAME = 'df_comps_and_mp.csv'
 DF_QUALIFIED_OBS_FILENAME = 'df_qual_obs.csv'
@@ -88,36 +91,134 @@ NEW_WORKFLOW________________________________________________ = 0
 # ***********************
 
 
-def make_df_ext_stds(an_string=None):
-    """ Renders a dataframe with all external standards info, taken from prev made photrix df_master.
-        Pre-filters the standards to color indices not too red (for safety from variable stars).
-        These external standard serve only to set zero-point (curves) for later processing.
-    :param an_string: e.g., '20191105', to find the correct df_master [string].
-    :return: dataframe of external standards data [pandas Dataframe].
+def start(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+    """  Preliminaries to begin MP photometry workflow.
+    :param mp_top_directory: path of lowest directory common to all MP photometry FITS, e.g.,
+               'J:/Astro/Images/MP Photometry' [string]
+    :param mp_number: number of target MP, e.g., 1602 for Indiana. [integer or string].
+    :param an_string: Astronight string representation, e.g., '20191106' [string].
+    :return: [None]
     """
-    from photrix.process import get_df_master
-    df = get_df_master(an_rel_directory=an_string)
-    is_std = [id.lower().startswith('std_') for id in df['ModelStarID']]
-    df_ext_stds = df[is_std]
-    not_too_red = (df_ext_stds['CI'] <= 1.4)
-    df_ext_stds = df_ext_stds[not_too_red]
-    return df_ext_stds
+    mp_int = int(mp_number)  # put this in try/catch block.
+    mp_string = str(mp_int)
+    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
+    os.chdir(mp_directory)
+    print('Working directory set to:', mp_directory)
+    log_file = open(LOG_FILENAME, mode='w')  # new file; wipe old one out if it exists.
+    log_file.write(mp_directory + '\n')
+    log_file.write('MP: ' + mp_string + '\n')
+    log_file.write('AN: ' + an_string + '\n')
+    log_file.write('This log started:' +
+                   '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
+    print('Log file started.')
+    print(' >>>>> Next:  assess().')
+    log_file.close()
 
 
-def make_z_curves(df_ext_stds):
-    """  Make and return dict of ZCurve objects, one per filter in external standards (i.e., V, R, and I).
-    :param df_ext_stds: all standard-field df_master rows from df_master (photrix), from make_df_ext_stds().
-    :return: dict of ZCurve objects, one per filter [dict of ZCurve objects].
-    Access a filter's ZCurve object via, e.g.: z_curve_v = z_curves['V']
+def assess():
+    """  Perform checks on FITS files in this directory before performing the photometry proper.
+    Modeled after assess() in variable-star photometry package 'photrix'.
+    :return: [None]
     """
-    std_filters = df_ext_stds['Filter'].copy().drop_duplicates()
-    state_dict = get_session_state()
-    z_curves = dict()
-    for filter in std_filters:
-        transform = state_dict['transform'][filter]
-        extinction = state_dict['extinction'][filter]
-        z_curves[filter] = ZCurve(filter, df_ext_stds, transform, extinction)
-    return z_curves
+    this_directory, mp_string, an_string, log_file = get_context()
+    log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
+
+    # Get list of FITS file names & start dataframe df:
+    all_filenames = pd.Series([e.name for e in os.scandir(this_directory) if e.is_file()])
+    extensions = pd.Series([os.path.splitext(f)[-1].lower() for f in all_filenames])
+    is_fits = [ext.startswith('.f') for ext in extensions]
+    # fits_filenames = all_filenames[is_fits]
+    fits_extensions = extensions[is_fits]
+
+    fits_filenames = [f for (f, ext) in zip(all_filenames, extensions) if ext.startswith('.f')]
+    df = pd.DataFrame({'Filename': fits_filenames,
+                       'Extension': fits_extensions}).sort_values(by=['Filename'])
+    df = df.set_index('Filename', drop=False)
+    df['Valid'] = False
+    df['PlateSolved'] = False
+    df['Calibrated'] = True
+    df['FWHM'] = np.nan
+    df['FocalLength'] = np.nan
+    log_file.write('assess(): ' + str(len(fits_filenames)) + ' FITS files found.' + '\n')
+
+    # Try to open all fits filenames as FITS, collect all info relevant to errors and warnings:
+    for filename in df['Filename']:
+        fits = FITS(this_directory, '', filename)
+        df.loc[filename, 'Valid'] = fits.is_valid
+        if fits.is_valid:
+            df.loc[filename, 'PlateSolved'] = fits.is_plate_solved
+            df.loc[filename, 'Calibrated'] = fits.is_calibrated
+            df.loc[filename, 'FWHM'] = fits.fwhm
+            df.loc[filename, 'FocalLength'] = fits.focal_length
+
+    # Non-FITS files: should be none; report and REMOVE THEM from df:
+    invalid_fits = df.loc[~ df['Valid'], 'Filename']
+    if len(invalid_fits) >= 1:
+        print('\nINVALID FITS files:')
+        for f in invalid_fits:
+            print('    ' + f)
+        print('\n')
+        df = df.loc[df['Valid'], :]  # keep only rows for valid FITS files.
+        del df['Valid']  # all rows in df now refer to valid FITS files.
+
+    # Now assess all FITS, and report errors & warnings:
+    not_platesolved = df.loc[~ df['PlateSolved'], 'Filename']
+    if len(not_platesolved) >= 1:
+        print('NO PLATE SOLUTION:')
+        for f in not_platesolved:
+            print('    ' + f)
+        print('\n')
+    else:
+        print('All platesolved.')
+
+    not_calibrated = df.loc[~ df['Calibrated'], 'Filename']
+    if len(not_calibrated) >= 1:
+        print('\nNOT CALIBRATED:')
+        for f in not_calibrated:
+            print('    ' + f)
+        print('\n')
+    else:
+        print('All calibrated.')
+
+    odd_fwhm_list = []
+    for f in df['Filename']:
+        fwhm = df.loc[f, 'FWHM']
+        if fwhm < 1.5 or fwhm > MAX_FWHM:  # too small or large:
+            odd_fwhm_list.append((f, fwhm))
+    if len(odd_fwhm_list) >= 1:
+        print('\nUnusual FWHM (in pixels):')
+        for f, fwhm in odd_fwhm_list:
+            print('    ' + f + ' has unusual FWHM of ' + '{0:.2f}'.format(fwhm) + ' pixels.')
+        print('\n')
+    else:
+        print('All FWHM values seem OK.')
+
+    odd_fl_list = []
+    mean_fl = df['FocalLength'].mean()
+    for f in df['Filename']:
+        fl = df.loc[f, 'FocalLength']
+        if abs((fl - mean_fl)) / mean_fl > 0.03:
+            odd_fl_list.append((f, fl))
+    if len(odd_fl_list) >= 1:
+        print('\nUnusual FocalLength (vs mean of ' + '{0:.1f}'.format(mean_fl) + ' mm:')
+        for f, fl in odd_fl_list:
+            print('    ' + f + ' has unusual Focal length of ' + str(fl))
+        print('\n')
+    else:
+        print('All Focal Lengths seem OK.')
+
+    # Summarize and write instructions for next steps:
+    n_warnings = len(not_calibrated) + len(not_platesolved) +\
+                 len(odd_fwhm_list) + len(odd_fl_list) + len(invalid_fits)
+    if n_warnings == 0:
+        print('\n >>>>> ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.')
+        print('Next: run make_df_mp_master().')
+        log_file.write('assess(): ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.' + '\n')
+    else:
+        print('\n >>>>> ' + str(n_warnings) + ' warnings (see listing above).')
+        print('        Correct these and rerun assess() until no warnings remain.')
+        log_file.write('assess(): ' + str(n_warnings) + ' warnings.' + '\n')
+    log_file.close()
 
 
 def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
@@ -130,7 +231,8 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
     :param an_string: Astronight string representation, e.g., '20191106' [string].
     :return: df_mp_master: master MP raw photometry data [pandas Dataframe].
     """
-
+    this_directory, mp_string, an_string, log_file = get_context()
+    log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
     mp_int = int(mp_number)  # put this in try/catch block.
     mp_string = str(mp_int)
 
@@ -217,7 +319,8 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
     ra_per_second = motion * sin(motion_pa / DEGREES_PER_RADIAN) / cos(dec0 / DEGREES_PER_RADIAN)
     dec_per_second = motion * cos(motion_pa / DEGREES_PER_RADIAN)
 
-    # Add MP aperture to each image (NB: the MP's (RA, Dec) changes from image to image, unlike the comps):
+    # Locate and add MP aperture to each image:
+    #   NB: the MP's (RA, Dec) sky location changes from image to image, unlike the comps.
     print("Add MP aperture...")
     mp_id = 'MP_' + mp_string
     mp_radec_dict = dict()
@@ -356,13 +459,17 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
     df_comps_and_mp.to_csv(fullpath, sep=';', quotechar='"',
                            quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
     print('df_comps_and_mp written to', fullpath)
+    # TODO: Not sure the next line's quantities are the relevant ones.
+    log_file.write(fullpath + ': ' + str(sum(is_comp)) + ' comp obs, ' + str(sum(is_mp)) + 'MP obs.')
     # do not return df_comps_and_mp...it is stored in file.
 
     # Write df_master to file:
     fullpath = os.path.join(mp_directory, DF_MP_MASTER_FILENAME)
     df_mp_master.to_csv(fullpath, sep=';', quotechar='"',
                         quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
+    # TODO: Not sure the next line's quantities are the relevant ones.
     print('df_mp_master written to', fullpath)
+    log_file.write(fullpath + ': ' + str(sum(is_comp)) + ' comp obs, ' + str(sum(is_mp)) + 'MP obs.')
     # do not return df_mp_master...it is stored in file.
 
 
@@ -601,6 +708,59 @@ def plot_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None
 SUPPORT_______________________________________________________ = 0
 
 
+def get_context():
+    """ This is run at beginning of workflow functions (except start()) to orient the function.
+    :return: 4-tuple: (this_directory, mp_string, an_string, log_file) [3 strings and a file handle]
+    """
+    this_directory = os.getcwd()
+    if not os.path.isfile(LOG_FILENAME):
+        return None
+    log_file = open(LOG_FILENAME, mode='r')  # for read only
+    lines = log_file.readlines()
+    log_file.close()
+    if len(lines) < 3:
+        return None
+    if lines[0].strip().lower().replace('\\', '/').replace('//', '/') != \
+        this_directory.strip().lower().replace('\\', '/').replace('//', '/'):
+        print('Working directory does not match directory at top of log file.')
+        return None
+    mp_string = lines[1][3:].strip().upper()
+    an_string = lines[2][3:].strip()
+    return this_directory, mp_string, an_string, log_file
+
+
+def make_df_ext_stds(an_string=None):
+    """ Renders a dataframe with all external standards info, taken from prev made photrix df_master.
+        Pre-filters the standards to color indices not too red (for safety from variable stars).
+        These external standard serve only to set zero-point (curves) for later processing.
+    :param an_string: e.g., '20191105', to find the correct df_master [string].
+    :return: dataframe of external standards data [pandas Dataframe].
+    """
+    from photrix.process import get_df_master
+    df = get_df_master(an_rel_directory=an_string)
+    is_std = [id.lower().startswith('std_') for id in df['ModelStarID']]
+    df_ext_stds = df[is_std]
+    not_too_red = (df_ext_stds['CI'] <= 1.4)
+    df_ext_stds = df_ext_stds[not_too_red]
+    return df_ext_stds
+
+
+def make_z_curves(df_ext_stds):
+    """  Make and return dict of ZCurve objects, one per filter in external standards (i.e., V, R, and I).
+    :param df_ext_stds: all standard-field df_master rows from df_master (photrix), from make_df_ext_stds().
+    :return: dict of ZCurve objects, one per filter [dict of ZCurve objects].
+    Access a filter's ZCurve object via, e.g.: z_curve_v = z_curves['V']
+    """
+    std_filters = df_ext_stds['Filter'].copy().drop_duplicates()
+    state_dict = get_session_state()
+    z_curves = dict()
+    for filter in std_filters:
+        transform = state_dict['transform'][filter]
+        extinction = state_dict['extinction'][filter]
+        z_curves[filter] = ZCurve(filter, df_ext_stds, transform, extinction)
+    return z_curves
+
+
 def get_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     """  Simple utility to read df_mp_master.csv file and return the original DataFrame.
     :param mp_top_directory: path to top directory [string].
@@ -800,6 +960,23 @@ def reorder_df_columns(df, left_column_list=[], right_column_list=[]):
                        right_column_list
     df = df[new_column_order]
     return df
+
+
+def write_to_log(    text=''):
+    pass
+
+# def do_cwd(mp_top_directory=MP_TOP_DIRECTORY + '/Test', mp_number=3460, an_string='20191118'):
+#     mp_int = int(mp_number)  # put this in try/catch block.
+#     mp_string = str(mp_int)
+#     mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
+#     save_cwd = os.getcwd()
+#     print('Starting wd:', os.getcwd())
+#     print('Going to:', mp_directory, '...')
+#     os.chdir(mp_directory)
+#     print('wd is now:', os.getcwd())
+#     print('going back...')
+#     os.chdir(save_cwd)
+#     print('finall, wd is now:', os.getcwd())
 
 
 def try_reg():
