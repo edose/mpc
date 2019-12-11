@@ -1,16 +1,17 @@
 __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
-import os
 from io import StringIO
-import shutil
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from math import cos, sin, sqrt, pi, log10, floor
+from collections import Counter
+
 import numpy as np
 import pandas as pd
 import requests
-from scipy.interpolate import UnivariateSpline, interp1d
+from scipy.interpolate import interp1d
 from statistics import median
 from mpc.mpctools import *
+
 from photrix.image import Image, FITS, Aperture
 from photrix.util import RaDec, jd_from_datetime_utc, degrees_as_hex, ra_as_hours
 
@@ -29,10 +30,14 @@ COMPS_MIN_SNR = 25  # min signal/noise for use comp obs (SNR defined here as Ins
 ADU_UR_SATURATED = 54000  # This probably should go in Instrument class, but ok for now.
 COLOR_VI_VARIABLE_RISK = 1.5  # greater VI values risk being a variable star, thus unsuitable as comp star.
 
+VALID_FITS_FILE_EXTENSIONS = ['.fits', '.fit', '.fts']
+
 DEGREES_PER_RADIAN = 180.0 / pi
 
-PHOTRIX_TOP_DIRECTORY = 'C:/Astro/Borea Photrix/'
-UR_LIST_PATH = 'Photometry/File-renaming.txt'
+PHOTRIX_TOP_DIRECTORIES = ['C:/Astro/Borea Photrix/', 'J:/Astro/Images/Borea Photrix Archives/']
+FILE_RENAMING_FILENAME = 'File-renaming.txt'
+UR_FILE_RENAMING_PATH = 'Photometry/File-renaming.txt'
+DF_MASTER_FILENAME = 'df_master.csv'
 
 MP_TOP_DIRECTORY = 'J:/Astro/Images/MP Photometry/'
 LOG_FILENAME = 'mp_photometry.log'
@@ -41,42 +46,19 @@ DF_COMPS_AND_MP_FILENAME = 'df_comps_and_mp.csv'
 DF_QUALIFIED_OBS_FILENAME = 'df_qual_obs.csv'
 DF_QUALIFIED_COMPS_AND_MP_FILENAME = 'df_qual_comps_and_mp.csv'
 
-
-def canopus(mp_top_directory=MP_TOP_DIRECTORY, rel_directory=None):
-    """ Read all FITS in mp_directory, rotate right, bin 2x2, invalidating plate solution.
-    Intended for making images suitable (North Up, smaller) for Canopus 10.
-    Tests OK ~20191101.
-    :param mp_top_directory: top path for FITS files [string]
-    :param rel_directory: rest of path to FITS files, e.g., 'MP_768/AN20191020' [string]
-    : return: None
-    """
-    this_directory = os.path.join(mp_top_directory, rel_directory)
-    # clean_subdirectory(this_directory, 'Canopus')
-    # output_directory = os.path.join(this_directory, 'Canopus')
-    output_directory = this_directory
-    import win32com.client
-    app = win32com.client.Dispatch('MaxIm.Application')
-    count = 0
-    for entry in os.scandir(this_directory):
-        if entry.is_file():
-            fullpath = os.path.join(this_directory, entry.name)
-            doc = win32com.client.Dispatch('MaxIm.Document')
-            doc.Openfile(fullpath)
-            doc.RotateRight()  # Canopus requires North-up.
-            doc.Bin(2)  # to fit into Canopus.
-            doc.StretchMode = 2  # = High, the better to see MP.
-            output_filename, output_ext = os.path.splitext(entry.name)
-            output_fullpath = os.path.join(output_directory, output_filename + '_Canopus' + output_ext)
-            doc.SaveFile(output_fullpath, 3, False, 3, False)  # FITS, no stretch, floats, no compression.
-            doc.Close  # no parentheses is actually correct. (weird MaxIm API)
-            count += 1
-            print('*', end='', flush=True)
-    print('\n' + str(count), 'converted FITS now in', output_directory)
-
+APASS_10_URL = 'https://www.aavso.org/cgi-bin/apass_dr10_download.pl'
 
 
 NEW_WORKFLOW________________________________________________ = 0
-# ***********************
+
+
+# ==========================================================================
+#  phot.py: comprehensive photometry for minor planets.
+#  Uses : (1) df_master.csv from night's photrix run, to get Landolt standard (V,R,I) data.
+#         (2) MP-field images (one each in V,R,I), to get R-mags and V-I color on comp stars, and
+#         (3) MP-field images (as many as possible, in Clear), from which we get lightcurve in R.#
+#
+#
 #  The PROPOSED WORKFLOW...below are elements that can later be strung together:
 #  OK: From photrix: df_master, extract stds data as df_stds.
 #  OK: From df_stds, construct Z(V), Z(R), and Z(I), time-dependent (interpolated).
@@ -99,47 +81,132 @@ def start(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     :param an_string: Astronight string representation, e.g., '20191106' [string].
     :return: [None]
     """
-    mp_int = int(mp_number)  # put this in try/catch block.
+    if mp_number is None or an_string is None:
+        print(' >>>>> Usage: start(top_directory, mp_number, an_string)')
+        return
+
+    # Construct directory path and make it the working directory:
+    mp_int = int(mp_number)  # put this in try/catch block?
     mp_string = str(mp_int)
     mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
     os.chdir(mp_directory)
     print('Working directory set to:', mp_directory)
+
+    # Find photrix directory:
+    photrix_directory = None
+    for p_dir in PHOTRIX_TOP_DIRECTORIES:
+        this_directory = os.path.join(p_dir, 'AN' + an_string)
+        df_master_fullpath = os.path.join(this_directory, 'Photometry', DF_MASTER_FILENAME)
+        if os.path.exists(df_master_fullpath):
+            if os.path.isfile(df_master_fullpath):
+                photrix_directory = this_directory
+                break
+    if photrix_directory is None:
+        print(' >>>>> start() cannot find photrix directory.')
+
     log_file = open(LOG_FILENAME, mode='w')  # new file; wipe old one out if it exists.
     log_file.write(mp_directory + '\n')
     log_file.write('MP: ' + mp_string + '\n')
     log_file.write('AN: ' + an_string + '\n')
-    log_file.write('This log started:' +
+    log_file.write('Photrix: ' + photrix_directory + '\n')
+    log_file.write('This log started: ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
-    print('Log file started.')
-    print(' >>>>> Next:  assess().')
     log_file.close()
+    print('Log file started.')
+    print('Next: assess()')
+
+
+def resume(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+    """  Restart a workflow in its correct working directory,
+         but keep the previous log file--DO NOT overwrite it.
+    parameters as for start().
+    :return: [None]
+    """
+    if mp_number is None or an_string is None:
+        print(' >>>>> Usage: start(top_directory, mp_number, an_string)')
+        return
+
+    # Go to proper working directory:
+    mp_int = int(mp_number)  # put this in try/catch block?
+    mp_string = str(mp_int)
+    this_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
+    os.chdir(this_directory)
+
+    # Verify that proper log file already exists in the working directory:
+    log_this_directory, log_mp_string, log_an_string, _ = get_context()
+    if log_mp_string.lower() == mp_string.lower() and log_an_string.lower() == an_string.lower():
+        print('Ready to go in', this_directory)
+    else:
+        print(' >>>>> Problems resuming in', this_directory)
 
 
 def assess():
-    """  Perform checks on FITS files in this directory before performing the photometry proper.
-    Modeled after assess() in variable-star photometry package 'photrix'.
+    """  First, verify that all required files are in the working directory or otherwise accessible.
+         Then, perform checks on FITS files in this directory before performing the photometry proper.
+         Modeled after and extended from assess() found in variable-star photometry package 'photrix'.
     :return: [None]
     """
-    this_directory, mp_string, an_string, log_file = get_context()
+    this_directory, mp_string, an_string, photrix_directory = get_context()
     log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
+    log_file.write('\n ===== access()  ' +
+                   '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
+    n_warnings = 0
 
-    # Get list of FITS file names & start dataframe df:
-    all_filenames = pd.Series([e.name for e in os.scandir(this_directory) if e.is_file()])
-    extensions = pd.Series([os.path.splitext(f)[-1].lower() for f in all_filenames])
-    is_fits = [ext.startswith('.f') for ext in extensions]
-    # fits_filenames = all_filenames[is_fits]
-    fits_extensions = extensions[is_fits]
+    # Ensure that df_master is accessible:
+    df_master = get_df_master(os.path.join(photrix_directory, 'Photometry'))
+    df_master_exists = (len(df_master) > 100) and (len(df_master.columns) > 20)
+    if not df_master_exists:
+        print(' >>>>> df_master.csv not found.')
+        log_file.write(' >>>>> df_master.csv not found.\n')
+        n_warnings += 1
 
-    fits_filenames = [f for (f, ext) in zip(all_filenames, extensions) if ext.startswith('.f')]
+    # Ensure that uncalibrated (Ur) files and cross-reference to them are all accessible:
+    df_ur = pd.read_csv(os.path.join(photrix_directory, 'Photometry', FILE_RENAMING_FILENAME),
+                        sep=';', index_col='PhotrixName')
+    print('verifying presence of', len(df_ur), 'Ur (uncalibrated) FITS files...')
+    ur_fits_missing = []
+    for ur_fits_name in df_ur['UrName']:
+        ur_fits = FITS(photrix_directory, 'Ur', ur_fits_name)
+        if not ur_fits.is_valid:
+            ur_fits_missing.append(ur_fits_name)
+            print(' >>>>> UR file ' + ur_fits_name + ' not found.')
+            log_file.write(' >>>>> UR file ' + ur_fits_name + ' not found.')
+    if len(ur_fits_missing) >= 1:
+        print(' >>>>> ' + str(len(ur_fits_missing)) + ' Ur FITS files missing.')
+        log_file.write(' >>>>> ' + str(len(ur_fits_missing)) + ' Ur FITS files missing.\n')
+    n_warnings += len(ur_fits_missing)
+
+    # Verify that (valid) required FITS file types exist within this directory:
+    fits_filenames = get_fits_filenames(this_directory)
+    print(str(len(fits_filenames)) + ' FITS files found:')
+    log_file.write(str(len(fits_filenames)) + ' FITS files found:' + '\n')
+    c = Counter()
+    for filename in fits_filenames:
+        fits = FITS(this_directory, '', filename)
+        if fits.is_valid:
+            c[fits.filter] += 1
+    required_files_by_filter = [('V', 1), ('R', 1), ('I', 1), ('Clear', 5)]
+    for filt, required in required_files_by_filter:
+        if c[filt] >= required:
+            print('   ' + str(c[filt]), 'in filter', filt + ': OK.')
+            log_file.write('   ' + str(c[filt]) + ' in filter ' + filt + ': OK.\n')
+        else:
+            print(' >>>>> ' + str(c[filt]) + ' in filter ' + filt + ' found: NOT ENOUGH. ' +
+                  str(required) + ' are required.')
+            log_file.write(' >>>>> ' + str(c[filt]) + ' in filter ' + filt + ' found: NOT ENOUGH. ' +
+                  str(required) + ' are required.')
+            n_warnings += 1
+
+    # Start dataframe for main FITS integrity checks:
+    fits_extensions = pd.Series([os.path.splitext(f)[-1].lower() for f in fits_filenames])
     df = pd.DataFrame({'Filename': fits_filenames,
-                       'Extension': fits_extensions}).sort_values(by=['Filename'])
+                       'Extension': fits_extensions.values}).sort_values(by=['Filename'])
     df = df.set_index('Filename', drop=False)
     df['Valid'] = False
     df['PlateSolved'] = False
     df['Calibrated'] = True
     df['FWHM'] = np.nan
     df['FocalLength'] = np.nan
-    log_file.write('assess(): ' + str(len(fits_filenames)) + ' FITS files found.' + '\n')
 
     # Try to open all fits filenames as FITS, collect all info relevant to errors and warnings:
     for filename in df['Filename']:
@@ -160,6 +227,7 @@ def assess():
         print('\n')
         df = df.loc[df['Valid'], :]  # keep only rows for valid FITS files.
         del df['Valid']  # all rows in df now refer to valid FITS files.
+    n_warnings += len(invalid_fits)
 
     # Now assess all FITS, and report errors & warnings:
     not_platesolved = df.loc[~ df['PlateSolved'], 'Filename']
@@ -170,6 +238,7 @@ def assess():
         print('\n')
     else:
         print('All platesolved.')
+    n_warnings += len(not_platesolved)
 
     not_calibrated = df.loc[~ df['Calibrated'], 'Filename']
     if len(not_calibrated) >= 1:
@@ -179,6 +248,7 @@ def assess():
         print('\n')
     else:
         print('All calibrated.')
+    n_warnings += len(not_calibrated)
 
     odd_fwhm_list = []
     for f in df['Filename']:
@@ -192,6 +262,7 @@ def assess():
         print('\n')
     else:
         print('All FWHM values seem OK.')
+    n_warnings += len(odd_fwhm_list)
 
     odd_fl_list = []
     mean_fl = df['FocalLength'].mean()
@@ -206,13 +277,12 @@ def assess():
         print('\n')
     else:
         print('All Focal Lengths seem OK.')
+    n_warnings += len(odd_fl_list)
 
     # Summarize and write instructions for next steps:
-    n_warnings = len(not_calibrated) + len(not_platesolved) +\
-                 len(odd_fwhm_list) + len(odd_fl_list) + len(invalid_fits)
     if n_warnings == 0:
         print('\n >>>>> ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.')
-        print('Next: run make_df_mp_master().')
+        print('Next: make_df_mp_master()')
         log_file.write('assess(): ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.' + '\n')
     else:
         print('\n >>>>> ' + str(n_warnings) + ' warnings (see listing above).')
@@ -221,37 +291,27 @@ def assess():
     log_file.close()
 
 
-def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+def make_df_mp_master():
     """  Main first stage in new MP photometry workflow. Mostly calls other subfunctions.
          Check files, extract standards data from photrix df_mp_master, do raw photometry on MP & comps
              to make df_mp_master.
-    :param mp_top_directory: path of lowest directory common to all MP photometry FITS, e.g.,
-               'J:/Astro/Images/MP Photometry' [string]
-    :param mp_number: number of target MP, e.g., 1602 for Indiana. [integer or string].
-    :param an_string: Astronight string representation, e.g., '20191106' [string].
     :return: df_mp_master: master MP raw photometry data [pandas Dataframe].
     """
-    this_directory, mp_string, an_string, log_file = get_context()
+    this_directory, mp_string, an_string, photrix_directory = get_context()
     log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
-    mp_int = int(mp_number)  # put this in try/catch block.
+    mp_int = int(mp_string)  # put this in try/catch block.
     mp_string = str(mp_int)
+    log_file.write('\n ===== make_df_mp_master()  ' +
+                   '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
-    # Get all relevant FITS filenames, make FITS and Image objects (photrix):
-    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
-    all_names = [entry.name for entry in os.scandir(mp_directory) if entry.is_file()]
-    fits_names = [a for a in all_names if a.split('.')[1][0].lower() == 'f']
-    fits_list = []
-    image_list = []
-    for fits_name in fits_names:
-        # construct FITS and Image objects:
-        fits_object = FITS(mp_top_directory, os.path.join('MP_' + mp_string, 'AN' + an_string), fits_name)
-        image = Image(fits_object)
-        fits_list.append(fits_object)
-        image_list.append(image)
+    # Get all relevant FITS filenames, make lists of FITS and Image objects (per photrix):
+    fits_names = get_fits_filenames(this_directory)
+    fits_list = [FITS(this_directory, '', fits_name) for fits_name in fits_names]
+    image_list = [Image(fits_object) for fits_object in fits_list]
 
     # From first FITS object, get coordinates for comp acquisition:
-    degRA = fits_list[0].ra
-    degDec = fits_list[0].dec
+    deg_ra = fits_list[0].ra
+    deg_dec = fits_list[0].dec
 
     # From first image object, get radius for comp acquisition:
     ps = fits_list[0].plate_solution  # a pandas Series
@@ -262,12 +322,12 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
 
     # Get all APASS 10 comps that might fall within images:
     comp_search_radius = 1.05*degrees_to_corner
-    df_comps = get_apass10_comps(degRA, degDec, comp_search_radius,
+    df_comps = get_apass10_comps(deg_ra, deg_dec, comp_search_radius,
                                  r_min=COMPS_MIN_R_MAG, r_max=COMPS_MAX_R_MAG, mp_color_only=True)
     df_comps['Type'] = 'Comp'
     print(str(len(df_comps)), 'qualifying APASS10 comps found within',
           '{:.3f}'.format(comp_search_radius) + u'\N{DEGREE SIGN}' + ' of',
-          ra_as_hours(degRA) + 'h', degrees_as_hex(degDec) + u'\N{DEGREE SIGN}')
+          ra_as_hours(deg_ra) + 'h', degrees_as_hex(deg_dec) + u'\N{DEGREE SIGN}')
     df_comps['ID'] = [str(id) for id in df_comps['ID']]
 
     # Make df_comps_and_mp by adding MP row to df_comps:
@@ -276,13 +336,13 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
         dict_mp_row[colname] = [None]
     dict_mp_row['ID'] = ['MP_' + mp_string]
     dict_mp_row['Type'] = ['MP']
-    df_mp_row = pd.DataFrame(dict_mp_row, index=[dict_mp_row['ID']])
+    df_mp_row = pd.DataFrame(dict_mp_row, index=dict_mp_row['ID'])
     df_comps_and_mp = pd.concat([df_mp_row, df_comps])
-    del df_comps, df_mp_row  # obsolete.
+    del df_comps, df_mp_row  # as they are now obsolete.
 
     # Move some of df_comps_and_mp's columns to its left, leave the rest in original order:
     left_columns = ['ID', 'Type', 'degRA', 'degDec', 'R_estimate', 'e_R_estimate']
-    df_comps_and_mp = reorder_df_columns(df_comps_and_mp, left_columns)
+    df_comps_and_mp = reorder_df_columns(df_comps_and_mp, left_column_list=left_columns)
 
     # Add all comp apertures to every image:
     print(str(len(image_list)), 'images:')
@@ -334,7 +394,7 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
 
     # Build df_master_list (to make df_mp_master):
     print("Build df_master_list...")
-    df_ur = pd.read_csv(os.path.join(PHOTRIX_TOP_DIRECTORY, an_string, UR_LIST_PATH),
+    df_ur = pd.read_csv(os.path.join(photrix_directory, 'Photometry', FILE_RENAMING_FILENAME),
                         sep=';', index_col='PhotrixName')
     df_one_image_list = []
     for image in image_list:
@@ -377,7 +437,7 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
         # For each aperture, add its max ADU from the original ("Ur", uncalibrated) FITS file:
         ur_filename = df_ur.loc[fits_name, 'UrName']
         df_apertures['UrFITSfile'] = ur_filename
-        ur_image = Image.from_fits_path(PHOTRIX_TOP_DIRECTORY, os.path.join(an_string, 'Ur'), ur_filename)
+        ur_image = Image.from_fits_path(photrix_directory, 'Ur', ur_filename)
         df_apertures['MaxADU_Ur'] = np.nan
         for star_id in df_apertures.index:
             ap = Aperture(ur_image, star_id,
@@ -413,9 +473,7 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
     df_mp_master.insert(0, 'ObsID', obs_id_list)
     df_mp_master.index = list(df_mp_master['ObsID'])
     df_mp_master['Type'] = ['MP' if id == mp_id else 'Comp' for id in df_mp_master['ID']]
-    # df_mp_master.index = list(df_mp_master['Serial'])
     n_comp_obs = sum([type == 'Comp' for type in df_mp_master['Type']])
-    n_mp_obs = len(df_mp_master) - n_comp_obs
 
     # Fill in the JD_fract and JD_fract2 columns:
     jd_floor = floor(df_mp_master['JD_mid'].min())  # requires that all JD_mid values be known.
@@ -424,7 +482,7 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
     # Move some of the columns to the Dataframe's left, leave the rest in original order:
     left_columns = ['ObsID', 'ID', 'Type', 'R_estimate', 'Serial', 'JD_mid',
                     'InstMag', 'InstMagSigma', 'Exposure']
-    df_mp_master = reorder_df_columns(df_mp_master, left_columns, [])
+    df_mp_master = reorder_df_columns(df_mp_master, left_column_list=left_columns)
 
     # Remove obviously bad comp and MP observations (dataframe rows) and summarize for user::
     is_comp = pd.Series([type == 'Comp' for type in df_mp_master['Type']])
@@ -432,6 +490,8 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
     is_saturated = pd.Series([adu > ADU_UR_SATURATED for adu in df_mp_master['MaxADU_Ur']])
     is_low_snr = pd.Series([ims > (1.0 / COMPS_MIN_SNR) for ims in df_mp_master['InstMagSigma']])
     print('\nStarting with', str(sum(is_comp)), 'comp obs,', str(sum(is_mp)), 'MP obs:')
+    log_file.write('Starting with ' + str(sum(is_comp)) + ' comp obs, ' + str(sum(is_mp)) + ' MP obs:\n')
+
     # Identify bad comp observations:
     is_saturated_comp_obs = is_saturated & is_comp
     is_low_snr_comp_obs = is_low_snr & is_comp
@@ -439,6 +499,10 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
     print('   Comp obs: removing',
           str(sum(is_saturated_comp_obs)), 'saturated, ',
           str(sum(is_low_snr_comp_obs)), 'low SNR.')
+    log_file.write('   Comp obs: removing ' +
+                   str(sum(is_saturated_comp_obs)) + ' saturated, ' +
+                   str(sum(is_low_snr_comp_obs)) + ' low SNR.\n')
+
     # Identify bad MP observations:
     is_saturated_mp_obs = is_saturated & is_mp
     is_low_snr_mp_obs = is_low_snr & is_mp
@@ -446,47 +510,52 @@ def make_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_stri
     print('     MP obs: removing',
           str(sum(is_saturated_mp_obs)), 'saturated, ',
           str(sum(is_low_snr_mp_obs)), 'low SNR.')
-    # Perform the removal:
+    log_file.write('     MP obs: removing ' +
+                   str(sum(is_saturated_mp_obs)) + ' saturated, ' +
+                   str(sum(is_low_snr_mp_obs)) + ' low SNR.\n')
+
+    # Remove the identified bad MP observations:
     to_remove = is_bad_comp_obs | is_bad_mp_obs
     to_keep = list(~to_remove)
     df_mp_master = df_mp_master.loc[to_keep, :]
     is_comp = pd.Series([type == 'Comp' for type in df_mp_master['Type']])  # remake; rows have changed
     is_mp = ~is_comp  # remake; rows have changed
-    print('Keeping', str(sum(is_comp)), 'comp obs,', str(sum(is_mp)), 'MP obs.\n')
+    # print('Keeping', str(sum(is_comp)), 'comp obs,', str(sum(is_mp)), 'MP obs.\n')
 
-    # Write df_comps_and_mp to file:
-    fullpath = os.path.join(mp_directory, DF_COMPS_AND_MP_FILENAME)
-    df_comps_and_mp.to_csv(fullpath, sep=';', quotechar='"',
+    # Write df_comps_and_mp to file (rather than returning the df):
+    fullpath_comps_and_mp = os.path.join(this_directory, DF_COMPS_AND_MP_FILENAME)
+    df_comps_and_mp.to_csv(fullpath_comps_and_mp, sep=';', quotechar='"',
                            quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
-    print('df_comps_and_mp written to', fullpath)
-    # TODO: Not sure the next line's quantities are the relevant ones.
-    log_file.write(fullpath + ': ' + str(sum(is_comp)) + ' comp obs, ' + str(sum(is_mp)) + 'MP obs.')
-    # do not return df_comps_and_mp...it is stored in file.
+    print('df_comps_and_mp written to', fullpath_comps_and_mp)
 
-    # Write df_master to file:
-    fullpath = os.path.join(mp_directory, DF_MP_MASTER_FILENAME)
-    df_mp_master.to_csv(fullpath, sep=';', quotechar='"',
+    # Write df_master to file (rather than returning the df):
+    fullpath_master = os.path.join(this_directory, DF_MP_MASTER_FILENAME)
+    df_mp_master.to_csv(fullpath_master, sep=';', quotechar='"',
                         quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
-    # TODO: Not sure the next line's quantities are the relevant ones.
-    print('df_mp_master written to', fullpath)
-    log_file.write(fullpath + ': ' + str(sum(is_comp)) + ' comp obs, ' + str(sum(is_mp)) + 'MP obs.')
-    # do not return df_mp_master...it is stored in file.
+    print('df_mp_master written to', fullpath_master)
+
+    # Write log file lines:
+    n_comps = sum([t.lower() == 'comp' for t in df_comps_and_mp['Type']])
+    n_mps = sum([t.lower() == 'mp' for t in df_comps_and_mp['Type']])
+    log_file.write('Keeping ' + str(n_comps) + ' comps, ' + str(n_mps) + ' mps.\n')
+    log_file.write('Keeping ' + str(sum(is_comp)) + ' comp obs, ' + str(sum(is_mp)) + ' MP obs.\n')
+    log_file.write(fullpath_comps_and_mp + ' written.\n')
+    log_file.write(fullpath_master + ' written.\n')
+    log_file.close()
 
 
-def prep_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+def qualify_comps():
     """  Prepare all data for comp stars, using instrumental magnitudes and other comp data.
-         Make preliminary comp-star selections, esp. qualifying comps as being observed in every MP image.
-         Make plots to assist user in further screening comp stars.
+         Keep only qualified comp stars, esp. qualifying comps as being observed in every MP image.
     From make_df_master(), use:df_mp_master (one row per observation) and
                                df_comps_and_mp (one row per comp and minor planet).
-    :param mp_top_directory: path of lowest directory common to all MP photometry FITS, e.g.,
-               'J:/Astro/Images/MP Photometry' [string]
-    :param mp_number: number of target MP, e.g., 1602 for Indiana. [integer or string].
-    :param an_string: Astronight string representation, e.g., '20191106' [string].
-    :return: [None] Write updated df_mp_master and df_comps_and_mp to files.
+    :return: [None] Write df_qual_comps_and_mp (updated df_comps_and_mp) to file,
+                    write df_qual_obs (updated df_mp_master) to file.
     """
-    mp_string = str(mp_number)
-    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
+    this_directory, mp_string, an_string, photrix_directory = get_context()
+    log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
+    log_file.write('\n ===== qualify_comps()  ' +
+                   '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
     # ================ Start TESTING CODE block. ====================
     # Copy backup files (direct from make_df_mp_master()) to files by mp_phot().
@@ -503,27 +572,27 @@ def prep_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None
     # ================= End of TESTING CODE block. ===================
 
     # Load data:
-    df_mp_master = get_df_mp_master(mp_top_directory, mp_string, an_string)
-    df_comps_and_mp = get_df_comps_and_mp(mp_top_directory, mp_string, an_string)
+    df_mp_master = get_df_mp_master()
+    df_comps_and_mp = get_df_comps_and_mp()
     state = get_session_state()  # for extinction and transform values.
 
-    # Make df_VRI, local to this function, one row per MP-field image in V, R, or I.
-    is_VRI = list([filter in ['V', 'R', 'I'] for filter in df_mp_master['Filter']])
-    VRI_filenames = df_mp_master.loc[is_VRI, 'Filename'].copy().drop_duplicates()  # index is correct too.
-    VRI_obs_ids = list(VRI_filenames.index)
-    df_VRI = pd.DataFrame({'Serial': VRI_obs_ids}, index=VRI_obs_ids)
-    df_VRI['Filename'] = VRI_filenames
-    df_VRI['JD_mid'] = list(df_mp_master.loc[VRI_obs_ids, 'JD_mid'])
-    df_VRI['UTC_mid'] = list(df_mp_master.loc[VRI_obs_ids, 'UTC_mid'])
-    df_VRI['Filter'] = list(df_mp_master.loc[VRI_obs_ids, 'Filter'])
-    df_VRI['Airmass'] = list(df_mp_master.loc[VRI_obs_ids, 'Airmass'])
-    print(str(len(df_VRI)), 'VRI images.')
+    # Make df_vri, local to this function, one row per MP-field image in V, R, or I.
+    is_vri = list([filter in ['V', 'R', 'I'] for filter in df_mp_master['Filter']])
+    vri_filenames = df_mp_master.loc[is_vri, 'Filename'].copy().drop_duplicates()  # index is correct too.
+    vri_obs_ids = list(vri_filenames.index)
+    df_vri = pd.DataFrame({'Serial': vri_obs_ids}, index=vri_obs_ids)
+    df_vri['Filename'] = vri_filenames
+    df_vri['JD_mid'] = list(df_mp_master.loc[vri_obs_ids, 'JD_mid'])
+    df_vri['UTC_mid'] = list(df_mp_master.loc[vri_obs_ids, 'UTC_mid'])
+    df_vri['Filter'] = list(df_mp_master.loc[vri_obs_ids, 'Filter'])
+    df_vri['Airmass'] = list(df_mp_master.loc[vri_obs_ids, 'Airmass'])
+    print(str(len(df_vri)), 'VRI images.')
 
-    # Calculate zero-point "Z" value for each VRI image, add to df_VRI:
-    df_ext_stds = make_df_ext_stds(an_string)  # stds data come from photrix:df_master.
+    # Calculate zero-point "Z" value for each VRI image, add to df_vri:
+    df_ext_stds = make_df_ext_stds()  # stds data come from photrix:df_master.
     z_curves = make_z_curves(df_ext_stds)  # each dict entry is 'filter': ZCurve object.
-    z_values = [z_curves[filter].at_jd(jd) for filter, jd in zip(df_VRI['Filter'], df_VRI['JD_mid'])]
-    df_VRI['Z'] = z_values  # new column.
+    z_values = [z_curves[filter].at_jd(jd) for filter, jd in zip(df_vri['Filter'], df_vri['JD_mid'])]
+    df_vri['Z'] = z_values  # new column.
 
     # Make list of only comp and MP IDs that have qualified data in *every* image in df_mp_master:
     id_list = df_mp_master['ID'].copy().drop_duplicates()
@@ -538,21 +607,15 @@ def prep_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None
 
     # Make new df_qual_obs (subset of df_mp_master):
     obs_to_keep = [id in qualified_id_list for id in df_mp_master['ID']]
-    df_qual_obs = df_mp_master.loc[obs_to_keep, :]  # new df; all images have same comps and MPs.
+    df_qual_obs = df_mp_master.loc[obs_to_keep, :].copy()  # new df; all images have same comps and MPs.
     print('obs: ', str(len(df_qual_obs)), 'kept in df_qual_obs from',
           str(len(df_mp_master)), 'in df_mp_master.')
-    del df_mp_master  # trigger error if used below.
+    del df_mp_master  # to trigger error if used below.
 
     # Make new df_qual_comps_and_mp (subset of df_comps_and_mp):
     rows_to_keep = [id in qualified_id_list for id in df_comps_and_mp['ID']]
-    df_qual_comps_and_mp = df_comps_and_mp[rows_to_keep]
-    del df_comps_and_mp  # trigger error if used below.
-
-    # Add column 'InAllImages' to df_comps_and_mp and to df_mp_master:
-    # qualified_comps_and_mp = [id in qualified_id_list for id in df_comps_and_mp['ID']]
-    # df_comps_and_mp['InAllImages'] = qualified_comps_and_mp
-    # df_mp_master = pd.merge(df_mp_master, df_comps_and_mp[['ID', 'InAllImages']].copy(),
-    #                         how='left', on='ID').set_index('ObsID', drop=False)
+    df_qual_comps_and_mp = df_comps_and_mp[rows_to_keep].copy()
+    del df_comps_and_mp  # to trigger error if used below.
 
     # From VRI images, calculate best untransformed mag for each MP and comp, write to df_comps_and_mp:
     # Columns are named 'Best_untr_mag_V', etc.
@@ -563,12 +626,12 @@ def prep_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None
         untransformed_mag_dict = dict()
         for id in qualified_id_list:
             untransformed_mag_dict[id] = []
-        for idx in df_VRI.index:
-            if df_VRI.loc[idx, 'Filter'] == filter:
-                zero_point = df_VRI.loc[idx, 'Z']
-                airmass = df_VRI.loc[idx, 'Airmass']
+        for idx in df_vri.index:
+            if df_vri.loc[idx, 'Filter'] == filter:
+                zero_point = df_vri.loc[idx, 'Z']
+                airmass = df_vri.loc[idx, 'Airmass']
                 for id in qualified_id_list:
-                    filename = df_VRI.loc[idx, 'Filename']
+                    filename = df_vri.loc[idx, 'Filename']
                     obs_id = filename + '_' + id
                     instrumental_mag = df_qual_obs.loc[obs_id, 'InstMag']
                     untransformed_mag = instrumental_mag - extinction * airmass - zero_point
@@ -595,34 +658,46 @@ def prep_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None
                      r_transform * df_qual_comps_and_mp.loc[id, 'Best_CI']
         df_qual_comps_and_mp.loc[id, 'Best_R_mag'] = best_r_mag
 
-    # Reorder columns in df_qual_comps_and_mp, then write it file:
+    # Reorder columns in df_qual_comps_and_mp, then write it file (ratner than returning it):
     df_qual_comps_and_mp = reorder_df_columns(df_qual_comps_and_mp,
-                                              ['ID', 'Type', 'Best_R_mag', 'Best_CI'])
-    fullpath = os.path.join(mp_directory, DF_QUALIFIED_COMPS_AND_MP_FILENAME)
-    df_qual_comps_and_mp.to_csv(fullpath, sep=';', quotechar='"',
-                           quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
-    print('New df_qual_comps_and_mp written to', fullpath)
+                                              left_column_list=['ID', 'Type', 'Best_R_mag', 'Best_CI'])
+    fullpath_qual_comps_and_mp = os.path.join(this_directory, DF_QUALIFIED_COMPS_AND_MP_FILENAME)
+    df_qual_comps_and_mp.to_csv(fullpath_qual_comps_and_mp, sep=';', quotechar='"',
+                                quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
+    print('New df_qual_comps_and_mp written to', fullpath_qual_comps_and_mp)
 
-    # Reorder columns in df_qual_obs, then write it to file:
-    df_qual_obs = reorder_df_columns(df_qual_obs, ['ObsID', 'ID', 'Type'])
-    fullpath = os.path.join(mp_directory, DF_QUALIFIED_OBS_FILENAME)
-    df_qual_obs.to_csv(fullpath, sep=';', quotechar='"',
-                        quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
-    print('New df_qual_obs written to', fullpath)
+    # Reorder columns in df_qual_obs, then write it to file (rather than returning it):
+    df_qual_obs = reorder_df_columns(df_qual_obs, left_column_list=['ObsID', 'ID', 'Type'])
+    fullpath_qual_obs = os.path.join(this_directory, DF_QUALIFIED_OBS_FILENAME)
+    df_qual_obs.to_csv(fullpath_qual_obs, sep=';', quotechar='"',
+                       quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
+    print('New df_qual_obs written to', fullpath_qual_obs)
+
+    # Write log file lines:
+    n_qual_comps = sum([t.lower() == 'comp' for t in df_qual_comps_and_mp['Type']])
+    n_qual_mps = sum([t.lower() == 'mp' for t in df_qual_comps_and_mp['Type']])
+    log_file.write('Keeping ' +
+                   str(n_qual_comps) + ' qualified comps, ' +
+                   str(n_qual_mps) + ' qualified MPs.\n')
+    n_qual_comp_obs = sum([t.lower() == 'comp' for t in df_qual_obs['Type']])
+    n_qual_mp_obs = sum([t.lower() == 'mp' for t in df_qual_obs['Type']])
+    log_file.write('Keeping ' +
+                   str(n_qual_comp_obs) + ' qualified comp obs, ' +
+                   str(n_qual_mp_obs) + ' qualified MP obs.\n')
+    log_file.write(fullpath_qual_comps_and_mp + ' written.\n')
+    log_file.write(fullpath_qual_obs + ' written.\n')
+    log_file.close()
 
 
-def plot_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+def plot_comps():
     """  Make plots supporting user's final selection of comp stars for this MP session.
-    :param mp_top_directory:
-    :param mp_number:
-    :param an_string:
     :return: [None]
     """
     import matplotlib.pyplot as plt
 
-    mp_string = str(mp_number)
-    df_qual_comps_and_mp = get_df_qual_comps_and_mp(mp_top_directory, mp_string, an_string)
-    df_qual_obs = get_df_qual_obs(mp_top_directory, mp_string, an_string)
+    this_directory, mp_string, an_string, photrix_directory = get_context()
+    df_qual_comps_and_mp = get_df_qual_comps_and_mp()
+    df_qual_obs = get_df_qual_obs()
 
     df_qual_comps_only = df_qual_comps_and_mp[df_qual_comps_and_mp['Type'] == 'Comp']
     df_mp_only = df_qual_comps_and_mp[df_qual_comps_and_mp['Type'] == 'MP']
@@ -688,21 +763,10 @@ def plot_comps(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None
     fig.canvas.set_window_title('Comp star diagnostic plots')
     plt.show()
 
-
     # Write diagnostics to console:
     # (these data may better go into a file, later)
 
-
-
     # Write select_comps.txt stub to mp_directory (using statistics--e.g. from above plots?):
-
-
-
-
-
-
-
-
 
 
 SUPPORT_______________________________________________________ = 0
@@ -710,7 +774,7 @@ SUPPORT_______________________________________________________ = 0
 
 def get_context():
     """ This is run at beginning of workflow functions (except start()) to orient the function.
-    :return: 4-tuple: (this_directory, mp_string, an_string, log_file) [3 strings and a file handle]
+    :return: 4-tuple: (this_directory, mp_string, an_string, photrix_directory) [3 strings]
     """
     this_directory = os.getcwd()
     if not os.path.isfile(LOG_FILENAME):
@@ -721,23 +785,47 @@ def get_context():
     if len(lines) < 3:
         return None
     if lines[0].strip().lower().replace('\\', '/').replace('//', '/') != \
-        this_directory.strip().lower().replace('\\', '/').replace('//', '/'):
+            this_directory.strip().lower().replace('\\', '/').replace('//', '/'):
         print('Working directory does not match directory at top of log file.')
         return None
     mp_string = lines[1][3:].strip().upper()
     an_string = lines[2][3:].strip()
-    return this_directory, mp_string, an_string, log_file
+    photrix_directory = lines[3][8:].strip()
+    return this_directory, mp_string, an_string, photrix_directory
 
 
-def make_df_ext_stds(an_string=None):
+def get_df_master(directory):
+    """  Simple utility to read df_master.csv file and return the DataFrame.
+         Adapted from photrix.process.get_df_master() 20191209.
+    :return: pandas DataFrame with all comp, check, and target star raw photometric data
+         (which dataframe is generated and csv-written by R, as of May 2017).
+         The DataFrame index is set to equal column Serial (which was already a kind of index).
+    """
+    fullpath = os.path.join(directory, DF_MASTER_FILENAME)
+    if not os.path.exists(directory):
+        print(' >>>>> Cannot load', fullpath)
+        return None
+    df_master = pd.read_csv(fullpath, sep=';')
+    df_master.index = df_master['Serial']
+    return df_master
+
+
+def get_fits_filenames(directory):
+    all_filenames = pd.Series([e.name for e in os.scandir(directory) if e.is_file()])
+    extensions = pd.Series([os.path.splitext(f)[-1].lower() for f in all_filenames])
+    is_fits = [ext.lower() in VALID_FITS_FILE_EXTENSIONS for ext in extensions]
+    fits_filenames = all_filenames[is_fits]
+    return fits_filenames
+
+
+def make_df_ext_stds():
     """ Renders a dataframe with all external standards info, taken from prev made photrix df_master.
         Pre-filters the standards to color indices not too red (for safety from variable stars).
         These external standard serve only to set zero-point (curves) for later processing.
-    :param an_string: e.g., '20191105', to find the correct df_master [string].
     :return: dataframe of external standards data [pandas Dataframe].
     """
-    from photrix.process import get_df_master
-    df = get_df_master(an_rel_directory=an_string)
+    _, _, _, photrix_directory = get_context()
+    df = get_df_master(os.path.join(photrix_directory, 'Photometry'))
     is_std = [id.lower().startswith('std_') for id in df['ModelStarID']]
     df_ext_stds = df[is_std]
     not_too_red = (df_ext_stds['CI'] <= 1.4)
@@ -761,58 +849,42 @@ def make_z_curves(df_ext_stds):
     return z_curves
 
 
-def get_df_mp_master(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+def get_df_mp_master():
     """  Simple utility to read df_mp_master.csv file and return the original DataFrame.
-    :param mp_top_directory: path to top directory [string].
-    :param mp_number: number of target Minor Planet [string or int].
-    :param an_string: Astronight (not UTC) date designation, e.g., '20191105' [string].
     :return: df_mp_master from mp_phot() [pandas Dataframe]
     """
-    mp_string = str(mp_number)
-    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
-    fullpath = os.path.join(mp_directory, DF_MP_MASTER_FILENAME)
+    this_directory, _, _, _ = get_context()
+    fullpath = os.path.join(this_directory, DF_MP_MASTER_FILENAME)
     df_mp_master = pd.read_csv(fullpath, sep=';', index_col=0)
     return df_mp_master
 
 
-def get_df_comps_and_mp(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+def get_df_comps_and_mp():
     """  Simple utility to read df_comps.csv file and return the original DataFrame.
-    :param mp_top_directory: path to top directory [string].
-    :param mp_number: number of target Minor Planet [string or int].
-    :param an_string: Astronight (not UTC) date designation, e.g., '20191105' [string].
     :return: df_comps_and_mp from mp_phot() [pandas Dataframe]
     """
-    mp_string = str(mp_number)
-    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
-    fullpath = os.path.join(mp_directory, DF_COMPS_AND_MP_FILENAME)
+    this_directory, _, _, _ = get_context()
+    fullpath = os.path.join(this_directory, DF_COMPS_AND_MP_FILENAME)
     df_comps_and_mp = pd.read_csv(fullpath, sep=';', index_col=0)
     return df_comps_and_mp
 
 
-def get_df_qual_obs(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+def get_df_qual_obs():
     """  Simple utility to read df_qual_obs.csv file and return the original DataFrame.
-    :param mp_top_directory: path to top directory [string].
-    :param mp_number: number of target Minor Planet [string or int].
-    :param an_string: Astronight (not UTC) date designation, e.g., '20191105' [string].
     :return: df_qual_obs from mp_phot() [pandas Dataframe]
     """
-    mp_string = str(mp_number)
-    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
-    fullpath = os.path.join(mp_directory, DF_QUALIFIED_OBS_FILENAME)
+    this_directory, _, _, _ = get_context()
+    fullpath = os.path.join(this_directory, DF_QUALIFIED_OBS_FILENAME)
     df_qual_obs = pd.read_csv(fullpath, sep=';', index_col=0)
     return df_qual_obs
 
 
-def get_df_qual_comps_and_mp(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+def get_df_qual_comps_and_mp():
     """  Simple utility to read df_qual_comps_and_mp.csv file and return the original DataFrame.
-    :param mp_top_directory: path to top directory [string].
-    :param mp_number: number of target Minor Planet [string or int].
-    :param an_string: Astronight (not UTC) date designation, e.g., '20191105' [string].
     :return: df_qual_comps_and_mp from mp_phot() [pandas Dataframe]
     """
-    mp_string = str(mp_number)
-    mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
-    fullpath = os.path.join(mp_directory, DF_QUALIFIED_COMPS_AND_MP_FILENAME)
+    this_directory, _, _, _ = get_context()
+    fullpath = os.path.join(this_directory, DF_QUALIFIED_COMPS_AND_MP_FILENAME)
     df_qual_comps_and_mp = pd.read_csv(fullpath, sep=';', index_col=0)
     return df_qual_comps_and_mp
 
@@ -862,7 +934,6 @@ class ZCurve:
             # self.spline_function = UnivariateSpline(x=x, y=y, w=weights, s=smoothness, ext=3)
             self.spline_function = interp1d(x, y, kind='linear')
 
-
     def at_jd(self, jd):
         if self.n <= 0:
             return None
@@ -880,7 +951,7 @@ class ZCurve:
             return self.spline_function(jd)
 
 
-def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=True, add_R_estimate=True):
+def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=True, add_rmag_estimate=True):
     """  Renders a dataframe with all needed comp info, including estimated R mags.
     Tests OK ~ 20191106.
     :param ra: center Right Ascension for comp search, in degrees only [float].
@@ -889,18 +960,18 @@ def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=Tru
     :param r_min: minimum R magnitude (brightest limit) [float]. None = no limit.
     :param r_max: maximum R magnitude (faintest limit) [float]. None = no limit.
     :param mp_color_only: True means keep only comps close to typical MP color [boolean].
-    :param add_R_estimate: True means add R_estimate column and its error [boolean].
+    :param add_rmag_estimate: True means add R_estimate column and its error [boolean].
     :return: dataframe of comp data [pandas Dataframe].
     Columns = degRA, e_RA, degDec, e_Dec, Vmag, e_Vmag, Bmag, e_Bmag, R_estimate, e_R_estimate.
     """
-    url = 'https://www.aavso.org/cgi-bin/apass_dr10_download.pl'
-    data = {'ra': ra, 'dec': dec, 'radius': radius, 'outtype': 1}
-    result = requests.post(url=url, data=data)
+    result = requests.post(url=APASS_10_URL,
+                           data={'ra': ra, 'dec': dec, 'radius': radius, 'outtype': 1})
     # convert this text to pandas Dataframe (see photrix get_df_master() for how).
     df = pd.read_csv(StringIO(result.text), sep=',')
     df = df.rename(columns={'radeg': 'degRA', 'raerr(")': 'e_RA', 'decdeg': 'degDec', 'decerr(")': 'e_Dec',
                             'Johnson_V (V)': 'Vmag', 'Verr': 'e_Vmag',
                             'Johnson_B (B)': 'Bmag', 'Berr': 'e_Bmag'})
+    df.index = [str(i) for i in df.index]
     df['ID'] = df.index
     columns_to_keep = ['ID', 'degRA', 'e_RA', 'degDec', 'e_Dec', 'Vmag', 'e_Vmag', 'Vnobs', 'Bmag',
                        'e_Bmag', 'Bnobs']
@@ -911,23 +982,23 @@ def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=Tru
     df = df[~pd.isnull(df['e_Vmag'])]
     df = df[~pd.isnull(df['Bmag'])]
     df = df[~pd.isnull(df['e_Bmag'])]
-    df['B-V'] = df['Bmag'] - df['Vmag']
-    df['e_B-V'] = np.sqrt(df['e_Vmag'] ** 2 + df['e_Bmag'] ** 2)
+    df['BminusV'] = df['Bmag'] - df['Vmag']
+    df['e_BminusV'] = np.sqrt(df['e_Vmag'] ** 2 + df['e_Bmag'] ** 2)
     df_comps = df
-    if add_R_estimate:
+    if add_rmag_estimate:
         df_comps['R_estimate'] = R_ESTIMATE_V_COEFF * df['Vmag'] +\
-                                 R_ESTIMATE_BV_COLOR_COEFF * df['B-V'] +\
+                                 R_ESTIMATE_BV_COLOR_COEFF * df['BminusV'] +\
                                  R_ESTIMATE_INTERCEPT
         df_comps['e_R_estimate'] = np.sqrt(R_ESTIMATE_V_COEFF**2 * df_comps['e_Vmag']**2 +
-                                           R_ESTIMATE_BV_COLOR_COEFF**2 * df_comps['e_B-V']**2)
+                                           R_ESTIMATE_BV_COLOR_COEFF**2 * df_comps['e_BminusV']**2)
         if r_min is not None:
             df = df[df['R_estimate'] >= r_min]
         if r_max is not None:
             df = df[df['R_estimate'] <= r_max]
         df_comps = df[df['e_R_estimate'] <= ERR_R_ESTIMATE_MAX]
     if mp_color_only is True:
-        above_min = MP_COLOR_BV_MIN <= df_comps['B-V']
-        below_max = df_comps['B-V'] <= MP_COLOR_BV_MAX
+        above_min = MP_COLOR_BV_MIN <= df_comps['BminusV']
+        below_max = df_comps['BminusV'] <= MP_COLOR_BV_MAX
         color_ok = list(above_min & below_max)
         df_comps = df_comps[color_ok]
     return df_comps
@@ -953,7 +1024,9 @@ def get_session_state(site_name='DSW', instrument_name='Borea'):
     return state
 
 
-def reorder_df_columns(df, left_column_list=[], right_column_list=[]):
+def reorder_df_columns(df, left_column_list=None, right_column_list=None):
+    left_column_list = [] if left_column_list is None else left_column_list
+    right_column_list = [] if right_column_list is None else right_column_list
     new_column_order = left_column_list +\
                        [col_name for col_name in df.columns
                         if col_name not in (left_column_list + right_column_list)] +\
@@ -962,47 +1035,29 @@ def reorder_df_columns(df, left_column_list=[], right_column_list=[]):
     return df
 
 
-def write_to_log(    text=''):
-    pass
-
-# def do_cwd(mp_top_directory=MP_TOP_DIRECTORY + '/Test', mp_number=3460, an_string='20191118'):
-#     mp_int = int(mp_number)  # put this in try/catch block.
-#     mp_string = str(mp_int)
-#     mp_directory = os.path.join(mp_top_directory, 'MP_' + mp_string, 'AN' + an_string)
-#     save_cwd = os.getcwd()
-#     print('Starting wd:', os.getcwd())
-#     print('Going to:', mp_directory, '...')
-#     os.chdir(mp_directory)
-#     print('wd is now:', os.getcwd())
-#     print('going back...')
-#     os.chdir(save_cwd)
-#     print('finall, wd is now:', os.getcwd())
-
-
 def try_reg():
     """  This was used to get R_estimate coeffs, using catalog data to predict experimental Best_R_mag.
     :return: [None]
     """
-    df_comps_and_mp = get_df_comps_and_mp(mp_top_directory='J:/Astro/Images/MP Photometry/Test',
-                                          mp_number=1074, an_string='20191109')
+    df_comps_and_mp = get_df_comps_and_mp()
     dfc = df_comps_and_mp[df_comps_and_mp['Type'] == 'Comp']
-    dfc = dfc[dfc['InAllImages'] == True]
+    dfc = dfc[dfc['InAllImages']]
 
     # from sklearn.linear_model import LinearRegression
-    # x = [[bv, v] for (bv, v) in zip(dfc['B-V'], dfc['Vmag'])]
+    # x = [[bv, v] for (bv, v) in zip(dfc['BminusV'], dfc['Vmag'])]
     # y = list(dfc['Best_R_mag'])
     # reg = LinearRegression(fit_intercept=True)
     # reg.fit(x, y)
     # print('\nsklearn: ', reg.coef_, reg.intercept_)
     #
-    # xx = dfc[['B-V', 'Vmag']]
+    # xx = dfc[['BminusV', 'Vmag']]
     # yy = dfc['Best_R_mag']
     # reg.fit(xx, yy)
     # print('\nsklearn2: ', reg.coef_, reg.intercept_)
 
     # # statsmodel w/ formula api (R-style formulas) (fussy about column names):
     # import statsmodels.formula.api as sm
-    # dfc['BV'] = dfc['B-V']  # column name B-V doesn't work in formula.
+    # dfc['BV'] = dfc['BminusV']  # column name BminusV doesn't work in formula.
     # result = sm.ols(formula='Best_R_mag ~ BV + Vmag', data=dfc).fit()
     # print('\n' + 'sm.ols:')
     # print(result.summary())
@@ -1011,7 +1066,7 @@ def try_reg():
     import statsmodels.api as sm
     # make column BV as above
     # result = sm.OLS(dfc['Best_R_mag'], dfc[['BV', 'Vmag']]).fit()  # <--- without constant term
-    result = sm.OLS(dfc['Best_R_mag'], sm.add_constant(dfc[['B-V', 'Vmag']])).fit()
+    result = sm.OLS(dfc['Best_R_mag'], sm.add_constant(dfc[['BminusV', 'Vmag']])).fit()
     print('\n' + 'sm.ols:')
     print(result.summary())
 
@@ -1023,280 +1078,3 @@ def try_reg():
     print('\n' + 'sm.ols:')
     print(result.summary())
     # also available: result.params, .pvalues, .rsquared
-
-
-
-# *********************************************************************************************
-# *********************************************************************************************
-# *********************************************************************************************
-# ***********  the following comprises EXAMPLE WORKFLOW (which works fine) from early Nov 2019:
-#
-# class DataCamera:
-#     def __init__(self):
-#         # All transforms use V-I as color index.
-#         self.filter_dict = \
-#             {'V': {'z': -20.50, 'extinction': 0.18, 'transform': {'passband': 'V', 'value': -0.0149}},
-#              'R': {'z': -20.35, 'extinction': 0.12, 'transform': {'passband': 'R', 'value': +0.0513}},
-#              'I': {'z': -20.15, 'extinction': 0.09, 'transform': {'passband': 'I', 'value' : 0.0494}},
-#              'Clear': {'z': -21.5, 'extinction': 0.14, 'transform': {'passband': 'R', 'value': +0.133}}
-#              }
-#
-#     def instmag(self, target, image):
-#         """
-#         Returns instrument magnitude for one source in one image.
-#         :param target: astronomical photon source (star or MP) [DataStandard object].
-#         :param image: represents one image and its assoc. data [DataImage object].
-#         :return:
-#         """
-#         passband = self.filter_dict[image.filter]['transform']['passband']
-#         catalog_mag = target.mag(passband)
-#         zero_point = self.filter_dict[image.filter]['z']
-#         corrections = self.calc_corrections(target, image)
-#         instrument_magnitude = catalog_mag + zero_point + corrections
-#         return instrument_magnitude
-#
-#     def solve_for_z(self, instmag, target, image):
-#         # Requires catalog data. Not for unknowns.
-#         corrections = self.calc_corrections(target, image)
-#         z = instmag - target.mag(image.filter) - corrections
-#         return z
-#
-#     def solve_for_best_mag(self, instmag, target, image):
-#         # Requires catalog data. Not for unknowns.
-#         corrections = self.calc_corrections(target, image)
-#         zero_point = self.filter_dict[image.filter]['z']
-#         best_mag = instmag - corrections - zero_point
-#         return best_mag
-#
-#     def calc_corrections(self, target, image):
-#         """ Includes corrections from cat mag to experimental image, *excluding* zero-point. """
-#         # Requires catalog data. Not for unknowns.
-#         filter_info = self.filter_dict[image.filter]
-#         transform_value = filter_info['transform']['value']
-#         extinction = filter_info['extinction']
-#         color_index = target.mag(passband='V') - target.mag(passband='I')  # color index always in V-I
-#         corrections = image.delta + extinction * image.airmass + transform_value * color_index
-#         return corrections
-#
-#     def make_image(self, filter, target_list, airmass, delta=0.0):
-#         # Factory method for DataImage object. Includes no catalog data (thus OK for unknowns).
-#         image = DataImage(self, filter, airmass, delta)
-#         for target in target_list:
-#             image.obs_dict[target.name] = self.instmag(target, image)
-#         return image
-#
-#     def extract_color_index_value(self, untransformed_best_mag_v, untransformed_best_mag_i):
-#         color_index_value = (untransformed_best_mag_v - untransformed_best_mag_i) / \
-#                             (1.0 + self.filter_dict['V']['transform']['value'] -
-#                              self.filter_dict['I']['transform']['value'])
-#         return color_index_value
-#
-#     def __str__(self):
-#         return 'DataCamera object'
-#
-#     def __repr__(self):
-#         return 'DataCamera object'
-#
-#
-# class DataStandard:
-#     def __init__(self, name, mag_dict):
-#         self.name = name
-#         self.mag_dict = mag_dict
-#
-#     def mag(self, passband):
-#         return self.mag_dict.get(passband)
-#
-#     def __str__(self):
-#         return 'DataStandard ' + self.name
-#
-#     def __repr__(self):
-#         return 'DataStandard ' + self.name
-#
-#
-# class DataTarget:
-#     def __init__(self, name, mag_dict):
-#         self.name = name
-#         self.mag_dict = mag_dict
-#
-#     def mag(self, passband):
-#         return self.mag_dict.get(passband)
-#
-#     def __str__(self):
-#         return 'DataTarget ' + self.name
-#
-#     def __repr__(self):
-#         return 'DataTarget ' + self.name
-#
-#
-# class DataImage:
-#     # Includes NO catalog data (thus OK for unknowns).
-#     def __init__(self, camera, filter, airmass, delta=0.0):
-#         self.camera = camera
-#         self.filter = filter
-#         self.airmass = airmass
-#         self.delta = delta
-#         self.obs_dict = dict()  # {target_name: instmag, ...}
-#
-#     def untransformed_best_mag(self, target_name, delta=None):
-#         instmag = self.obs_dict[target_name]
-#         zero_point = self.camera.filter_dict[self.filter]['z']
-#         if delta is None:
-#             this_delta = self.delta  # for constructing and testing images.
-#         else:
-#             this_delta = delta  # set to zero if delta is unknown (obs images).
-#         extinction = self.camera.filter_dict[self.filter]['extinction']
-#         airmass = self.airmass
-#         this_mag = instmag - zero_point - this_delta - extinction * airmass
-#         return this_mag
-#
-#     def __str__(self):
-#         return 'DataImage object'
-#
-#     def __repr__(self):
-#         return 'DataImage object'
-#
-
-
-
-
-
-# def example_workflow():
-#     """ Try out new MP photometric reduction process. """
-#     cam = DataCamera()
-#
-#     # ============= DataStandard images: =============
-#     stds = [DataStandard('std1', {'V': 12.2, 'R': 12.6, 'I': 12.95}),
-#             DataStandard('std2', {'V': 12.5, 'R': 12.7, 'I': 12.9}),
-#             DataStandard('std3', {'V': 12.88, 'R': 13.22, 'I': 13.5})]
-#     std_instmags = dict()
-#     std_images = {'V': cam.make_image('V', stds, 1.5, 0),
-#                   'R': cam.make_image('R', stds, 1.52, 0),
-#                   'I': cam.make_image('I', stds, 1.538, 0)}
-#
-#     for this_filter in std_images.keys():
-#         std_instmags[this_filter] = [cam.instmag(std, std_images[this_filter]) for std in stds]
-#
-#     # Test for consistency:
-#     # for this_filter in std_instmags.keys():
-#     #     instmag_list = std_instmags[this_filter]
-#     #     for instmag, std in zip(instmag_list, stds):
-#     #         print(cam.solve_for_z(instmag, std, std_images[this_filter]),
-#     #         cam.filter_dict[this_filter]['z'])
-#
-#     # Test by back-calculating best (catalog) mags:
-#     # for this_filter in std_instmags.keys():
-#     #     instmag_list = std_instmags[this_filter]
-#     #     for instmag, std in zip(instmag_list, stds):
-#     #         print(std.name, this_filter, cam.solve_for_best_mag(instmag, std, std_images[this_filter]))
-#
-#     # Test untransformed and transformed best mags from images (no ref to catalog mags):
-#     # for this_filter in std_instmags.keys():
-#     #     std_image = std_images[this_filter]
-#     #     for this_std in stds:
-#     #         cat_mag = this_std.mag(this_filter)
-#     #         std_name = this_std.name
-#     #         untr_best_mag = std_image.untransformed_best_mag(std_name)
-#     #         print(std_name, this_filter, cat_mag, untr_best_mag)
-#
-#     # Test extraction of color index values & transformation of untransformed mags:
-#     # print()
-#     # for this_std in stds:
-#     #     image_v = std_images['V']
-#     #     image_i = std_images['I']
-#     #     cat_mag_v = this_std.mag('V')  # to test against.
-#     #     cat_mag_i = this_std.mag('I')  # "
-#     #     std_name = this_std.name
-#     #     untr_best_mag_v = image_v.untransformed_best_mag(std_name)
-#     #     untr_best_mag_i = image_i.untransformed_best_mag(std_name)
-#     #     best_color_index = cam.extract_color_index_value(untr_best_mag_v, untr_best_mag_i)
-#     #     print(std_name, cat_mag_v, cat_mag_i, cat_mag_v - cat_mag_i, best_color_index)
-#
-#     # ============= Comp initial images (V & I): =============
-#     comps = [DataTarget('comp1', {'V': 13.32, 'R': 12.44, 'I': 11.74}),
-#              DataTarget('comp2', {'V': 12.52, 'R': 12.21, 'I': 12.01}),
-#              DataTarget('comp3', {'V': 11.89, 'R': 11.23, 'I': 11.52})]
-#     mp = [DataTarget('MP', {'V': 13.5, 'R': 14.02, 'I': 14.49})]
-#     targets = comps + mp
-#     pre_v_image = cam.make_image('V', targets, 1.61, 0)
-#     pre_i_image = cam.make_image('I', targets, 1.61, 0)
-#
-#     # Measure comps' best color index values without knowing passband mags (i.e., to target obj at all):
-#     comps_color_index = [cam.extract_color_index_value(pre_v_image.untransformed_best_mag(comp.name),
-#                                                        pre_i_image.untransformed_best_mag(comp.name))
-#                          for comp in comps]
-#     # for i, comp in enumerate(comps):
-#     #     print(comp.name, comp.mag('V') - comp.mag('I'),  comps_color_index[i])
-#
-#     mp_color_index = cam.extract_color_index_value(pre_v_image.untransformed_best_mag(mp[0].name),
-#                                                    pre_i_image.untransformed_best_mag(mp[0].name))
-#     # print(mp[0].name, mp[0].mag('V') - mp[0].mag('I'),  mp_color_index)
-#
-#     # Last prep step: take an image in R, derive best R comp mags (do not use catalog mags at all):
-#     pre_r_image = cam.make_image('R', comps, 1.61, 0)
-#     this_transform = cam.filter_dict['R']['transform']['value']
-#     comp_r_mags = []
-#     for comp, color_index in zip(comps, comps_color_index):
-#         untr_best_mag_r = pre_r_image.untransformed_best_mag(comp.name)
-#         best_mag_r = untr_best_mag_r - this_transform * color_index
-#         comp_r_mags.append(best_mag_r)
-#     # for comp, r_mag in zip(comps, comp_r_mags):
-#     #     print(comp.name, r_mag)
-#
-#     # ============= We're now ready to make obs images in Clear filter, then back-calc best R mags for MP.
-#     obs_images = [cam.make_image('Clear', targets, 1.610, +0.01),
-#                   cam.make_image('Clear', targets, 1.620, -0.015),
-#                   cam.make_image('Clear', targets, 1.633, +0.014)]
-#     this_transform = cam.filter_dict['Clear']['transform']['value']
-#     for im in obs_images:
-#         derived_deltas = []
-#         for comp, mag, ci in zip(comps, comp_r_mags, comps_color_index):
-#             untr_best_mag_clear = im.untransformed_best_mag(comp.name, delta=0.0)
-#             this_mag_r = untr_best_mag_clear - this_transform * ci  # delta is yet unknown.
-#             this_derived_delta = this_mag_r - mag
-#             derived_deltas.append(this_derived_delta)
-#         print('derived_deltas: ', str(derived_deltas))
-#         mean_derived_delta = sum(derived_deltas) / float(len(derived_deltas))
-#         untr_best_mag_clear = im.untransformed_best_mag(mp[0].name, delta=mean_derived_delta)
-#         mp_mag_r = untr_best_mag_clear - this_transform * mp_color_index
-#         print('comp R mag:', mp_mag_r)  # this works...yay
-
-
-
-
-
-# def get_apass9_comps(ra, dec, radius):
-#     """ Get APASS 9 comps via Vizier catalog database.
-#     :param ra: RA in degrees [float].
-#     :param dec: Dec in degrees [float].
-#     :param radius: in arcminutes [float].
-#     :return:
-#     """
-#     from astroquery.vizier import Vizier
-#     # catalog_list = Vizier.find_catalogs('APASS')
-#     from astropy.coordinates import Angle
-#     import astropy.units as u
-#     import astropy.coordinates as coord
-#     result = Vizier.query_region(coord.SkyCoord(ra=299.590 * u.deg, dec=35.201 * u.deg,
-#                                                 frame='icrs'), width="30m", catalog=["APASS"])
-#     df_apass = result[0].to_pandas()
-#     return df_apass
-#
-#
-# def refine_df_apass9(df_apass, r_min=None, r_max=None):
-#     columns_to_keep = ['recno', 'RAJ2000', 'e_RAJ2000', 'DEJ2000', 'e_DEJ2000', 'nobs', 'mobs',
-#                        'B-V', 'e_B-V', 'Vmag', 'e_Vmag']
-#     df = df_apass[columns_to_keep]
-#     df = df[df['e_RAJ2000'] < 2.0]
-#     df = df[df['e_DEJ2000'] < 2.0]
-#     df = df[~pd.isnull(df['B-V'])]
-#     df = df[~pd.isnull(df['e_B-V'])]
-#     df = df[~pd.isnull(df['Vmag'])]
-#     df = df[~pd.isnull(df['e_Vmag'])]
-#     df['R_estimate'] = df['Vmag'] - 0.5 * df['B-V']
-#     df['e_R_estimate'] = np.sqrt(df['e_Vmag'] ** 2 + 0.25 * df['e_B-V'] ** 2)  # error in quadrature.
-#     if r_min is not None:
-#         df = df[df['R_estimate'] >= r_min]
-#     if r_max is not None:
-#         df = df[df['R_estimate'] <= r_max]
-#     df = df[df['e_R_estimate'] <= 0.04]
-#     return df

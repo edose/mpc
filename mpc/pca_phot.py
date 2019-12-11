@@ -15,6 +15,14 @@ DF_FITS_SUBDIRECTORY = 'Results'
 
 ISO_8601_FORMAT = '%Y-%m-%dT%H:%M:%S'
 
+# ==================================================================
+# pca_phot.py : Star-subtracting, background-subtracting low-level aperture measurement
+#                   of minor planet signals.
+# Development SUSPENDED late 2019 in favor of comprehensive MP photometry in phot.py.
+# May come back to developing this (after phot.py is working) to do the low-level photometry,
+#     that is, this engine would feed aperture flux values into phot.py.
+# ==================================================================
+
 # The Principal Components (or non-negative regression) prospective workflow.
 
 #   ##### MP Photometry WORKFLOW:
