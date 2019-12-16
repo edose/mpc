@@ -266,3 +266,48 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"# **************
 #         df = df[df['R_estimate'] <= r_max]
 #     df = df[df['e_R_estimate'] <= 0.04]
 #     return df
+
+
+# def try_reg():
+#     """  This was used to get R_estimate coeffs, using catalog data to predict experimental Best_R_mag.
+#     :return: [None]
+#     """
+#     df_comps_and_mp = get_df_comps_and_mp()
+#     dfc = df_comps_and_mp[df_comps_and_mp['Type'] == 'Comp']
+#     dfc = dfc[dfc['InAllImages']]
+
+# from sklearn.linear_model import LinearRegression
+# x = [[bv, v] for (bv, v) in zip(dfc['BminusV'], dfc['Vmag'])]
+# y = list(dfc['Best_R_mag'])
+# reg = LinearRegression(fit_intercept=True)
+# reg.fit(x, y)
+# print('\nsklearn: ', reg.coef_, reg.intercept_)
+#
+# xx = dfc[['BminusV', 'Vmag']]
+# yy = dfc['Best_R_mag']
+# reg.fit(xx, yy)
+# print('\nsklearn2: ', reg.coef_, reg.intercept_)
+
+# # statsmodel w/ formula api (R-style formulas) (fussy about column names):
+# import statsmodels.formula.api as sm
+# dfc['BV'] = dfc['BminusV']  # column name BminusV doesn't work in formula.
+# result = sm.ols(formula='Best_R_mag ~ BV + Vmag', data=dfc).fit()
+# print('\n' + 'sm.ols:')
+# print(result.summary())
+
+# statsmodel w/ dataframe-column api:
+# import statsmodels.api as sm
+# # make column BV as above
+# # result = sm.OLS(dfc['Best_R_mag'], dfc[['BV', 'Vmag']]).fit()  # <--- without constant term
+# result = sm.OLS(dfc['Best_R_mag'], sm.add_constant(dfc[['BminusV', 'Vmag']])).fit()
+# print('\n' + 'sm.ols:')
+# print(result.summary())
+#
+# # statsmodel w/ dataframe-column api:
+# import statsmodels.api as sm
+# # make column BV as above
+# # result = sm.OLS(dfc['Best_R_mag'], dfc[['BV', 'Vmag']]).fit()  # <--- without constant term
+# result = sm.OLS(dfc['Best_R_mag'], sm.add_constant(dfc[['R_estimate']])).fit()
+# print('\n' + 'sm.ols:')
+# print(result.summary())
+# # also available: result.params, .pvalues, .rsquared

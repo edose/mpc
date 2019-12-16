@@ -1,37 +1,56 @@
 __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
+# Python core packages:
 from io import StringIO
 from datetime import datetime
 from math import cos, sin, sqrt, pi, log10, floor
 from collections import Counter
 
+# External packages:
 import numpy as np
 import pandas as pd
 import requests
 from scipy.interpolate import interp1d
-from statistics import median
+from statistics import median, mean
+import matplotlib.pyplot as plt
+
+# From this (mpc) package:
 from mpc.mpctools import *
 
+# From external (EVD) package photrix:
 from photrix.image import Image, FITS, Aperture
 from photrix.util import RaDec, jd_from_datetime_utc, degrees_as_hex, ra_as_hours
 
-MAX_FWHM = 14  # in pixels.
+# To assess FITS files in assess():
+MIN_FWHM = 1.5  # in pixels.
+MAX_FWHM = 14  # "
+REQUIRED_FILES_PER_FILTER = [('V', 1), ('R', 1), ('I', 1), ('Clear', 5)]
+FOCUS_LENGTH_MAX_PCT_DEVIATION = 3.0
+
+# To screen comps immediately on reading them in (wide limits; will narrow selections later):
 MP_COMP_RADEC_ERROR_MAX = 1.0  # in arcseconds
-# MP_COLOR_BV_MIN = 0.68  # defines color range for comps (a bit wider than normal MP color range).
-MP_COLOR_BV_MIN = 0.2  # a different guess (more inclusive)
-MP_COLOR_BV_MAX = 1.2  # "
+R_ESTIMATE_MIN = 9  # wide, as this will be refined later.
+R_ESTIMATE_MAX = 16  # "
+ERR_R_ESTIMATE_MAX = 0.25  # fairly high (inclusive), as there will be more screens, later.
+COLOR_BV_MIN = 0.2  # inclusive (will be refined using V-I later).
+COLOR_BV_MAX = 1.2  # "
+
+# To screen obs in df_mp_master:
+COMPS_MIN_SNR = 25  # min signal/noise for use comp obs (SNR defined here as InstMag / InstMagSigma).
+ADU_UR_SATURATED = 54000  # This probably should go in Instrument class, but ok for now.
+
+# Defaults for final screening of obs in qualify_comps():
 COMPS_MIN_R_MAG = 10.5    # a guess
 COMPS_MAX_R_MAG = 15.5  # a guess; probably needs to be customized per-MP, even per-session.
+COMPS_MIN_COLOR_VI = 0.2
+COMPS_MAX_COLOR_VI = 1.0
+
+# For estimating Best R mag from catalog B and V mags:
 R_ESTIMATE_V_COEFF = 0.975  # from regression on Best_R_mag
 R_ESTIMATE_BV_COLOR_COEFF = -0.419  # "
 R_ESTIMATE_INTERCEPT = 0  # "
-ERR_R_ESTIMATE_MAX = 0.25  # this can be fairly high (inclusive), as there will be more screens, later.
-COMPS_MIN_SNR = 25  # min signal/noise for use comp obs (SNR defined here as InstMag / InstMagSigma).
-ADU_UR_SATURATED = 54000  # This probably should go in Instrument class, but ok for now.
-# COLOR_VI_VARIABLE_RISK = 1.5  # greater VI values risk being a variable star, thus unsuitable as comp star.
 
 VALID_FITS_FILE_EXTENSIONS = ['.fits', '.fit', '.fts']
-
 DEGREES_PER_RADIAN = 180.0 / pi
 
 PHOTRIX_TOP_DIRECTORIES = ['C:/Astro/Borea Photrix/', 'J:/Astro/Images/Borea Photrix Archives/']
@@ -42,9 +61,9 @@ DF_MASTER_FILENAME = 'df_master.csv'
 MP_TOP_DIRECTORY = 'J:/Astro/Images/MP Photometry/'
 LOG_FILENAME = 'mp_photometry.log'
 DF_MP_MASTER_FILENAME = 'df_mp_master.csv'
-DF_COMPS_AND_MP_FILENAME = 'df_comps_and_mp.csv'
+DF_COMPS_AND_MPS_FILENAME = 'df_comps_and_mps.csv'
 DF_QUALIFIED_OBS_FILENAME = 'df_qual_obs.csv'
-DF_QUALIFIED_COMPS_AND_MP_FILENAME = 'df_qual_comps_and_mp.csv'
+DF_QUALIFIED_COMPS_AND_MPS_FILENAME = 'df_qual_comps_and_mps.csv'
 
 APASS_10_URL = 'https://www.aavso.org/cgi-bin/apass_dr10_download.pl'
 
@@ -185,21 +204,22 @@ def assess():
     n_warnings += len(ur_fits_missing)
 
     # Verify that all required FITS file types exist within this directory and are valid:
-    c = Counter()
+    filter_counter = Counter()
     for filename in fits_filenames:
         fits = FITS(this_directory, '', filename)
         if fits.is_valid:
-            c[fits.filter] += 1
-    required_files_by_filter = [('V', 1), ('R', 1), ('I', 1), ('Clear', 5)]
-    for filt, required in required_files_by_filter:
-        if c[filt] >= required:
-            print('   ' + str(c[filt]), 'in filter', filt + ': OK.')
-            log_file.write('   ' + str(c[filt]) + ' in filter ' + filt + ': OK.\n')
+            filter_counter[fits.filter] += 1
+    for filt, required in REQUIRED_FILES_PER_FILTER:
+        if filter_counter[filt] >= required:
+            print('   ' + str(filter_counter[filt]), 'in filter', filt + ': OK.')
+            log_file.write('   ' + str(filter_counter[filt]) + ' in filter ' + filt + ': OK.\n')
         else:
-            print(' >>>>> ' + str(c[filt]) + ' in filter ' + filt + ' found: NOT ENOUGH. ' +
+            print(' >>>>> ' + str(filter_counter[filt]) +
+                  ' in filter ' + filt + ' found: NOT ENOUGH. ' +
                   str(required) + ' are required.')
-            log_file.write(' >>>>> ' + str(c[filt]) + ' in filter ' + filt + ' found: NOT ENOUGH. ' +
-                  str(required) + ' are required.')
+            log_file.write(' >>>>> ' + str(filter_counter[filt]) +
+                           ' in filter ' + filt + ' found: NOT ENOUGH. ' +
+                           str(required) + ' are required.')
             n_warnings += 1
 
     # Start dataframe for main FITS integrity checks:
@@ -258,7 +278,7 @@ def assess():
     odd_fwhm_list = []
     for f in df['Filename']:
         fwhm = df.loc[f, 'FWHM']
-        if fwhm < 1.5 or fwhm > MAX_FWHM:  # too small or large:
+        if fwhm < MIN_FWHM or fwhm > MAX_FWHM:  # too small or large:
             odd_fwhm_list.append((f, fwhm))
     if len(odd_fwhm_list) >= 1:
         print('\nUnusual FWHM (in pixels):')
@@ -273,7 +293,8 @@ def assess():
     mean_fl = df['FocalLength'].mean()
     for f in df['Filename']:
         fl = df.loc[f, 'FocalLength']
-        if abs((fl - mean_fl)) / mean_fl > 0.03:
+        focus_length_pct_deviation = 100.0 * abs((fl - mean_fl)) / mean_fl
+        if focus_length_pct_deviation > FOCUS_LENGTH_MAX_PCT_DEVIATION:
             odd_fl_list.append((f, fl))
     if len(odd_fl_list) >= 1:
         print('\nUnusual FocalLength (vs mean of ' + '{0:.1f}'.format(mean_fl) + ' mm:')
@@ -328,7 +349,7 @@ def make_df_mp_master():
     # Get all APASS 10 comps that might fall within images:
     comp_search_radius = 1.05*degrees_to_corner
     df_comps = get_apass10_comps(deg_ra, deg_dec, comp_search_radius,
-                                 r_min=COMPS_MIN_R_MAG, r_max=COMPS_MAX_R_MAG, mp_color_only=True)
+                                 r_min=R_ESTIMATE_MIN, r_max=R_ESTIMATE_MAX, mp_color_only=True)
     df_comps['Type'] = 'Comp'
     print(str(len(df_comps)), 'qualifying APASS10 comps found within',
           '{:.3f}'.format(comp_search_radius) + u'\N{DEGREE SIGN}' + ' of',
@@ -336,6 +357,7 @@ def make_df_mp_master():
     df_comps['ID'] = [str(id) for id in df_comps['ID']]
 
     # Make df_comps_and_mp by adding MP row to df_comps:
+    # THIS is where we enforce only one MP for this df_mp_master (and for everything derived from it).
     dict_mp_row = dict()
     for colname in df_comps.columns:
         dict_mp_row[colname] = [None]
@@ -478,9 +500,8 @@ def make_df_mp_master():
     df_mp_master.insert(0, 'ObsID', obs_id_list)
     df_mp_master.index = list(df_mp_master['ObsID'])
     df_mp_master['Type'] = ['MP' if id == mp_id else 'Comp' for id in df_mp_master['ID']]
-    # n_comp_obs = sum([type == 'Comp' for type in df_mp_master['Type']])
 
-    # Fill in the JD_fract and JD_fract2 columns:
+    # Fill in the JD_fract column:
     jd_floor = floor(df_mp_master['JD_mid'].min())  # requires that all JD_mid values be known.
     df_mp_master['JD_fract'] = df_mp_master['JD_mid'] - jd_floor
 
@@ -527,7 +548,7 @@ def make_df_mp_master():
     df_mp_master = df_mp_master.loc[to_keep, :].copy()
 
     # Write df_comps_and_mp to file (rather than returning the df):
-    fullpath_comps_and_mp = os.path.join(this_directory, DF_COMPS_AND_MP_FILENAME)
+    fullpath_comps_and_mp = os.path.join(this_directory, DF_COMPS_AND_MPS_FILENAME)
     df_comps_and_mp.to_csv(fullpath_comps_and_mp, sep=';', quotechar='"',
                            quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
     print('df_comps_and_mp written to', fullpath_comps_and_mp)
@@ -537,6 +558,21 @@ def make_df_mp_master():
     df_mp_master.to_csv(fullpath_master, sep=';', quotechar='"',
                         quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
     print('df_mp_master written to', fullpath_master)
+
+    # Write initial comp_limits.txt (implying defaults), without overwriting file if it already exists:
+    fullpath = os.path.join(this_directory, 'comp_limits.txt')
+    if not os.path.exists(fullpath):
+        lines = [';----- This is comp_limits.txt for directory ' + this_directory,
+                 ';----- Use to limit comp stars used in qualify_comps() ' +
+                 'and its downstream workflow steps.',
+                 ';',
+                 '#R   None None ; min_R_mag max_R_mag',
+                 '#V-I None None ; min_color max_color',
+                 '#E(R)MAX  None ; maximum allowed uncertainty in observed comp R magnitude']
+        lines = [line + '\n' for line in lines]
+        with open(fullpath, 'w') as f:
+            f.writelines(lines)
+            print('New comp_limits.txt written.')
 
     # Write log file lines:
     n_comps = sum([t.lower() == 'comp' for t in df_comps_and_mp['Type']])
@@ -564,99 +600,121 @@ def qualify_comps():
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
     # Load data:
-    df_mp_master = get_df_mp_master()
     df_comps_and_mp = get_df_comps_and_mp()
+    df_mp_master = get_df_mp_master()
     state = get_session_state()  # for extinction and transform values.
+    comp_limits_dict = get_comp_limits()
 
-    # Make df_vri, local to this function, one row per MP-field image in V, R, or I.
-    is_vri = list([filter in ['V', 'R', 'I'] for filter in df_mp_master['Filter']])
-    vri_filenames = df_mp_master.loc[is_vri, 'Filename'].copy().drop_duplicates()  # index is correct too.
+    # Local (nested) function:
+    def write_counts(tag, df_comps_and_mps_input, df_obs_input):
+        n_comps_input = sum(df_comps_and_mps_input['Type'] == 'Comp')
+        n_comp_obs_input = sum(df_obs_input['Type'] == 'Comp')
+        n_mps_input = sum(df_comps_and_mps_input['Type'] == 'MP')
+        n_mp_obs_input = sum(df_obs_input['Type'] == 'MP')
+        print(tag + ':')
+        print('   Comps: ' + str(n_comps_input) + ' with ' + str(n_comp_obs_input) + ' obs.')
+        print('   MPs  : ' + str(n_mps_input) + ' with ' + str(n_mp_obs_input) + ' obs.')
+        log_file.write(tag + ':\n')
+        log_file.write('   Comps: ' + str(n_comps_input) + ' with ' + str(n_comp_obs_input) + ' obs.\n')
+        log_file.write('   MPs  : ' + str(n_mps_input) + ' with ' + str(n_mp_obs_input) + ' obs.\n')
+
+    # Write out initial counts:
+    write_counts('INPUT', df_comps_and_mp, df_mp_master)
+
+    # Keep only comps, MPs, and their obs for IDs with obs in every image:
+    df_semiqual_comps_and_mp, df_semiqual_obs = keep_omnipresent_comps(df_comps_and_mp, df_mp_master)
+    write_counts('SEMIQUALIFIED', df_semiqual_comps_and_mp, df_semiqual_obs)
+    del df_comps_and_mp, df_mp_master  # Now obsolete; thus raise error if access attempted.
+
+    # Make df_vri (local to this function), with one row per MP-field image in V, R, or I.
+    is_vri = list([filter in ['V', 'R', 'I'] for filter in df_semiqual_obs['Filter']])
+    vri_filenames = df_semiqual_obs.loc[is_vri, 'Filename'].copy().drop_duplicates()
     vri_obs_ids = list(vri_filenames.index)
     df_vri = pd.DataFrame({'Serial': vri_obs_ids}, index=vri_obs_ids)
     df_vri['Filename'] = vri_filenames
-    df_vri['JD_mid'] = list(df_mp_master.loc[vri_obs_ids, 'JD_mid'])
-    df_vri['UTC_mid'] = list(df_mp_master.loc[vri_obs_ids, 'UTC_mid'])
-    df_vri['Filter'] = list(df_mp_master.loc[vri_obs_ids, 'Filter'])
-    df_vri['Airmass'] = list(df_mp_master.loc[vri_obs_ids, 'Airmass'])
+    df_vri['JD_mid'] = list(df_semiqual_obs.loc[vri_obs_ids, 'JD_mid'])
+    df_vri['UTC_mid'] = list(df_semiqual_obs.loc[vri_obs_ids, 'UTC_mid'])
+    df_vri['Filter'] = list(df_semiqual_obs.loc[vri_obs_ids, 'Filter'])
+    df_vri['Airmass'] = list(df_semiqual_obs.loc[vri_obs_ids, 'Airmass'])
     print(str(len(df_vri)), 'VRI images.')
 
     # Calculate zero-point "Z" value for each VRI image, add to df_vri:
-    df_ext_stds = make_df_ext_stds()  # stds data come from photrix:df_master.
+    df_ext_stds = make_df_ext_stds()  # stds data read from photrix:df_master.
     z_curves = make_z_curves(df_ext_stds)  # each dict entry is 'filter': ZCurve object.
     z_values = [z_curves[filter].at_jd(jd) for filter, jd in zip(df_vri['Filter'], df_vri['JD_mid'])]
     df_vri['Z'] = z_values  # new column.
 
-    # Make list of only comp and MP IDs that have qualified data in *every* image in df_mp_master:
-    id_list = df_mp_master['ID'].copy().drop_duplicates()
-    n_filenames = len(df_mp_master['Filename'].copy().drop_duplicates())
-    qualified_id_list = []
-    for this_id in id_list:
-        n_this_id = sum([id == this_id for id in df_mp_master['ID']])
-        if n_this_id == n_filenames:
-            qualified_id_list.append(this_id)
-    print('IDs: ', str(len(qualified_id_list)), 'qualified from',
-          str(len(id_list)), 'in df_comps_and_mp.')
-
-    # Make new df_qual_obs (subset of df_mp_master):
-    obs_to_keep = [id in qualified_id_list for id in df_mp_master['ID']]
-    df_qual_obs = df_mp_master.loc[obs_to_keep, :].copy()  # new df; all images have same comps and MPs.
-    print('obs: ', str(len(df_qual_obs)), 'kept in df_qual_obs from',
-          str(len(df_mp_master)), 'in df_mp_master.')
-    del df_mp_master  # to trigger error if used below.
-
-    # Make new df_qual_comps_and_mp (subset of df_comps_and_mp):
-    rows_to_keep = [id in qualified_id_list for id in df_comps_and_mp['ID']]
-    df_qual_comps_and_mp = df_comps_and_mp[rows_to_keep].copy()
-    del df_comps_and_mp  # to trigger error if used below.
-
-    # From VRI images, calculate best untransformed mag for each MP and comp, write to df_comps_and_mp:
+    # From df_vri (VRI images), calc best untransformed mag for each MP and comp, write to df_comps_and_mp:
     # Columns are named 'Best_untr_mag_V', etc.
+    id_list = df_semiqual_obs['ID'].copy().drop_duplicates()
     for filter in ['V', 'R', 'I']:
         new_column_name = 'Best_untr_mag_' + filter  # for new column in df_comps_and_mp.
-        df_qual_comps_and_mp[new_column_name] = None
+        df_semiqual_comps_and_mp[new_column_name] = None
         extinction = state['extinction'][filter]
         untransformed_mag_dict = dict()
-        for id in qualified_id_list:
+        for id in id_list:
             untransformed_mag_dict[id] = []
+        # Get each VRI image's untransformed mag in this filter:
         for idx in df_vri.index:
             if df_vri.loc[idx, 'Filter'] == filter:
                 zero_point = df_vri.loc[idx, 'Z']
                 airmass = df_vri.loc[idx, 'Airmass']
-                for id in qualified_id_list:
+                for id in id_list:
                     filename = df_vri.loc[idx, 'Filename']
                     obs_id = filename + '_' + id
-                    instrumental_mag = df_qual_obs.loc[obs_id, 'InstMag']
+                    instrumental_mag = df_semiqual_obs.loc[obs_id, 'InstMag']
                     untransformed_mag = instrumental_mag - extinction * airmass - zero_point
                     untransformed_mag_dict[id].append(untransformed_mag)
-        for id in qualified_id_list:
+        # Get averaged untransformed mags in this filter:
+        for id in id_list:
             best_untransformed_mag = sum(untransformed_mag_dict[id]) / len(untransformed_mag_dict[id])
-            df_qual_comps_and_mp.loc[id, new_column_name] = best_untransformed_mag
+            df_semiqual_comps_and_mp.loc[id, new_column_name] = best_untransformed_mag
 
-    # Solve for best (transformed) V-I color index for each comp and MP, write to df_comps_and_mp:
-    df_qual_comps_and_mp['Best_CI'] = None
+    # Solve for best (transformed) V-I color index for each comp and MP, write to dataframe:
+    df_semiqual_comps_and_mp['Best_CI'] = None
     v_transform = state['transform']['V']
     i_transform = state['transform']['I']
-    for id in qualified_id_list:
-        best_color_index = (df_qual_comps_and_mp.loc[id, 'Best_untr_mag_V'] -
-                            df_qual_comps_and_mp.loc[id, 'Best_untr_mag_I']) /\
+    for id in id_list:
+        best_color_index = (df_semiqual_comps_and_mp.loc[id, 'Best_untr_mag_V'] -
+                            df_semiqual_comps_and_mp.loc[id, 'Best_untr_mag_I']) /\
                            (1.0 + v_transform - i_transform)
-        df_qual_comps_and_mp.loc[id, 'Best_CI'] = best_color_index
+        df_semiqual_comps_and_mp.loc[id, 'Best_CI'] = best_color_index
 
     # Generate best *transformed* R magnitude for every comp and MP:
-    df_qual_comps_and_mp['Best_R_mag'] = None
+    df_semiqual_comps_and_mp['Best_R_mag'] = None
     r_transform = state['transform']['R']
-    for id in qualified_id_list:
-        best_r_mag = df_qual_comps_and_mp.loc[id, 'Best_untr_mag_R'] - \
-                     r_transform * df_qual_comps_and_mp.loc[id, 'Best_CI']
-        df_qual_comps_and_mp.loc[id, 'Best_R_mag'] = best_r_mag
+    for id in id_list:
+        best_r_mag = df_semiqual_comps_and_mp.loc[id, 'Best_untr_mag_R'] - \
+                     r_transform * df_semiqual_comps_and_mp.loc[id, 'Best_CI']
+        df_semiqual_comps_and_mp.loc[id, 'Best_R_mag'] = best_r_mag
+
+    # Screen comp obs with user's comp-screening criteria:
+    is_comp = df_semiqual_obs['Type'] == 'Comp'
+    comp_r_above_min = df_semiqual_obs['Best_R_mag'] >= comp_limits_dict['min_r']
+    comp_r_below_max = df_semiqual_obs['Best_R_mag'] <= comp_limits_dict['max_r']
+    comp_color_above_min = df_semiqual_obs['Best_CI'] >= comp_limits_dict['min_vi']
+    comp_color_below_max = df_semiqual_obs['Best_CI'] <= comp_limits_dict['max_vi']
+    comp_r_uncertainty_ok = df_semiqual_obs['InstrMagSigma'] <= comp_limits_dict['max_er']
+    comp_is_ok = comp_r_above_min & comp_r_below_max & \
+                 comp_color_above_min & comp_color_below_max & \
+                 comp_r_uncertainty_ok
+    to_keep = ~is_comp | comp_is_ok  # we keep only: all mps + qualified comps.
+    df_screened_obs = df_semiqual_obs[to_keep].copy()
+    write_counts('SCREENED', df_semiqual_comps_and_mp, df_screened_obs)
+    del df_semiqual_obs  # Now obsolete; thus, raise error if access attempted.
+
+    # Again, keep only comp and MP IDs that still have qualified data in *every* image:
+    df_qual_comps_and_mp, df_qual_obs = keep_omnipresent_comps(df_semiqual_comps_and_mp, df_screened_obs)
+    write_counts('QUALIFIED (final)', df_qual_comps_and_mp, df_qual_obs)
+    del df_semiqual_comps_and_mp, df_screened_obs  # Now obsolete; thus, raise error if access attempted.
 
     # Reorder columns in df_qual_comps_and_mp, then write it file (ratner than returning it):
     df_qual_comps_and_mp = reorder_df_columns(df_qual_comps_and_mp,
                                               left_column_list=['ID', 'Type', 'Best_R_mag', 'Best_CI'])
-    fullpath_qual_comps_and_mp = os.path.join(this_directory, DF_QUALIFIED_COMPS_AND_MP_FILENAME)
-    df_qual_comps_and_mp.to_csv(fullpath_qual_comps_and_mp, sep=';', quotechar='"',
+    fullpath_qual_comps_and_mps = os.path.join(this_directory, DF_QUALIFIED_COMPS_AND_MPS_FILENAME)
+    df_qual_comps_and_mp.to_csv(fullpath_qual_comps_and_mps, sep=';', quotechar='"',
                                 quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
-    print('New df_qual_comps_and_mp written to', fullpath_qual_comps_and_mp)
+    print('New df_qual_comps_and_mp written to', fullpath_qual_comps_and_mps)
 
     # Reorder columns in df_qual_obs, then write it to file (rather than returning it):
     df_qual_obs = reorder_df_columns(df_qual_obs, left_column_list=['ObsID', 'ID', 'Type'])
@@ -665,125 +723,67 @@ def qualify_comps():
                        quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
     print('New df_qual_obs written to', fullpath_qual_obs)
 
-    # Write log file lines:
-    n_qual_comps = sum([t.lower() == 'comp' for t in df_qual_comps_and_mp['Type']])
-    n_qual_mps = sum([t.lower() == 'mp' for t in df_qual_comps_and_mp['Type']])
-    log_file.write('Keeping ' +
-                   str(n_qual_comps) + ' qualified comps, ' +
-                   str(n_qual_mps) + ' qualified MPs.\n')
-    n_qual_comp_obs = sum([t.lower() == 'comp' for t in df_qual_obs['Type']])
-    n_qual_mp_obs = sum([t.lower() == 'mp' for t in df_qual_obs['Type']])
-    log_file.write('Keeping ' +
-                   str(n_qual_comp_obs) + ' qualified comp obs, ' +
-                   str(n_qual_mp_obs) + ' qualified MP obs.\n')
-    log_file.write(fullpath_qual_comps_and_mp + ' written.\n')
-    log_file.write(fullpath_qual_obs + ' written.\n')
     log_file.close()
+    plot_comps()  # plot exactly the comp set produced by qualify_comps()):
 
 
-def plot_comps():
-    """  Make plots supporting user's final selection of comp stars for this MP session.
-    :return: [None]
+def finish():
+    """  From df_qual_obs, calc best MP R mags using comp R mags,
+         then make 'Custom' text file suitable for import to Canopus 10.
+    :return: [None] Write results into formatted canopus.txt.
     """
-    import matplotlib.pyplot as plt
+    this_directory, mp_string, an_string, _ = get_context()
+    mp_id = 'MP_' + mp_string
+    log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
+    log_file.write('\n ===== finish()  ' +
+                   '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
-    this_directory, mp_string, an_string, photrix_directory = get_context()
-    df_qual_comps_and_mp = get_df_qual_comps_and_mp()
+    # Get data:
     df_qual_obs = get_df_qual_obs()
+    df_clear_obs = df_qual_obs.loc[df_qual_obs['Filter'] == 'Clear', :]  # omit VRI images.
+    state = get_session_state()  # for extinction and transform values.
+    transform = state['transform']['Clear']
 
-    df_qual_comps_only = df_qual_comps_and_mp[df_qual_comps_and_mp['Type'] == 'Comp']
-    df_mp_only = df_qual_comps_and_mp[df_qual_comps_and_mp['Type'] == 'MP']
-    mp_color = 'darkred'
-    comp_color = 'black'
+    # For each MP observation, compute best MP R mag, write all data into a dictionary:
+    output_dict_list = []
+    is_mp_obs = df_clear_obs['ID'] == mp_id
+    images = df_clear_obs['Filename'].copy().drop_duplicates()
+    for image in images:
+        mp_obs_id = image + '_' + mp_id
+        of_this_image = df_clear_obs['Filename'] == image
+        df_image = df_clear_obs.loc[of_this_image, :]
+        is_comp_obs = df_image['Type'] == 'Comp'
 
-    # FIGURE 1: (multiplot): One point per comp star, plots in a grid within one figure (page).
-    fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(14, 9))  # (width, height) in "inches"
+        # Compute MP's best R magnitude for this image:
+        mean_comp_best_r = mean(df_image.loc[is_comp_obs, 'Best_R_mag'])
+        mean_comp_best_vi = mean(df_image.loc[is_comp_obs, 'Best_VI'])
+        mean_comp_instmag = mean(df_image.loc[is_comp_obs, 'InstMag'])  # Clear filter.
+        mp_best_vi = df_image.loc['MP_' + mp_string, 'Best_VI']
+        mp_instmag = df_image.loc['MP_' + mp_string, 'InstMag']  # Clear filter.
+        mp_best_r = mp_instmag - mean_comp_instmag + mean_comp_best_r + \
+                    transform * (mean_comp_best_vi - mp_best_vi)
 
-    # Local support function for *this* grid of plots:
-    def make_labels(ax, title, xlabel, ylabel, zero_line=False):
-        ax.set_title(title, y=0.91)
-        ax.set_xlabel(xlabel, labelpad=0)
-        ax.set_ylabel(ylabel, labelpad=0)
-        if zero_line is True:
-            ax.axhline(y=0, color='lightgray', linewidth=1, zorder=-100)
+        # Construct output_dict entry:
+        output_dict = dict()
+        output_dict['JD'] = df_image.loc[mp_obs_id, 'JD_mid']
+        output_dict['Best_R_mag'] = mp_best_r
+        output_dict_list.append(output_dict)
 
-    # "Canopus comp plot" (R InstMag from VRI image *vs* R mag estimate from catalog):
-    # Would ideally be a straight line; inspect for outliers.
-    # Data from df_mp_master, comp stars only.
-    ax = axes[0, 0]  # at upper left.
-    make_labels(ax, 'Canopus (CSS) comp plot', 'R_estimate from catalog B & V', 'InstMag(R) from VRI')
-    is_instmag_r = df_qual_obs['Filter'] == 'R'
-    is_comp = df_qual_obs['Type'] == 'Comp'
-    use_in_plot = is_instmag_r & is_comp
-    x = df_qual_obs.loc[use_in_plot, 'R_estimate']
-    y = df_qual_obs.loc[use_in_plot, 'InstMag']
-    ax.scatter(x=x, y=y, alpha=0.5, color=comp_color)
-    margin = 0.08
-    x_range = max(x) - min(x)
-    y_range = max(y) - min(y)
-    x_low, x_high = min(x) - margin * x_range, max(x) + margin * x_range
-    intercept = sum(y - x) / len(x)
-    y_low, y_high = x_low + intercept, x_high + intercept
-    # y_low, y_high = min(y) - margin * y_range, max(y) + margin * y_range
-    ax.plot([x_low, x_high], [y_low, y_high], color='black', zorder=-100, linewidth=1)
+    df_output = pd.DataFrame(data=output_dict_list, index=images)
 
-    # "R-shift plot" (Best R mag - R estimate from catalog vs R estimate from catalog):
-    # A large shift suggests comp-star non-blackbody spectrum.
-    # Data from df_qual_comps_only, thus comp stars (no MP).
-    ax = axes[0, 1]  # next plot to the right.
-    make_labels(ax, 'R-shift comp plot', 'R_estimate from catalog B & V',
-                'Best R mag - first R_estimate', zero_line=True)
-    ax.scatter(x=df_qual_comps_only['R_estimate'],
-               y=df_qual_comps_only['Best_R_mag'] - df_qual_comps_only['R_estimate'],
-               alpha=0.5, color=comp_color)
-
-    # Observed Error Plot (R mag):
-    # Inspect for pattern and for large uncertainties (should be capped at ERR_R_ESTIMATE_MAX):
-    # Comp stars only.
-    ax = axes[0, 2]
-    make_labels(ax, 'Instrumental Sigma', 'Best R mag', 'Sigma(Rmag)')
-    is_r_obs = df_qual_obs['Filter'] == 'R'
-    df_plot = df_qual_obs.loc[is_r_obs, ['ID', 'InstMagSigma']].copy()
-    df_plot = pd.merge(df_plot, df_qual_comps_and_mp[['ID', 'Best_R_mag']],
-                       how='left', on='ID', sort=False)
-    ax.scatter(x=df_plot['Best_R_mag'],
-               y=df_plot['InstMagSigma'],
-               alpha=0.5, color=comp_color)
-
-    # Color index plot (suitability of comps relative to MP):
-    # Try to choose comp stars near or to left of MP.
-    # Comp stars and MP together.
-    ax = axes[1, 0]
-    make_labels(ax, 'Color Index plot', 'Best R mag', 'Best CI (V-I)')
-    ax.scatter(x=df_qual_comps_only['Best_R_mag'],
-               y=df_qual_comps_only['Best_CI'],
-               alpha=0.5, color=comp_color)
-    ax.scatter(x=df_mp_only['Best_R_mag'],
-               y=df_mp_only['Best_CI'],
-               alpha=1.0, color=mp_color, marker='s', s=96)
-    # ax.axhline(y=COLOR_VI_VARIABLE_RISK, color='red', linewidth=1, zorder=-100)
-
-    # Color index plot:
-    # Inspect for pattern and for large uncertainties (should be capped at ERR_R_ESTIMATE_MAX):
-    # Comp stars only.
-    ax = axes[1, 1]
-    make_labels(ax, 'R-estimate error', 'Best R mag', 'uncert(R estimate)')
-    ax.scatter(x=df_qual_comps_only['Best_R_mag'],
-               y=df_qual_comps_only['e_R_estimate'],
-               alpha=0.5, color=comp_color)
-
-    # Finish the figure, and show the entire plot:
-    fig.tight_layout(rect=(0, 0, 1, 0.925))
-    fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.25)
-    fig.suptitle('Comp Star Diagnostics    ::     MP_' + mp_string + '   AN' + an_string,
-                 color='darkblue', fontsize=20, weight='bold')
-    fig.canvas.set_window_title('Comp star diagnostic plots')
-    plt.show()
-
-    # Write diagnostics to console:
-    # (these data may better go into a file, later)
-
-    # Write select_comps.txt stub to mp_directory (using statistics--e.g. from above plots?):
+    # Write output file:
+    lines = []
+    for image in images:
+        jd_string = '{:15.6f}'.format(df_output.loc[image, 'JD'])
+        r_mag = '{:8.3f}'.format(df_output.loc[image, 'Best_R_mag'])
+        lines.append(jd_string + '\t' + r_mag + '\n')
+    filename = mp_string + an_string + '.txt'
+    fullpath = os.path.join(this_directory, filename)
+    with open(fullpath, 'w') as f:
+        f.writelines(lines)
+    print('Output file ' + fullpath + '  written.')
+    log_file.write('Output file ' + fullpath + '  written.\n')
+    log_file.close()
 
 
 SUPPORT_______________________________________________________ = 0
@@ -881,7 +881,7 @@ def get_df_comps_and_mp():
     :return: df_comps_and_mp from mp_phot() [pandas Dataframe]
     """
     this_directory, _, _, _ = get_context()
-    fullpath = os.path.join(this_directory, DF_COMPS_AND_MP_FILENAME)
+    fullpath = os.path.join(this_directory, DF_COMPS_AND_MPS_FILENAME)
     df_comps_and_mp = pd.read_csv(fullpath, sep=';', index_col=0)
     return df_comps_and_mp
 
@@ -901,9 +901,113 @@ def get_df_qual_comps_and_mp():
     :return: df_qual_comps_and_mp from mp_phot() [pandas Dataframe]
     """
     this_directory, _, _, _ = get_context()
-    fullpath = os.path.join(this_directory, DF_QUALIFIED_COMPS_AND_MP_FILENAME)
+    fullpath = os.path.join(this_directory, DF_QUALIFIED_COMPS_AND_MPS_FILENAME)
     df_qual_comps_and_mp = pd.read_csv(fullpath, sep=';', index_col=0)
     return df_qual_comps_and_mp
+
+
+def plot_comps():
+    """  Make plots supporting user's final selection of comp stars for this MP session.
+    :return: [None]
+    """
+    this_directory, mp_string, an_string, photrix_directory = get_context()
+    df_qual_comps_and_mp = get_df_qual_comps_and_mp()
+    df_qual_obs = get_df_qual_obs()
+    # TODO: write get_comp_limits() (reads comp_limits.txt, returns dict).
+
+    df_qual_comps_only = df_qual_comps_and_mp[df_qual_comps_and_mp['Type'] == 'Comp']
+    df_mp_only = df_qual_comps_and_mp[df_qual_comps_and_mp['Type'] == 'MP']
+    mp_color = 'darkred'
+    comp_color = 'black'
+
+    # FIGURE 1: (multiplot): One point per comp star, plots in a grid within one figure (page).
+    fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(14, 9))  # (width, height) in "inches"
+
+    # Local support function for *this* grid of plots:
+    def make_labels(ax, title, xlabel, ylabel, zero_line=False):
+        ax.set_title(title, y=0.91)
+        ax.set_xlabel(xlabel, labelpad=0)
+        ax.set_ylabel(ylabel, labelpad=0)
+        if zero_line is True:
+            ax.axhline(y=0, color='lightgray', linewidth=1, zorder=-100)
+
+    # "Canopus comp plot" (R InstMag from VRI image *vs* R mag estimate from catalog):
+    # Would ideally be a straight line; inspect for outliers.
+    # Data from df_mp_master, comp stars only.
+    ax = axes[0, 0]  # at upper left.
+    make_labels(ax, 'Canopus (CSS) comp plot', 'R_estimate from catalog B & V', 'InstMag(R) from VRI')
+    is_instmag_r = df_qual_obs['Filter'] == 'R'
+    is_comp = df_qual_obs['Type'] == 'Comp'
+    use_in_plot = is_instmag_r & is_comp
+    x = df_qual_obs.loc[use_in_plot, 'R_estimate']
+    y = df_qual_obs.loc[use_in_plot, 'InstMag']
+    ax.scatter(x=x, y=y, alpha=0.5, color=comp_color)
+    margin = 0.08
+    x_range = max(x) - min(x)
+    y_range = max(y) - min(y)
+    x_low, x_high = min(x) - margin * x_range, max(x) + margin * x_range
+    intercept = sum(y - x) / len(x)
+    y_low, y_high = x_low + intercept, x_high + intercept
+    # y_low, y_high = min(y) - margin * y_range, max(y) + margin * y_range
+    ax.plot([x_low, x_high], [y_low, y_high], color='black', zorder=-100, linewidth=1)
+
+    # "R-shift plot" (Best R mag - R estimate from catalog vs R estimate from catalog):
+    # A large shift suggests comp-star non-blackbody spectrum.
+    # Data from df_qual_comps_only, thus comp stars (no MP).
+    ax = axes[0, 1]  # next plot to the right.
+    make_labels(ax, 'R-shift comp plot', 'R_estimate from catalog B & V',
+                'Best R mag - first R_estimate', zero_line=True)
+    ax.scatter(x=df_qual_comps_only['R_estimate'],
+               y=df_qual_comps_only['Best_R_mag'] - df_qual_comps_only['R_estimate'],
+               alpha=0.5, color=comp_color)
+
+    # Observed Error Plot (R mag):
+    # Inspect for pattern and for large uncertainties (should be capped at ERR_R_ESTIMATE_MAX):
+    # Comp stars only.
+    ax = axes[0, 2]
+    make_labels(ax, 'Instrumental Sigma', 'Best R mag', 'Sigma(Rmag)')
+    is_r_obs = df_qual_obs['Filter'] == 'R'
+    df_plot = df_qual_obs.loc[is_r_obs, ['ID', 'InstMagSigma']].copy()
+    df_plot = pd.merge(df_plot, df_qual_comps_and_mp[['ID', 'Best_R_mag']],
+                       how='left', on='ID', sort=False)
+    ax.scatter(x=df_plot['Best_R_mag'],
+               y=df_plot['InstMagSigma'],
+               alpha=0.5, color=comp_color)
+
+    # Color index plot (suitability of comps relative to MP):
+    # Try to choose comp stars near or to left of MP.
+    # Comp stars and MP together.
+    ax = axes[1, 0]
+    make_labels(ax, 'Color Index plot', 'Best R mag', 'Best CI (V-I)')
+    ax.scatter(x=df_qual_comps_only['Best_R_mag'],
+               y=df_qual_comps_only['Best_CI'],
+               alpha=0.5, color=comp_color)
+    ax.scatter(x=df_mp_only['Best_R_mag'],
+               y=df_mp_only['Best_CI'],
+               alpha=1.0, color=mp_color, marker='s', s=96)
+    # ax.axhline(y=COLOR_VI_VARIABLE_RISK, color='red', linewidth=1, zorder=-100)
+
+    # Color index plot:
+    # Inspect for pattern and for large uncertainties (should be capped at ERR_R_ESTIMATE_MAX):
+    # Comp stars only.
+    ax = axes[1, 1]
+    make_labels(ax, 'R-estimate error', 'Best R mag', 'uncert(R estimate)')
+    ax.scatter(x=df_qual_comps_only['Best_R_mag'],
+               y=df_qual_comps_only['e_R_estimate'],
+               alpha=0.5, color=comp_color)
+
+    # Finish the figure, and show the entire plot:
+    fig.tight_layout(rect=(0, 0, 1, 0.925))
+    fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.25)
+    fig.suptitle('Comp Star Diagnostics    ::     MP_' + mp_string + '   AN' + an_string,
+                 color='darkblue', fontsize=20, weight='bold')
+    fig.canvas.set_window_title('Comp star diagnostic plots')
+    plt.show()
+
+    # Write diagnostics to console:
+    # (these data may better go into a file, later)
+
+    # Write select_comps.txt stub to mp_directory (using statistics--e.g. from above plots?):
 
 
 class ZCurve:
@@ -1001,7 +1105,6 @@ def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=Tru
     df = df[~pd.isnull(df['e_Bmag'])]
     df['BminusV'] = df['Bmag'] - df['Vmag']
     df['e_BminusV'] = np.sqrt(df['e_Vmag'] ** 2 + df['e_Bmag'] ** 2)
-    # df_comps = df
     if add_rmag_estimate:
         df['R_estimate'] = R_ESTIMATE_V_COEFF * df['Vmag'] +\
                            R_ESTIMATE_BV_COLOR_COEFF * df['BminusV'] +\
@@ -1015,8 +1118,8 @@ def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=Tru
         df = df[df['e_R_estimate'] <= ERR_R_ESTIMATE_MAX]
     df_comps = df.copy()
     if mp_color_only is True:
-        above_min = MP_COLOR_BV_MIN <= df_comps['BminusV']
-        below_max = df_comps['BminusV'] <= MP_COLOR_BV_MAX
+        above_min = COLOR_BV_MIN <= df_comps['BminusV']
+        below_max = df_comps['BminusV'] <= COLOR_BV_MAX
         color_ok = list(above_min & below_max)
         df_comps = df_comps[color_ok]
     return df_comps
@@ -1042,6 +1145,72 @@ def get_session_state(site_name='DSW', instrument_name='Borea'):
     return state
 
 
+def get_comp_limits():
+    """ Reads file comp_limits.txt if exists, uses defaults if not.
+    Returns dict of comp star limits on R magnitude, color index, errors, etc.
+    :return comp_limits_dict: comp limits [dict].
+    """
+    this_directory, _, _, _ = get_context()
+    fullpath = os.path.join(this_directory, 'comp_limits.txt')
+    file = open(fullpath, mode='r')  # for read only
+    lines = file.readlines()
+    file.close()
+    comp_limits_dict = dict(min_r=COMPS_MIN_R_MAG, max_r=COMPS_MAX_R_MAG,
+                            min_vi=COMPS_MIN_COLOR_VI, max_vi=COMPS_MAX_COLOR_VI,
+                            max_er=1 / COMPS_MIN_SNR)
+    for line in lines:
+        content = line.upper().strip().split(';')[0].strip()  # upper case, comments removed.
+        if content.startswith('#R'):
+            values = content[len('#R'):].strip()
+            min_r_string = values.strip().split()[0]
+            if min_r_string != 'NONE':
+                comp_limits_dict['min_r'] = float(min_r_string)
+            max_r_string = values.strip().split()[1]
+            if max_r_string != 'NONE':
+                comp_limits_dict['max_r'] = float(max_r_string)
+        if content.startswith('#V-I'):
+            values = content[len('#V-I'):].strip()
+            min_vi_string = values.strip().split()[0]
+            if min_vi_string != 'NONE':
+                comp_limits_dict['min_vi'] = float(min_vi_string)
+            max_vi_string = values.strip().split()[1]
+            if max_vi_string != 'NONE':
+                comp_limits_dict['max_vi'] = float(max_vi_string)
+        if content.startswith('#E(R)MAX'):
+            values = content[len('#E(R)MAX'):].strip()
+            max_er_string = values.strip().split()[0]
+            if max_er_string != 'NONE':
+                comp_limits_dict['max_er'] = float(max_er_string)
+    return comp_limits_dict
+
+
+def keep_omnipresent_comps(df_comps_mps_input, df_obs_input):
+    """  Take dataframes, keep only rows in each for (all MPs and) only comp IDs represented in every image.
+    :param df_comps_mps_input: dataframe of sources, must have column 'ID'. [pandas Dataframe]
+    :param df_obs_input: dataframe of observations, must have column 'ID'. [pandas Dataframe]
+    :return: tuple (df_qualified_comps_mp, df_qualified_obs) [2-tuple of pandas Dataframes].
+    """
+    # Make list of comps that are MISSING an obs from at least one image in df_mp_master:
+    is_comp = df_obs_input['Type'] == 'Comp'
+    comp_ids = df_obs_input.loc[is_comp, 'ID']
+    comp_id_list = comp_ids.copy().drop_duplicates()
+    n_fitsfiles = len(df_obs_input['Filename'].drop_duplicates())
+    incomplete_comp_id_list = []
+    for this_id in comp_id_list:
+        n_obs_this_id = sum([id == this_id for id in df_obs_input['ID']])
+        if n_obs_this_id != n_fitsfiles:
+            incomplete_comp_id_list.append(this_id)
+
+    # Make and return new subset dataframes:
+    obs_to_remove = df_obs_input['ID'].isin(incomplete_comp_id_list)
+    obs_to_keep = ~obs_to_remove
+    df_obs_output = df_obs_input[obs_to_keep].copy()
+    comps_to_remove = df_comps_mps_input['ID'].isin(incomplete_comp_id_list)
+    comps_mps_to_keep = ~comps_to_remove
+    df_comps_mps_output = df_comps_mps_input[comps_mps_to_keep].copy()
+    return df_comps_mps_output, df_obs_output
+
+
 def reorder_df_columns(df, left_column_list=None, right_column_list=None):
     left_column_list = [] if left_column_list is None else left_column_list
     right_column_list = [] if right_column_list is None else right_column_list
@@ -1053,46 +1222,14 @@ def reorder_df_columns(df, left_column_list=None, right_column_list=None):
     return df
 
 
-def try_reg():
-    """  This was used to get R_estimate coeffs, using catalog data to predict experimental Best_R_mag.
-    :return: [None]
-    """
-    df_comps_and_mp = get_df_comps_and_mp()
-    dfc = df_comps_and_mp[df_comps_and_mp['Type'] == 'Comp']
-    dfc = dfc[dfc['InAllImages']]
-
-    # from sklearn.linear_model import LinearRegression
-    # x = [[bv, v] for (bv, v) in zip(dfc['BminusV'], dfc['Vmag'])]
-    # y = list(dfc['Best_R_mag'])
-    # reg = LinearRegression(fit_intercept=True)
-    # reg.fit(x, y)
-    # print('\nsklearn: ', reg.coef_, reg.intercept_)
-    #
-    # xx = dfc[['BminusV', 'Vmag']]
-    # yy = dfc['Best_R_mag']
-    # reg.fit(xx, yy)
-    # print('\nsklearn2: ', reg.coef_, reg.intercept_)
-
-    # # statsmodel w/ formula api (R-style formulas) (fussy about column names):
-    # import statsmodels.formula.api as sm
-    # dfc['BV'] = dfc['BminusV']  # column name BminusV doesn't work in formula.
-    # result = sm.ols(formula='Best_R_mag ~ BV + Vmag', data=dfc).fit()
-    # print('\n' + 'sm.ols:')
-    # print(result.summary())
-
-    # statsmodel w/ dataframe-column api:
-    import statsmodels.api as sm
-    # make column BV as above
-    # result = sm.OLS(dfc['Best_R_mag'], dfc[['BV', 'Vmag']]).fit()  # <--- without constant term
-    result = sm.OLS(dfc['Best_R_mag'], sm.add_constant(dfc[['BminusV', 'Vmag']])).fit()
-    print('\n' + 'sm.ols:')
-    print(result.summary())
-
-    # statsmodel w/ dataframe-column api:
-    import statsmodels.api as sm
-    # make column BV as above
-    # result = sm.OLS(dfc['Best_R_mag'], dfc[['BV', 'Vmag']]).fit()  # <--- without constant term
-    result = sm.OLS(dfc['Best_R_mag'], sm.add_constant(dfc[['R_estimate']])).fit()
-    print('\n' + 'sm.ols:')
-    print(result.summary())
-    # also available: result.params, .pvalues, .rsquared
+def make_packed_mp_string(mp_string):
+    n = int(mp_string)
+    if n <= 99999:
+        return'{0:05d}'.format(n)
+    div, mod = divmod(n, 10000)
+    if 100000 <= n <= 359999:
+        return chr(div - 9 + (ord('A') - 1)) + '{0:04d}'.format(mod)
+    if 260000 <= n <= 619999:
+        return chr(div - 9 - 26 + (ord('a') - 1)) + '{0:04d}'.format(mod)
+    else:
+        return 'XXXXX'
