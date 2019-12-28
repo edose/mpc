@@ -18,9 +18,9 @@ ISO_8601_FORMAT = '%Y-%m-%dT%H:%M:%S'
 # ==================================================================
 # pca_phot.py : Star-subtracting, background-subtracting low-level aperture measurement
 #                   of minor planet signals.
-# Development SUSPENDED late 2019 in favor of comprehensive MP photometry in phot-apass.py.
-# May come back to developing this (after phot-apass.py is working) to do the low-level photometry,
-#     that is, this engine would feed aperture flux values into phot-apass.py.
+# Development SUSPENDED late 2019 in favor of comprehensive MP photometry in phot_apass.py.
+# May come back to developing this (after phot_apass.py is working) to do the low-level photometry,
+#     that is, this engine would feed aperture flux values into phot_apass.py.
 # ==================================================================
 
 # The Principal Components (or non-negative regression) prospective workflow.

@@ -1,13 +1,9 @@
 # Python core packages:
-import os
-from io import StringIO
-from datetime import datetime
 from math import cos, sin, sqrt, pi, log10, floor
 from collections import Counter
 
 # External packages:
 import numpy as np
-import statsmodels.api as sm
 import pandas as pd
 import requests
 from scipy.interpolate import interp1d
@@ -16,22 +12,15 @@ import matplotlib.pyplot as plt
 
 # From this (mpc) package:
 from mpc.mpctools import *
+from mpc.catalogs import *
 
 # From external (EVD) package photrix:
 from photrix.image import Image, FITS, Aperture
 from photrix.util import RaDec, jd_from_datetime_utc, degrees_as_hex, ra_as_hours
-from photrix.fov import FOV_DIRECTORY, Fov
-
 
 __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
-ATLAS_REFCAT2_DIRECTORY = 'J:/Astro/Catalogs/ATLAS-refcat2/mag-0-16/'
-RP1_LIMIT = 10  # arcseconds; closeness limit for flux = 0.1 * star flux
-R1_LIMIT = 15   # arcseconds; closeness limit for flux = 1 * star flux
-R10_LIMIT = 20  # arcseconds; closeness limit for flux = 10 * star flux
-ATLAS_REFCAT2_EPOCH_UTC = datetime(2015, 1, 1) + \
-                          (datetime(2016, 1, 1) - datetime(2015, 1, 1)) / 2.0  # 2015.5
-ATLAS_REFCAT2_MAX_QUERY_DEFSQ = 10
+
 DAYS_PER_YEAR_NOMINAL = 365.25
 VALID_FITS_FILE_EXTENSIONS = ['.fits', '.fit', '.fts']
 DEGREES_PER_RADIAN = 180.0 / pi
@@ -45,8 +34,6 @@ FOCUS_LENGTH_MAX_PCT_DEVIATION = 3.0
 # To screen obs in df_mp_master:
 MAX_MAG_UNCERT = 0.02  # min signal/noise for use comp obs (SNR defined here as InstMag / InstMagSigma).
 ADU_UR_SATURATED = 54000  # This probably should go in Instrument class, but ok for now.
-
-MATCH_TOLERANCE_ARCSEC = 4  # to match stars across catalogs
 
 PHOTRIX_TOP_DIRECTORIES = ['C:/Astro/Borea Photrix/', 'J:/Astro/Images/Borea Photrix Archives/']
 FILE_RENAMING_FILENAME = 'File-renaming.txt'
@@ -144,14 +131,6 @@ def assess():
     log_file.write('\n ===== access()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
     n_warnings = 0
-
-    # # Ensure that df_master is accessible:
-    #     # df_master = get_df_master(os.path.join(photrix_directory, 'Photometry'))
-    #     # df_master_exists = (len(df_master) > 100) and (len(df_master.columns) > 20)
-    #     # if not df_master_exists:
-    #     #     print(' >>>>> df_master.csv not found.')
-    #     #     log_file.write(' >>>>> df_master.csv not found.\n')
-    #     #     n_warnings += 1
 
     # Get FITS file names in current directory:
     fits_filenames = get_fits_filenames(this_directory)
@@ -289,6 +268,34 @@ def assess():
     log_file.close()
 
 
+def gather_data():
+    """ For one MP on one night:
+            gather images and ATLAS refcat2 catalog data, make df_comps and df_obs."""
+    this_directory, mp_string, an_string, photrix_directory = get_context()
+    log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
+    mp_int = int(mp_string)  # put this in try/catch block.
+    mp_string = str(mp_int)
+    log_file.write('\n ===== gather_data()  ' +
+                   '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
+
+    # Get all relevant FITS filenames, make lists of FITS and Image objects (per photrix):
+    fits_names = get_fits_filenames(this_directory)
+    fits_list = [FITS(this_directory, '', fits_name) for fits_name in fits_names]  # FITS objects
+    image_list = [Image(fits_object) for fits_object in fits_list]  # Image objects
+
+    # Get outermost bounding RA, Dec for all images:
+    ra_deg_min_list, ra_deg_max_list, dec_deg_min_list, dec_deg_max_list = [], [], [], []
+    for fits in fits_list:
+        ra_deg_min, ra_deg_max, dec_deg_min, dec_deg_max = get_bounding_ra_dec(fits)
+        ra_deg_min_list.append(ra_deg_min)
+        ra_deg_max_list.append(ra_deg_max)
+        dec_deg_min_list.append(dec_deg_min)
+        dec_deg_max_list.append(dec_deg_max)
+
+
+
+
+
 SUPPORT________________________________________________ = 0
 
 
@@ -337,147 +344,6 @@ def get_fits_filenames(directory):
     fits_filenames = all_filenames[is_fits]
     return fits_filenames
 
-
-def get_refcat2_from_fits_file(fits_directory, fits_filename):
-    fits_object = FITS(fits_directory, '', fits_filename)
-    return get_refcat2_from_fits_object(fits_object)
-
-
-def get_refcat2_from_fits_object(fits_object):
-    image = Image(fits_object)
-    deg_ra = fits_object.ra
-    deg_dec = fits_object.dec
-    ps = fits_object.plate_solution  # a pandas Series
-    ra_list, dec_list = [], []
-    for xfract in [-0.5, 0.5]:
-        dx = xfract * image.xsize
-        for yfract in [-0.5, 0.5]:
-            dy = yfract * image.ysize
-            d_ra = 1.03 * (dx * ps['CD1_1'] + dy * ps['CD1_2'])   # in degrees
-            d_dec = 1.03 * (dx * ps['CD2_1'] + dy * ps['CD2_2'])  # "
-            ra_list.append(deg_ra + d_ra)
-            dec_list.append(deg_dec + d_dec)
-    ra_deg_min = min(ra_list) % 360.0
-    ra_deg_max = max(ra_list) % 360.0
-    dec_deg_min = min(dec_list)
-    dec_deg_max = max(dec_list)
-    return get_refcat2(ATLAS_REFCAT2_DIRECTORY, ra_deg_min, ra_deg_max, dec_deg_min, dec_deg_max, True)
-
-
-def get_refcat2(directory=ATLAS_REFCAT2_DIRECTORY,
-                ra_deg_min=None, ra_deg_max=None, dec_deg_min=None, dec_deg_max=None, sort_ra=True):
-    ra_spec_first = int(floor(ra_deg_min)) % 360  # will always be in [0, 360).
-    ra_spec_last = int(floor(ra_deg_max)) % 360   # "
-    if ra_spec_last < ra_spec_first:
-        ra_spec_last += 360
-    dec_spec_first = int(floor(dec_deg_min))
-    dec_spec_first = max(dec_spec_first, -90)
-    dec_spec_last = int(floor(dec_deg_max))
-    dec_spec_last = min(dec_spec_last, 89)
-    # print('RA: ', str(ra_spec_first), str((ra_spec_last % 360) + 1))
-    # print('Dec:', str(dec_spec_first), str(dec_spec_last))
-    df_list = []
-    n_degsq = (ra_spec_last + 1 - ra_spec_first) * (dec_spec_last + 1 - dec_spec_first)
-    if n_degsq > ATLAS_REFCAT2_MAX_QUERY_DEFSQ:
-        print(' >>>>> Too many defsq (' + str(n_degsq) + ') requested. Stopping.')
-    for ra_spec in range(ra_spec_first, ra_spec_last + 1):
-        for dec_spec in range(dec_spec_first, dec_spec_last + 1):
-            df_degsq = read_one_refcat2_sqdeg(directory, ra_spec % 360, dec_spec)
-            # print('From:', str(ra_spec % 360), str(dec_spec), ' -> ', str(len(df_degsq)), 'rows.')
-            df_list.append(df_degsq)
-    df = pd.DataFrame(pd.concat(df_list, ignore_index=True))  # new index of unique integers
-
-    # Trim dataframe based on user's actual limits on RA and Dec:
-    ra_too_low = (df['RA_deg'] < ra_deg_min) & (df['RA_deg'] >= ra_spec_first)
-    ra_too_high = (df['RA_deg'] > ra_deg_max) & (df['RA_deg'] <= (ra_spec_last % 360) + 1)
-    dec_too_low = df['Dec_deg'] < dec_deg_min
-    dec_too_high = df['Dec_deg'] > dec_deg_max
-    # print(str(sum(ra_too_low)), str(sum(ra_too_high)), str(sum(dec_too_low)), str(sum(dec_too_high)))
-    radec_outside_requested = ra_too_low | ra_too_high | dec_too_low | dec_too_high
-    df = df[~radec_outside_requested]
-    if sort_ra is True:
-        df = df.copy().sort_values(by='RA_deg')
-    return df
-
-
-def read_one_refcat2_sqdeg(directory=ATLAS_REFCAT2_DIRECTORY, ra_deg_min=None, dec_deg_min=None):
-    ra_deg_int = int(ra_deg_min)
-    dec_deg_int = int(dec_deg_min)
-    filename = '{:03d}'.format(ra_deg_int) + '{:+03d}'.format(dec_deg_int) + '.rc2'
-    fullpath = os.path.join(directory, filename)
-    df = pd.read_csv(fullpath, sep=',', engine='python', header=None,
-                     skip_blank_lines=True, error_bad_lines=False,
-                     usecols=[0, 1, 4, 5, 6, 7, 18, 19, 20, 21, 22, 25, 26, 29, 30], prefix='X')
-    df.columns = ['RA_deg', 'Dec_deg', 'PM_ra', 'dPM_ra', 'PM_dec', 'dPM_dec',
-                  'RP1', 'R1', 'R10', 'G', 'dG', 'R', 'dR', 'I', 'dI']
-    df['RA_deg'] *= 0.00000001
-    df['Dec_deg'] *= 0.00000001
-    df['PM_ra'] *= 0.00001    # proper motion in arcsec/year
-    df['dPM_ra'] *= 0.00001   # uncert in PM, arcsec/year
-    df['PM_dec'] *= 0.00001   # proper motion in arcsec/year
-    df['dPM_dec'] *= 0.00001  # uncert in PM, arcsec/year
-    df['RP1'] = [None if rp1 == 999 else rp1 / 10.0 for rp1 in df['RP1']]  # radius in arcseconds
-    df['R1'] = [None if r1 == 999 else r1 / 10.0 for r1 in df['R1']]       # "
-    df['R10'] = [None if r10 == 999 else r10 / 10.0 for r10 in df['R10']]  # "
-    df['G'] *= 0.001  # in magnitudes; dG remains in millimagnitudes
-    df['R'] *= 0.001  # in magnitudes; dR remains in millimagnitudes
-    df['I'] *= 0.001  # in magnitudes; dI remains in millimagnitudes
-    return df
-
-
-def remove_overlapping_comps(df_comps_atlas):
-    rp1_too_close = pd.Series([False if pd.isnull(rp1) else (rp1 < RP1_LIMIT)
-                               for rp1 in df_comps_atlas['RP1']])
-    r1_too_close = pd.Series([False if pd.isnull(r1) else (r1 < R1_LIMIT)
-                              for r1 in df_comps_atlas['R1']])
-    r10_too_close = pd.Series([False if pd.isnull(r10) else (r10 < R10_LIMIT)
-                               for r10 in df_comps_atlas['R10']])
-    is_overlapping = rp1_too_close | r1_too_close | r10_too_close
-    return df_comps_atlas.loc[list(~is_overlapping)]
-
-
-def update_radec_to_date(df_comps_atlas, date_utc):
-    d_years = (date_utc - ATLAS_REFCAT2_EPOCH_UTC).total_seconds() / (DAYS_PER_YEAR_NOMINAL * 24 * 3600)
-    ra_date = [ra_epoch + d_years * pm_ra / 3600.0
-               for (ra_epoch, pm_ra) in zip(df_comps_atlas['RA_deg'], df_comps_atlas['PM_ra'])]
-    dec_date = [dec_epoch + d_years * pm_dec / 3600.0
-                for (dec_epoch, pm_dec) in zip(df_comps_atlas['Dec_deg'], df_comps_atlas['PM_dec'])]
-    df_comps_date = df_comps_atlas.copy()
-    df_comps_date.loc[:, 'RA_deg'] = ra_date
-    df_comps_date.loc[:, 'Dec_deg'] = dec_date
-    columns_to_drop = ['PM_ra', 'dPM_ra', 'PM_dec', 'dPM_dec']  # best to remove, as they no longer be used.
-    df_comps_date.drop(columns_to_drop, inplace=True, axis=1)
-    return df_comps_date
-
-
-def find_matching_comp(df_comps, ra_deg, dec_deg):
-    # tol_deg = MATCH_TOLERANCE_ARCSEC / 3600.0
-    tol_deg = 25 * MATCH_TOLERANCE_ARCSEC / 3600.0
-    ra_tol = abs(tol_deg / cos(dec_deg * DEGREES_PER_RADIAN))
-    dec_tol = tol_deg
-    within_ra = (abs(df_comps['RA_deg'] - ra_deg) < ra_tol) |\
-                (abs((df_comps['RA_deg'] + 360.0) - ra_deg) < ra_tol) |\
-                (abs(df_comps['RA_deg'] - (ra_deg + 360.0)) < ra_tol)
-    within_dec = abs(df_comps['Dec_deg'] - dec_deg) < dec_tol
-    within_box = within_ra & within_dec
-    if sum(within_box) == 0:
-        return None
-    elif sum(within_box) == 1:
-        return (df_comps.index[within_box])[0]
-    else:
-        # TODO: Here, we have to choose the *closest* df_comps comp and return its index:
-        df_sub = df_comps.loc[list(within_box), ['RA_deg', 'Dec_deg']]
-        cos2 = cos(dec_deg) ** 2
-        dist2_ra_1 = ((df_sub['RA_deg'] - ra_deg) ** 2) / cos2
-        dist2_ra_2 = (((df_sub['RA_deg'] + 360.0) - ra_deg) ** 2) / cos2
-        dist2_ra_3 = ((df_sub['RA_deg'] - (ra_deg + 360.0)) ** 2) / cos2
-        dist2_ra = [min(d1, d2, d3) for (d1, d2, d3) in zip(dist2_ra_1, dist2_ra_2, dist2_ra_3)]
-        dist2_dec = (df_sub['Dec_deg'] - dec_deg) ** 2
-        dist2 = [ra2 + dec2 for (ra2, dec2) in zip(dist2_ra, dist2_dec)]
-        i = dist2.index(min(dist2))
-        return df_sub.index.values[i]
-
-
 def get_session_state(site_name='DSW', instrument_name='Borea'):
     """ Return dict containing extinction & transforms (etc?).
     :param site_name: name of site for class Site, e.g., 'DSW' [string].
@@ -511,64 +377,10 @@ def get_df_mp_master():
 PRELIMINARY_TESTS________________________________________________ = 0
 
 
-def regress_landolt_r_mags():
-    """ Regress Landolt R magnitudes against matching ATLAS refcat2 g, r, and i magnitudes."""
-    # First, collect all data into dataframe df_mags:
-    fov_list = get_landolt_fovs(FOV_DIRECTORY)
-    mag_dict_list = []
-    for fov in fov_list:
-        if fov.target_type.lower() == 'standard':
-            # Get ATLAS refcat2 stars within vicinity of FOV stars:
-            ra_degs = [star.ra for star in fov.aavso_stars]
-            ra_deg_min = min(ra_degs)
-            ra_deg_max = max(ra_degs)
-            dec_degs = [star.dec for star in fov.aavso_stars]
-            dec_deg_min = min(dec_degs)
-            dec_deg_max = max(dec_degs)
-            df_refcat2 = get_refcat2(ra_deg_min=ra_deg_min, ra_deg_max=ra_deg_max,
-                                     dec_deg_min=dec_deg_min, dec_deg_max=dec_deg_max)
-            df_refcat2 = remove_overlapping_comps(df_refcat2)
-
-            for fov_star in fov.aavso_stars:
-                refcat2_matching = find_matching_comp(df_refcat2, fov_star.ra, fov_star.dec)
-                if refcat2_matching is not None:
-                    g_mag = df_refcat2.loc[refcat2_matching, 'G']
-                    r_mag = df_refcat2.loc[refcat2_matching, 'R']
-                    i_mag = df_refcat2.loc[refcat2_matching, 'I']
-                    if g_mag is not None and r_mag is not None and i_mag is not None:
-                        try:
-                            mag_dict = {'fov': fov.fov_name, 'fov_star': fov_star.star_id,
-                                        'Landolt_R': fov_star.mags['R'][0],
-                                        'g': g_mag, 'r': r_mag, 'i': i_mag}
-                            mag_dict_list.append(mag_dict)
-                        except KeyError:
-                            print(' >>>>> Caution:', fov.fov_name, fov_star.star_id, 'is missing R mag.')
-    this_index = [mag_dict['fov'] + '_' + mag_dict['fov_star'] for mag_dict in mag_dict_list]
-    df_mags = pd.DataFrame(data=mag_dict_list, index=this_index)
-
-    # Perform regression; Landolt R is indep var, and dep variables are matching refcat2 g, r, and i mags:
-    # return df_mags  # for now.
-    df_y = df_mags[['Landolt_R']]
-    df_x = df_mags[['r']]
-    # df_x = df_mags[['g', 'r', 'i']]
-    df_x.loc[:, 'intercept'] = 1.0
-    weights = len(df_mags) * [1]
-    result = sm.WLS(df_y, df_x, weights).fit()  # see bulletin2.util
-    print(result.summary())
-    return result
 
 
-def get_landolt_fovs(fov_directory=FOV_DIRECTORY):
-    """ Return list of FOV objects, one for each Landolt standard field."""
-    all_filenames = pd.Series([e.name for e in os.scandir(fov_directory) if e.is_file()])
-    fov_list = []
-    for filename in all_filenames:
-        fov_name = filename.split('.')[0]
-        if not fov_name.startswith(('$', 'Std_NGC')):  # these are not Landolt FOVs
-            fov_object = Fov(fov_name)
-            if fov_object.is_valid:
-                fov_list.append(fov_object)
-    return fov_list
+
+
 
 
 # def get_transforms_landolt_r_mags(fits_directory):

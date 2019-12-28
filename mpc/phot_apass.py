@@ -1,7 +1,6 @@
 __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
 # Python core packages:
-from io import StringIO
 from datetime import datetime
 from math import cos, sin, sqrt, pi, log10, floor
 from collections import Counter
@@ -9,7 +8,6 @@ from collections import Counter
 # External packages:
 import numpy as np
 import pandas as pd
-import requests
 from scipy.interpolate import interp1d
 from statistics import median, mean
 import matplotlib.pyplot as plt
@@ -27,14 +25,6 @@ MAX_FWHM = 14  # "
 REQUIRED_FILES_PER_FILTER = [('V', 1), ('R', 1), ('I', 1), ('Clear', 5)]
 FOCUS_LENGTH_MAX_PCT_DEVIATION = 3.0
 
-# To screen comps immediately on reading them in (wide limits; will narrow selections later):
-MP_COMP_RADEC_ERROR_MAX = 1.0  # in arcseconds
-R_ESTIMATE_MIN = 9  # wide, as this will be refined later.
-R_ESTIMATE_MAX = 16  # "
-ERR_R_ESTIMATE_MAX = 0.25  # fairly high (inclusive), as there will be more screens, later.
-COLOR_BV_MIN = 0.2  # inclusive (will be refined using V-I later).
-COLOR_BV_MAX = 1.2  # "
-
 # To screen obs in df_mp_master:
 COMPS_MIN_SNR = 25  # min signal/noise for use comp obs (SNR defined here as InstMag / InstMagSigma).
 ADU_UR_SATURATED = 54000  # This probably should go in Instrument class, but ok for now.
@@ -44,11 +34,6 @@ COMPS_MIN_R_MAG = 10.5    # a guess
 COMPS_MAX_R_MAG = 15.5  # a guess; probably needs to be customized per-MP, even per-session.
 COMPS_MIN_COLOR_VI = 0.2
 COMPS_MAX_COLOR_VI = 1.0
-
-# For estimating Best R mag from catalog B and V mags:
-R_ESTIMATE_V_COEFF = 0.975  # from regression on Best_R_mag
-R_ESTIMATE_BV_COLOR_COEFF = -0.419  # "
-R_ESTIMATE_INTERCEPT = 0  # "
 
 VALID_FITS_FILE_EXTENSIONS = ['.fits', '.fit', '.fts']
 DEGREES_PER_RADIAN = 180.0 / pi
@@ -65,14 +50,13 @@ DF_COMPS_AND_MPS_FILENAME = 'df_comps_and_mps.csv'
 DF_QUALIFIED_OBS_FILENAME = 'df_qual_obs.csv'
 DF_QUALIFIED_COMPS_AND_MPS_FILENAME = 'df_qual_comps_and_mps.csv'
 
-APASS_10_URL = 'https://www.aavso.org/cgi-bin/apass_dr10_download.pl'
 
 
 NEW_WORKFLOW________________________________________________ = 0
 
 
 # ==========================================================================
-#  phot-apass.py: comprehensive photometry for minor planets.
+#  phot_apass.py: comprehensive photometry for minor planets.
 #  Uses : (1) df_master.csv from night's photrix run, to get Landolt standard (V,R,I) data.
 #         (2) MP-field images (one each in V,R,I), to get R-mags and V-I color on comp stars, and
 #         (3) MP-field images (as many as possible, in Clear), from which we get lightcurve in R.#
@@ -1078,59 +1062,6 @@ class ZCurve:
             return self.linear_function(jd)
         else:
             return self.spline_function(jd)
-
-
-def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=True, add_rmag_estimate=True):
-    """  Renders a dataframe with all needed comp info, including estimated R mags.
-    Tests OK ~ 20191106.
-    :param ra: center Right Ascension for comp search, in degrees only [float].
-    :param dec: center Declination for comp search, in degrees only [float].
-    :param radius: radius of circular search area, in degrees [float].
-    :param r_min: minimum R magnitude (brightest limit) [float]. None = no limit.
-    :param r_max: maximum R magnitude (faintest limit) [float]. None = no limit.
-    :param mp_color_only: True means keep only comps close to typical MP color [boolean].
-    :param add_rmag_estimate: True means add R_estimate column and its error [boolean].
-    :return: dataframe of comp data [pandas Dataframe].
-    Columns = degRA, e_RA, degDec, e_Dec, Vmag, e_Vmag, Bmag, e_Bmag, R_estimate, e_R_estimate.
-    """
-    result = requests.post(url=APASS_10_URL,
-                           data={'ra': ra, 'dec': dec, 'radius': radius, 'outtype': 1})
-    # convert this text to pandas Dataframe (see photrix get_df_master() for how).
-    df = pd.read_csv(StringIO(result.text), sep=',')
-    df = df.rename(columns={'radeg': 'degRA', 'raerr(")': 'e_RA', 'decdeg': 'degDec', 'decerr(")': 'e_Dec',
-                            'Johnson_V (V)': 'Vmag', 'Verr': 'e_Vmag',
-                            'Johnson_B (B)': 'Bmag', 'Berr': 'e_Bmag'})
-    df.index = [str(i) for i in df.index]
-    df['ID'] = df.index
-    columns_to_keep = ['ID', 'degRA', 'e_RA', 'degDec', 'e_Dec', 'Vmag', 'e_Vmag', 'Vnobs', 'Bmag',
-                       'e_Bmag', 'Bnobs']
-    df = df[columns_to_keep]
-    df = df[df['e_RA'] < MP_COMP_RADEC_ERROR_MAX]
-    df = df[df['e_Dec'] < MP_COMP_RADEC_ERROR_MAX]
-    df = df[~pd.isnull(df['Vmag'])]
-    df = df[~pd.isnull(df['e_Vmag'])]
-    df = df[~pd.isnull(df['Bmag'])]
-    df = df[~pd.isnull(df['e_Bmag'])]
-    df['BminusV'] = df['Bmag'] - df['Vmag']
-    df['e_BminusV'] = np.sqrt(df['e_Vmag'] ** 2 + df['e_Bmag'] ** 2)
-    if add_rmag_estimate:
-        df['R_estimate'] = R_ESTIMATE_V_COEFF * df['Vmag'] +\
-                           R_ESTIMATE_BV_COLOR_COEFF * df['BminusV'] +\
-                           R_ESTIMATE_INTERCEPT
-        df['e_R_estimate'] = np.sqrt(R_ESTIMATE_V_COEFF**2 * df['e_Vmag']**2 +
-                                     R_ESTIMATE_BV_COLOR_COEFF**2 * df['e_BminusV']**2)
-        if r_min is not None:
-            df = df[df['R_estimate'] >= r_min]
-        if r_max is not None:
-            df = df[df['R_estimate'] <= r_max]
-        df = df[df['e_R_estimate'] <= ERR_R_ESTIMATE_MAX]
-    df_comps = df.copy()
-    if mp_color_only is True:
-        above_min = COLOR_BV_MIN <= df_comps['BminusV']
-        below_max = df_comps['BminusV'] <= COLOR_BV_MAX
-        color_ok = list(above_min & below_max)
-        df_comps = df_comps[color_ok]
-    return df_comps
 
 
 # def get_session_state(site_name='DSW', instrument_name='Borea'):
