@@ -1153,15 +1153,7 @@ def keep_omnipresent_comps(df_comps_mps_input, df_obs_input):
     return df_comps_mps_output, df_obs_output
 
 
-def reorder_df_columns(df, left_column_list=None, right_column_list=None):
-    left_column_list = [] if left_column_list is None else left_column_list
-    right_column_list = [] if right_column_list is None else right_column_list
-    new_column_order = left_column_list +\
-                       [col_name for col_name in df.columns
-                        if col_name not in (left_column_list + right_column_list)] +\
-                       right_column_list
-    df = df[new_column_order]
-    return df
+
 
 
 def make_packed_mp_string(mp_string):

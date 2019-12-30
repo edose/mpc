@@ -2,16 +2,16 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
 # Python core packages:
 import os
-import sys
-from io import StringIO
-from datetime import datetime
+# import sys
+# from io import StringIO
+from datetime import datetime, timezone
 from math import floor, cos, pi
 
 # External packages:
-import numpy as np
+# import numpy as np
 import pandas as pd
-import requests
-import statsmodels.api as sm
+# import requests
+# import statsmodels.api as sm
 
 # From external (EVD) package photrix:
 from photrix.image import Image, FITS
@@ -19,8 +19,8 @@ from photrix.image import Image, FITS
 
 # APASS_10_URL = 'https://www.aavso.org/cgi-bin/apass_dr10_download.pl'
 ATLAS_REFCAT2_DIRECTORY = 'J:/Astro/Catalogs/ATLAS-refcat2/mag-0-16/'
-MIN_G_MAG = 10
-MAX_G_MAG = 16
+MIN_G_MAG = 10  # intentionally wide screens (can narrow with control.txt later).
+MAX_G_MAG = 16  # "
 MAX_G_UNCERT = 20  # millimagnitudes
 MAX_R_UNCERT = 20  # "
 MAX_I_UNCERT = 20  # "
@@ -29,8 +29,9 @@ MAX_BV_COLOR = 0.95
 RP1_LIMIT = 9  # arcseconds; closeness limit for flux = 0.1 * star flux
 R1_LIMIT = 14   # arcseconds; closeness limit for flux = 1 * star flux
 R10_LIMIT = 20  # arcseconds; closeness limit for flux = 10 * star flux
-ATLAS_REFCAT2_EPOCH_UTC = datetime(2015, 1, 1) + \
-                          (datetime(2016, 1, 1) - datetime(2015, 1, 1)) / 2.0  # 2015.5
+ATLAS_REFCAT2_EPOCH_UTC = (datetime(2015, 1, 1) +
+                           (datetime(2016, 1, 1) - datetime(2015, 1, 1)) / 2.0)\
+    .replace(tzinfo=timezone.utc)  # refcat2 proper-motion epoch is 2015.5.
 
 DAYS_PER_YEAR_NOMINAL = 365.25
 DEGREES_PER_RADIAN = 180.0 / pi
@@ -54,7 +55,8 @@ MATCH_TOLERANCE_ARCSEC = 4  # to match stars across catalogs
 # APASS_10_URL_FUNCTIONS______________________________________________ = 0
 #
 #
-# def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None, mp_color_only=True, add_rmag_estimate=True):
+# def get_apass10_comps(ra, dec, radius, r_min=None, r_max=None,
+#                       mp_color_only=True, add_rmag_estimate=True):
 #     """  Renders a dataframe with all needed comp info, including estimated R mags.
 #     Tests OK ~ 20191106.
 #     :param ra: center Right Ascension for comp search, in degrees only [float].
@@ -71,7 +73,8 @@ MATCH_TOLERANCE_ARCSEC = 4  # to match stars across catalogs
 #     result = requests.post(url=APASS_10_URL,
 #                            data={'ra': ra, 'dec': dec, 'radius': radius, 'outtype': 1})
 #     df = pd.read_csv(StringIO(result.text), sep=',')
-#     df = df.rename(columns={'radeg': 'degRA', 'raerr(")': 'e_RA', 'decdeg': 'degDec', 'decerr(")': 'e_Dec',
+#     df = df.rename(columns={'radeg': 'degRA', 'raerr(")': 'e_RA',
+#                             'decdeg': 'degDec', 'decerr(")': 'e_Dec',
 #                             'Johnson_V (V)': 'Vmag', 'Verr': 'e_Vmag',
 #                             'Johnson_B (B)': 'Bmag', 'Berr': 'e_Bmag',
 #                             'Sloan_g (SG)': 'SGmag', 'SGerr': 'e_SGmag',
@@ -128,6 +131,9 @@ class Refcat2:
         :param dec_deg_range: (min Dec, max Dec) tuple [2-tuple of floats].
         :param sort_ra: True iff star data are to be sorted in RA order [boolean].
         :param directory: where ATLAS refcat2 is found [string].
+        Columns in core dataframe: RA_deg, Dec_deg, PM_ra, dPM_ra, PM_dec, dPM_dec,
+               G_gaia, dG_gaia, BP_gaia, dBP_gaia, RP_gaia, dRP_gaia,
+               T_eff, dupvar, RP1, R1, R10, g, dg, r, dr, i, di; index=unique integers.
         """
         ra_spec_first = int(floor(ra_deg_range[0])) % 360  # will always be in [0, 360).
         ra_spec_last = int(floor(ra_deg_range[1])) % 360   # "
@@ -140,7 +146,7 @@ class Refcat2:
         # print('RA: ', str(ra_spec_first), str((ra_spec_last % 360) + 1))
         # print('Dec:', str(dec_spec_first), str(dec_spec_last))
         df_list = []
-        n_degsq = (ra_spec_last + 1 - ra_spec_first) * (dec_spec_last + 1 - dec_spec_first)
+        # n_degsq = (ra_spec_last + 1 - ra_spec_first) * (dec_spec_last + 1 - dec_spec_first)
         # if n_degsq > ATLAS_REFCAT2_MAX_QUERY_DEFSQ:
         #     print(' >>>>> Too many defsq (' + str(n_degsq) +
         #           ') requested (max=' + str(ATLAS_REFCAT2_MAX_QUERY_DEFSQ) + '). Stopping.')
@@ -151,6 +157,7 @@ class Refcat2:
                 # print('From:', str(ra_spec % 360), str(dec_spec), ' -> ', str(len(df_degsq)), 'rows.')
                 df_list.append(df_degsq)
         df = pd.DataFrame(pd.concat(df_list, ignore_index=True))  # new index of unique integers
+        print('Refcat2: begin with', str(len(df)), 'stars.')
 
         # Trim dataframe based on user's actual limits on RA and Dec:
         ra_too_low = (df['RA_deg'] < ra_deg_range[0]) & (df['RA_deg'] >= ra_spec_first)
@@ -160,9 +167,11 @@ class Refcat2:
         # print(str(sum(ra_too_low)), str(sum(ra_too_high)), str(sum(dec_too_low)), str(sum(dec_too_high)))
         radec_outside_requested = ra_too_low | ra_too_high | dec_too_low | dec_too_high
         df = df[~radec_outside_requested]
+        print('Refcat2: RADec-trimmed to', str(len(df)), 'stars.')
 
-        # Add column for synthetic B-V color:
-        df.loc[:, 'BminusV'] = pd.Series([0.830 * g - 0.803 * r for (g, r) in zip(df['g'], df['r'])])
+        # Add columns for synthetic B-V color & synthetic Sloan R magnitude:
+        df.loc[:, 'BminusV'] = [0.830 * g - 0.803 * r for (g, r) in zip(df['g'], df['r'])]
+        df.loc[:, 'SloanR'] = [0.950 * r + 0.05 * i for (r, i) in zip(df['r'], df['i'])]
 
         if sort_ra is True:
             self.df_raw = df.copy().sort_values(by='RA_deg')  # in case all are needed (unlikely)
@@ -225,14 +234,24 @@ class Refcat2:
         self.df_selected = self.df_selected.loc[list(~is_overlapping), :].copy()
 
     def select_for_photometry(self):
+        lines = []
         self.select_min_g_mag(MIN_G_MAG)
+        lines.append('Refcat2: min(g) screened to ' + str(len(self.df_selected)) + ' stars.')
         self.select_max_g_mag(MAX_G_MAG)
+        lines.append('Refcat2: max(g) screened to ' + str(len(self.df_selected)) + ' stars.')
         self.select_max_g_uncert(MAX_G_UNCERT)
+        lines.append('Refcat2: max(dg) screened to ' + str(len(self.df_selected)) + ' stars.')
         self.select_max_r_uncert(MAX_R_UNCERT)
+        lines.append('Refcat2: max(dr) screened to ' + str(len(self.df_selected)) + ' stars.')
         self.select_max_i_uncert(MAX_I_UNCERT)
+        lines.append('Refcat2: max(di) screened to ' + str(len(self.df_selected)) + ' stars.')
         self.select_bv_color(MIN_BV_COLOR, MAX_BV_COLOR)
+        lines.append('Refcat2: BV color screened to ' + str(len(self.df_selected)) + ' stars.')
         self.select_dgaia()
+        lines.append('Refcat2: dgaia screened to ' + str(len(self.df_selected)) + ' stars.')
         self.remove_overlapping()
+        lines.append('Refcat2: overlaps removed to ' + str(len(self.df_selected)) + ' stars.')
+        return lines
 
     def update_epoch(self, new_datetime_utc):
         d_years = (new_datetime_utc - ATLAS_REFCAT2_EPOCH_UTC).total_seconds() /\
@@ -245,76 +264,6 @@ class Refcat2:
         df_comps_new_date.loc[:, 'RA_deg'] = ra_date
         df_comps_new_date.loc[:, 'Dec_deg'] = dec_date
         self.df_selected = df_comps_new_date
-
-
-# def get_refcat2_from_fits_file(fits_directory, fits_filename):
-#     fits_object = FITS(fits_directory, '', fits_filename)
-#     return get_refcat2_from_fits_object(fits_object)
-#
-#
-# def get_refcat2_from_fits_object(fits_object):
-#     image = Image(fits_object)
-#     deg_ra = fits_object.ra
-#     deg_dec = fits_object.dec
-#     ps = fits_object.plate_solution  # a pandas Series
-#     ra_list, dec_list = [], []
-#     for xfract in [-0.5, 0.5]:
-#         dx = xfract * image.xsize
-#         for yfract in [-0.5, 0.5]:
-#             dy = yfract * image.ysize
-#             d_ra = 1.03 * (dx * ps['CD1_1'] + dy * ps['CD1_2'])   # in degrees
-#             d_dec = 1.03 * (dx * ps['CD2_1'] + dy * ps['CD2_2'])  # "
-#             ra_list.append(deg_ra + d_ra)
-#             dec_list.append(deg_dec + d_dec)
-#     ra_deg_min = min(ra_list) % 360.0
-#     ra_deg_max = max(ra_list) % 360.0
-#     dec_deg_min = min(dec_list)
-#     dec_deg_max = max(dec_list)
-#     return get_refcat2(ATLAS_REFCAT2_DIRECTORY, ra_deg_min, ra_deg_max, dec_deg_min, dec_deg_max, True)
-#
-#
-# def get_refcat2(directory=ATLAS_REFCAT2_DIRECTORY,
-#                 ra_deg_min=None, ra_deg_max=None, dec_deg_min=None, dec_deg_max=None, sort_ra=True):
-#     """ Get all ATLAS refcat2 stars matching input parameters.
-#     :param directory: directory in which all ATLAS refcat2 files found [string].
-#     :param ra_deg_min: minimum RA to return, in degrees [float].
-#     :param ra_deg_max: maximum RA to return, in degrees [float].
-#     :param dec_deg_min: minimum Declination to return, in degrees [float].
-#     :param dec_deg_max: maximum Declination to return, in degrees [float].
-#     :param sort_ra: True iff user wants returned dataframe to be sorted by increasing RA [boolean].
-#     :return: dataframe, one row per star [pandas DataFrame].
-#     """
-#     ra_spec_first = int(floor(ra_deg_min)) % 360  # will always be in [0, 360).
-#     ra_spec_last = int(floor(ra_deg_max)) % 360   # "
-#     if ra_spec_last < ra_spec_first:
-#         ra_spec_last += 360
-#     dec_spec_first = int(floor(dec_deg_min))
-#     dec_spec_first = max(dec_spec_first, -90)
-#     dec_spec_last = int(floor(dec_deg_max))
-#     dec_spec_last = min(dec_spec_last, 89)
-#     df_list = []
-#     # n_degsq = (ra_spec_last + 1 - ra_spec_first) * (dec_spec_last + 1 - dec_spec_first)
-#     # if n_degsq > ATLAS_REFCAT2_MAX_QUERY_DEFSQ:
-#     #     print(' >>>>> Too many defsq (' + str(n_degsq) +
-#     #           ') requested (max=' + str(ATLAS_REFCAT2_MAX_QUERY_DEFSQ) + '). Stopping.')
-#     #     return None
-#     for ra_spec in range(ra_spec_first, ra_spec_last + 1):
-#         for dec_spec in range(dec_spec_first, dec_spec_last + 1):
-#             df_degsq = read_one_refcat2_sqdeg(directory, ra_spec % 360, dec_spec)
-#             # print('From:', str(ra_spec % 360), str(dec_spec), ' -> ', str(len(df_degsq)), 'rows.')
-#             df_list.append(df_degsq)
-#     df = pd.DataFrame(pd.concat(df_list, ignore_index=True))  # new index of unique integers
-#
-#     # Trim dataframe based on user's actual limits on RA and Dec:
-#     ra_too_low = (df['RA_deg'] < ra_deg_min) & (df['RA_deg'] >= ra_spec_first)
-#     ra_too_high = (df['RA_deg'] > ra_deg_max) & (df['RA_deg'] <= (ra_spec_last % 360) + 1)
-#     dec_too_low = df['Dec_deg'] < dec_deg_min
-#     dec_too_high = df['Dec_deg'] > dec_deg_max
-#     radec_outside_requested = ra_too_low | ra_too_high | dec_too_low | dec_too_high
-#     df = df[~radec_outside_requested]
-#     if sort_ra is True:
-#         df = df.copy().sort_values(by='RA_deg')
-#     return df
 
 
 def read_one_refcat2_sqdeg(directory=ATLAS_REFCAT2_DIRECTORY, ra_deg_min=None, dec_deg_min=None):
@@ -347,32 +296,8 @@ def read_one_refcat2_sqdeg(directory=ATLAS_REFCAT2_DIRECTORY, ra_deg_min=None, d
     df['g'] *= 0.001  # in magnitudes; dg remains in millimagnitudes
     df['r'] *= 0.001  # in magnitudes; dr remains in millimagnitudes
     df['i'] *= 0.001  # in magnitudes; di remains in millimagnitudes
+    print('refcat2 sqdeg [' + str(ra_deg_int) + ', ' + str(dec_deg_int) + ']: ' + str(len(df)) + 'stars.')
     return df
-
-
-# def remove_overlapping_comps(df_comps_atlas):
-#     rp1_too_close = pd.Series([False if pd.isnull(rp1) else (rp1 < RP1_LIMIT)
-#                                for rp1 in df_comps_atlas['RP1']])
-#     r1_too_close = pd.Series([False if pd.isnull(r1) else (r1 < R1_LIMIT)
-#                               for r1 in df_comps_atlas['R1']])
-#     r10_too_close = pd.Series([False if pd.isnull(r10) else (r10 < R10_LIMIT)
-#                                for r10 in df_comps_atlas['R10']])
-#     is_overlapping = rp1_too_close | r1_too_close | r10_too_close
-#     return df_comps_atlas.loc[list(~is_overlapping)]
-
-
-# def update_radec_to_date(df_comps_atlas, date_utc):
-#     d_years = (date_utc - ATLAS_REFCAT2_EPOCH_UTC).total_seconds() / (DAYS_PER_YEAR_NOMINAL * 24 * 3600)
-#     ra_date = [ra_epoch + d_years * pm_ra / 3600.0
-#                for (ra_epoch, pm_ra) in zip(df_comps_atlas['RA_deg'], df_comps_atlas['PM_ra'])]
-#     dec_date = [dec_epoch + d_years * pm_dec / 3600.0
-#                 for (dec_epoch, pm_dec) in zip(df_comps_atlas['Dec_deg'], df_comps_atlas['PM_dec'])]
-#     df_comps_date = df_comps_atlas.copy()
-#     df_comps_date.loc[:, 'RA_deg'] = ra_date
-#     df_comps_date.loc[:, 'Dec_deg'] = dec_date
-#     columns_to_drop = ['PM_ra', 'dPM_ra', 'PM_dec', 'dPM_dec']  # best to remove, as they no longer be used.
-#     df_comps_date.drop(columns_to_drop, inplace=True, axis=1)
-#     return df_comps_date
 
 
 def find_matching_comp(df_comps, ra_deg, dec_deg):
@@ -407,24 +332,22 @@ def find_matching_comp(df_comps, ra_deg, dec_deg):
 
 def get_bounding_ra_dec(fits_object):
     image = Image(fits_object)
-    deg_ra = fits_object.ra
-    deg_dec = fits_object.dec
     ps = fits_object.plate_solution  # a pandas Series
     ra_list, dec_list = [], []
     for xfract in [-0.5, 0.5]:
         dx = xfract * image.xsize
         for yfract in [-0.5, 0.5]:
             dy = yfract * image.ysize
-            d_ra = 1.03 * (dx * ps['CD1_1'] + dy * ps['CD1_2'])  # in degrees
-            d_dec = 1.03 * (dx * ps['CD2_1'] + dy * ps['CD2_2'])  # "
-            ra_list.append(deg_ra + d_ra)
-            dec_list.append(deg_dec + d_dec)
+            d_east_west = 1.03 * (dx * ps['CD1_1'] + dy * ps['CD1_2'])  # in degrees
+            d_ra = d_east_west / cos(ps['CRVAL2'] / DEGREES_PER_RADIAN)      # "
+            d_dec = 1.03 * (dx * ps['CD2_1'] + dy * ps['CD2_2'])        # "
+            ra_list.append(ps['CRVAL1'] + d_ra)
+            dec_list.append(ps['CRVAL2'] + d_dec)
     ra_deg_min = min(ra_list) % 360.0
     ra_deg_max = max(ra_list) % 360.0
     dec_deg_min = min(dec_list)
     dec_deg_max = max(dec_list)
     return ra_deg_min, ra_deg_max, dec_deg_min, dec_deg_max
-
 
 
 # FOV_and_LANDOLT_FUNCTIONS________________________________________ = 0
@@ -441,82 +364,80 @@ def get_bounding_ra_dec(fits_object):
 #             if fov_object.is_valid:
 #                 fov_list.append(fov_object)
 #     return fov_list
-
-
-CATALOG_COMPARISON_TESTS________________________________________ = 0
-
-
-def regress_apass10_on_refcat2(ra_deg, dec_deg, radius_deg, apass_band, refcat2_bands, intercept=False):
-    """ Run linear regressions on APASS 10 band vs ATLAS refcat2 bands (esp. Pan-Starrs griz).
-    :param ra_deg:
-    :param dec_deg:
-    :param radius_deg:
-    :param apass_band: band from APASS 10 to use as dependent variable [string].
-    :param refcat2_bands: band or list of bands from refcat2 to use as indep vars [str or list of strs].
-    :return: results [regression object from statsmodels package].
-    """
-    if not isinstance(refcat2_bands, list):
-        refcat2_bands = [str(refcat2_bands)]
-
-    # Get ATLAS refcat2 stars (independent variables):
-    cos_dec = cos(dec_deg / DEGREES_PER_RADIAN)
-    ra_deg_min = (ra_deg - radius_deg / cos_dec) % 360
-    ra_deg_max = (ra_deg + radius_deg / cos_dec) % 360
-    dec_deg_min = (dec_deg - radius_deg)
-    dec_deg_max = (dec_deg + radius_deg)
-    df_refcat2 = get_refcat2(ra_deg_min=ra_deg_min, ra_deg_max=ra_deg_max,
-                             dec_deg_min=dec_deg_min, dec_deg_max=dec_deg_max)
-    df_refcat2 = remove_overlapping_comps(df_refcat2)
-    r_mag_ok = pd.Series([(r >= 10.0) and (r <= 16.0) for r in df_refcat2.loc[:, 'r']])
-    b_v_estimate = pd.Series([0.830 * g - 0.803 * r
-                              for (g, r) in zip(df_refcat2.loc[:, 'g'], df_refcat2.loc[:, 'r'])])
-    b_v_ok = pd.Series([(bv >= 0.5) and (bv <= 0.95) for bv in b_v_estimate])
-    dupvar_ok = pd.Series([(d == 0 or d == 2) for d in df_refcat2['dupvar']])
-    dgaia_ok = pd.Series([d > 0 for d in df_refcat2['dG_gaia']])
-    dg_ok = pd.Series([dg <= 20 for dg in df_refcat2['dg']])
-    dr_ok = pd.Series([dr <= 20 for dr in df_refcat2['dr']])
-    di_ok = pd.Series([dg <= 20 for dg in df_refcat2['di']])
-    rp1_ok = pd.Series([True if pd.isnull(rp1) else (rp1 >= 9) for rp1 in df_refcat2['RP1']])
-    r1_ok = pd.Series([True if pd.isnull(r1) else (r1 >= 13) for r1 in df_refcat2['R1']])
-    keep_rows = r_mag_ok & b_v_ok & dgaia_ok & dg_ok & dr_ok & di_ok & rp1_ok & r1_ok
-    df_refcat2 = df_refcat2[list(keep_rows)]
-
-    # Get APASS 10 stars (dependent variable):
-    df_apass = get_apass10_comps(ra_deg, dec_deg, radius_deg, mp_color_only=False)
-    mag_ok = pd.Series([mag is not None for mag in df_apass.loc[:, apass_band]])
-    e_sr_ok = pd.Series([(e <= 0.15) for e in df_apass.loc[:, 'e_SRmag']])
-    e_si_ok = pd.Series([(e <= 0.25) for e in df_apass.loc[:, 'e_SImag']])
-    keep_rows = mag_ok & e_sr_ok & e_si_ok
-    df_apass = df_apass[list(keep_rows)]
-
-    # For each APASS 10 star, match a refcat2 star if possible:
-    mag_dict_list = []
-    for i_apass in df_apass.index:
-        mag_dict = dict()
-        i_refcat2 = find_matching_comp(df_refcat2, df_apass.loc[i_apass, 'degRA'],
-                                       df_apass.loc[i_apass, 'degDec'])
-        if i_refcat2 is not None:
-            mag_dict['index'] = 'apass_' + str(i_apass)
-            mag_dict['y_' + apass_band] = df_apass.loc[i_apass, apass_band]
-            # mag_dict['y_BminusV'] = df_apass.loc[i_apass, 'Bmag'] - df_apass.loc[i_apass, 'Vmag']
-            for band in refcat2_bands:
-                mag_dict[band] = df_refcat2.loc[i_refcat2, band]
-            if all([val is not None for val in mag_dict.values()]):
-                mag_dict_list.append(mag_dict)
-    this_index = [mag_dict['index'] for mag_dict in mag_dict_list]
-    df_mags = pd.DataFrame(data=mag_dict_list, index=this_index)
-
-    # Perform regression; APASS band is indep var, refcat2 bands are dep vars:
-    df_y = df_mags.loc[:, 'y_' + apass_band]
-    # df_y = df_mags.loc[:, 'y_BminusV']
-    df_x = df_mags.loc[:, refcat2_bands]
-    if intercept is True:
-        df_x.loc[:, 'intercept'] = 1.0
-    weights = len(df_mags) * [1.0]
-    result = sm.WLS(df_y, df_x, weights).fit()  # see bulletin2.util
-    print(result.summary())
-    print('mse_resid =', '{0:.4f}'.format(result.mse_resid), ' mag.')
-    return result
+#
+# CATALOG_COMPARISON_TESTS________________________________________ = 0
+#
+# def regress_apass10_on_refcat2(ra_deg, dec_deg, radius_deg, apass_band, refcat2_bands, intercept=False):
+#     """ Run linear regressions on APASS 10 band vs ATLAS refcat2 bands (esp. Pan-Starrs griz).
+#     :param ra_deg:
+#     :param dec_deg:
+#     :param radius_deg:
+#     :param apass_band: band from APASS 10 to use as dependent variable [string].
+#     :param refcat2_bands: band or list of bands from refcat2 to use as indep vars [str or list of strs].
+#     :return: results [regression object from statsmodels package].
+#     """
+#     if not isinstance(refcat2_bands, list):
+#         refcat2_bands = [str(refcat2_bands)]
+#
+#     # Get ATLAS refcat2 stars (independent variables):
+#     cos_dec = cos(dec_deg / DEGREES_PER_RADIAN)
+#     ra_deg_min = (ra_deg - radius_deg / cos_dec) % 360
+#     ra_deg_max = (ra_deg + radius_deg / cos_dec) % 360
+#     dec_deg_min = (dec_deg - radius_deg)
+#     dec_deg_max = (dec_deg + radius_deg)
+#     df_refcat2 = get_refcat2(ra_deg_min=ra_deg_min, ra_deg_max=ra_deg_max,
+#                              dec_deg_min=dec_deg_min, dec_deg_max=dec_deg_max)
+#     df_refcat2 = remove_overlapping_comps(df_refcat2)
+#     r_mag_ok = pd.Series([(r >= 10.0) and (r <= 16.0) for r in df_refcat2.loc[:, 'r']])
+#     b_v_estimate = pd.Series([0.830 * g - 0.803 * r
+#                               for (g, r) in zip(df_refcat2.loc[:, 'g'], df_refcat2.loc[:, 'r'])])
+#     b_v_ok = pd.Series([(bv >= 0.5) and (bv <= 0.95) for bv in b_v_estimate])
+#     dupvar_ok = pd.Series([(d == 0 or d == 2) for d in df_refcat2['dupvar']])
+#     dgaia_ok = pd.Series([d > 0 for d in df_refcat2['dG_gaia']])
+#     dg_ok = pd.Series([dg <= 20 for dg in df_refcat2['dg']])
+#     dr_ok = pd.Series([dr <= 20 for dr in df_refcat2['dr']])
+#     di_ok = pd.Series([dg <= 20 for dg in df_refcat2['di']])
+#     rp1_ok = pd.Series([True if pd.isnull(rp1) else (rp1 >= 9) for rp1 in df_refcat2['RP1']])
+#     r1_ok = pd.Series([True if pd.isnull(r1) else (r1 >= 13) for r1 in df_refcat2['R1']])
+#     keep_rows = r_mag_ok & b_v_ok & dgaia_ok & dg_ok & dr_ok & di_ok & rp1_ok & r1_ok
+#     df_refcat2 = df_refcat2[list(keep_rows)]
+#
+#     # Get APASS 10 stars (dependent variable):
+#     df_apass = get_apass10_comps(ra_deg, dec_deg, radius_deg, mp_color_only=False)
+#     mag_ok = pd.Series([mag is not None for mag in df_apass.loc[:, apass_band]])
+#     e_sr_ok = pd.Series([(e <= 0.15) for e in df_apass.loc[:, 'e_SRmag']])
+#     e_si_ok = pd.Series([(e <= 0.25) for e in df_apass.loc[:, 'e_SImag']])
+#     keep_rows = mag_ok & e_sr_ok & e_si_ok
+#     df_apass = df_apass[list(keep_rows)]
+#
+#     # For each APASS 10 star, match a refcat2 star if possible:
+#     mag_dict_list = []
+#     for i_apass in df_apass.index:
+#         mag_dict = dict()
+#         i_refcat2 = find_matching_comp(df_refcat2, df_apass.loc[i_apass, 'degRA'],
+#                                        df_apass.loc[i_apass, 'degDec'])
+#         if i_refcat2 is not None:
+#             mag_dict['index'] = 'apass_' + str(i_apass)
+#             mag_dict['y_' + apass_band] = df_apass.loc[i_apass, apass_band]
+#             # mag_dict['y_BminusV'] = df_apass.loc[i_apass, 'Bmag'] - df_apass.loc[i_apass, 'Vmag']
+#             for band in refcat2_bands:
+#                 mag_dict[band] = df_refcat2.loc[i_refcat2, band]
+#             if all([val is not None for val in mag_dict.values()]):
+#                 mag_dict_list.append(mag_dict)
+#     this_index = [mag_dict['index'] for mag_dict in mag_dict_list]
+#     df_mags = pd.DataFrame(data=mag_dict_list, index=this_index)
+#
+#     # Perform regression; APASS band is indep var, refcat2 bands are dep vars:
+#     df_y = df_mags.loc[:, 'y_' + apass_band]
+#     # df_y = df_mags.loc[:, 'y_BminusV']
+#     df_x = df_mags.loc[:, refcat2_bands]
+#     if intercept is True:
+#         df_x.loc[:, 'intercept'] = 1.0
+#     weights = len(df_mags) * [1.0]
+#     result = sm.WLS(df_y, df_x, weights).fit()  # see bulletin2.util
+#     print(result.summary())
+#     print('mse_resid =', '{0:.4f}'.format(result.mse_resid), ' mag.')
+#     return result
 
 
 # def regress_landolt_r_mags():
