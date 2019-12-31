@@ -157,7 +157,7 @@ class Refcat2:
                 # print('From:', str(ra_spec % 360), str(dec_spec), ' -> ', str(len(df_degsq)), 'rows.')
                 df_list.append(df_degsq)
         df = pd.DataFrame(pd.concat(df_list, ignore_index=True))  # new index of unique integers
-        print('Refcat2: begin with', str(len(df)), 'stars.')
+        print('\nRefcat2: begin with', str(len(df)), 'stars.')
 
         # Trim dataframe based on user's actual limits on RA and Dec:
         ra_too_low = (df['RA_deg'] < ra_deg_range[0]) & (df['RA_deg'] >= ra_spec_first)
@@ -296,7 +296,7 @@ def read_one_refcat2_sqdeg(directory=ATLAS_REFCAT2_DIRECTORY, ra_deg_min=None, d
     df['g'] *= 0.001  # in magnitudes; dg remains in millimagnitudes
     df['r'] *= 0.001  # in magnitudes; dr remains in millimagnitudes
     df['i'] *= 0.001  # in magnitudes; di remains in millimagnitudes
-    print('refcat2 sqdeg [' + str(ra_deg_int) + ', ' + str(dec_deg_int) + ']: ' + str(len(df)) + 'stars.')
+    print('Refcat2 sqdeg [' + str(ra_deg_int) + ', ' + str(dec_deg_int) + ']: ' + str(len(df)) + ' stars.')
     return df
 
 

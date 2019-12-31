@@ -19,7 +19,7 @@ from mpc.catalogs import Refcat2, get_bounding_ra_dec
 
 # From external (EVD) package photrix:
 from photrix.image import Image, FITS, Aperture
-from photrix.util import RaDec, jd_from_datetime_utc, degrees_as_hex, ra_as_hours
+from photrix.util import RaDec, jd_from_datetime_utc, degrees_as_hex, ra_as_hours, MixedModelFit
 
 __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
@@ -46,8 +46,8 @@ LOG_FILENAME = 'mp_photometry.log'
 CONTROL_FILENAME = 'control.txt'
 DF_OBS_FILENAME = 'df_obs.csv'
 DF_COMPS_FILENAME = 'df_comps.csv'
-# DF_QUALIFIED_OBS_FILENAME = 'df_qual_obs.csv'
-# DF_QUALIFIED_COMPS_AND_MPS_FILENAME = 'df_qual_comps_and_mps.csv'
+TRANSFORM_CLEAR_SR_R_I = 0.0  # TODO: this must be measured and entered before production use.
+DEFAULT_MP_COLOR_R_I = 0.2  # We should measure this when possible, maybe casting it in SloanR.
 
 # For package photrix:
 PHOTRIX_TOP_DIRECTORIES = ['C:/Astro/Borea Photrix/', 'J:/Astro/Images/Borea Photrix Archives/']
@@ -125,9 +125,9 @@ def resume(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     # Verify that proper log file already exists in the working directory:
     log_this_directory, log_mp_string, log_an_string, _ = get_context()
     if log_mp_string.lower() == mp_string.lower() and log_an_string.lower() == an_string.lower():
-        print('Ready to go in', this_directory)
+        print('READY TO GO in', this_directory)
     else:
-        print(' >>>>> Problems resuming in', this_directory)
+        print(' >>>>> Can\'t resume in', this_directory)
 
 
 def assess():
@@ -148,6 +148,7 @@ def assess():
     log_file.write(str(len(fits_filenames)) + ' FITS files found:' + '\n')
 
     # Ensure that relevant uncalibrated (Ur) files and cross-reference to them all accessible:
+    print(' >>>>>', os.path.join(photrix_directory, 'Photometry', FILE_RENAMING_FILENAME))
     df_ur = pd.read_csv(os.path.join(photrix_directory, 'Photometry', FILE_RENAMING_FILENAME),
                         sep=';', index_col='PhotrixName')
     print('   Verifying presence of', len(fits_filenames), 'Ur (uncalibrated) FITS files...')
@@ -312,7 +313,8 @@ def assess():
 
 
 def get_obs():
-    """ For one MP on one night: gather images and ATLAS refcat2 catalog data, make df_comps and df_obs."""
+    """ For one MP on one night: gather images and ATLAS refcat2 catalog data, make df_comps and df_obs.
+    :return: [None]"""
     this_directory, mp_string, an_string, photrix_directory = get_context()
     log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
     mp_int = int(mp_string)  # put this in try/catch block.
@@ -459,8 +461,6 @@ def get_obs():
                                        (df_apertures['net_flux_sigma'] /
                                         df_apertures['net_flux'])
         snr_ok = [sig < MAX_MAG_UNCERT for sig in df_apertures['InstMagSigma']]
-        print(image.fits.filename + ': of', str(len(df_apertures)), 'apertures,',
-              sum(snr_ok), 'kept for high SNR.')
         df_apertures = df_apertures.loc[snr_ok, :]
         df_apertures.drop(['n_disc_pixels', 'n_annulus_pixels', 'max_adu',
                            'net_flux', 'net_flux_sigma'],
@@ -477,8 +477,6 @@ def get_obs():
             max_adu_list.append(ap.max_adu)
         df_apertures['MaxADU_Ur'] = max_adu_list
         not_saturated = [(max_adu > 0.0) for max_adu in max_adu_list]  # screen for saturation right here.
-        print(image.fits.filename + ': of', str(len(df_apertures)), 'apertures,',
-              sum(not_saturated), 'kept for lack of Ur-saturation.')
         df_image_obs = df_apertures[not_saturated].copy()
 
         # Add FITS-specific columns:
@@ -503,10 +501,16 @@ def get_obs():
                                          'Filter', 'Exposure', 'InstMag', 'InstMagSigma'])
     jd_floor = floor(df_obs['JD_mid'].min())  # requires that all JD_mid values be known.
     df_obs['JD_fract'] = df_obs['JD_mid'] - jd_floor
+    print('   ' + str(len(df_obs)) + ' obs retained.')
 
     # Make df_comps:
     df_comps = refcat2.selected_columns(['RA_deg', 'Dec_deg', 'RP1', 'R1', 'R10',
                                          'g', 'dg', 'r', 'dr', 'i', 'di', 'BminusV', 'SloanR', 'T_eff'])
+    comp_ids = [str(i) for i in df_comps.index]
+    df_comps.index = comp_ids
+    df_comps.insert(0, 'CompID', comp_ids)
+
+    print('   ' + str(len(df_comps)) + ' comps retained.')
 
     # Write df_obs to CSV file (rather than returning the df):
     fullpath_df_obs = os.path.join(this_directory, DF_OBS_FILENAME)
@@ -516,16 +520,14 @@ def get_obs():
     n_mp_obs = sum([t.lower() == 'mp' for t in df_obs['Type']])
     log_file.write(DF_OBS_FILENAME + ' written: ' + str(n_comp_obs) + ' comp obs & ' +
                    str(n_mp_obs) + ' MP obs.\n')
-    print('df_mp_master written to', fullpath_df_obs)
+    print('df_obs written to', fullpath_df_obs)
 
     # Write df_comps to CSV file (rather than returning the df):
     fullpath_df_comps = os.path.join(this_directory, DF_COMPS_FILENAME)
     df_comps.to_csv(fullpath_df_comps, sep=';', quotechar='"',
                     quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
-    n_comps = sum([t.lower() == 'comp' for t in df_comps['Type']])
-    print('df_comps_and_mp written to', fullpath_df_comps)
-    log_file.write(DF_COMPS_FILENAME + ' written: ' + str(n_comps) + ' comps.\n')
-
+    print('df_comps written to', fullpath_df_comps)
+    log_file.write(DF_COMPS_FILENAME + ' written: ' + str(len(df_comps)) + ' comps.\n')
     log_file.close()
 
 
@@ -545,19 +547,20 @@ def do_phot():
     df_obs = apply_user_selections(df_obs)  # remove comps, obs, images, as directed in control.txt file.
 
     # Keep obs only for comps present in every Clear image (df_obs):
-    n_fitsfiles = len(df_obs['Filename'].drop_duplicates())
-    comp_id_list = df_obs['CompID'].copy().drop_duplicates()
-    obs_counts = [sum(df_obs['CompID'] == id) for id in comp_id_list]
+    n_fitsfiles = len(df_obs['FITSfile'].drop_duplicates())
+    comp_id_list = df_obs['SourceID'].copy().drop_duplicates()
+    obs_counts = [sum(df_obs['SourceID'] == id) for id in comp_id_list]
     comp_ids_to_remove = [id for (id, n) in zip(comp_id_list, obs_counts) if n != n_fitsfiles]
-    rows_to_remove = df_obs['CompID'].isin(comp_ids_to_remove)
+    rows_to_remove = df_obs['SourceID'].isin(comp_ids_to_remove)
     df_obs = df_obs.loc[~rows_to_remove, :]
 
     # Keep only comps (in df_comps) still in df_obs:
-    comp_id_list = df_obs['CompID'].copy().drop_duplicates()  # refresh list.
+    comp_id_list = df_obs['SourceID'].copy().drop_duplicates()  # refresh list.
     rows_to_keep = df_comps['CompID'].isin(comp_id_list)
     df_comps = df_comps.loc[rows_to_keep, :]
 
-    # Perform photometry and add results to df_comps:
+    # Make photometric model via mixed-model regression:
+    model = SessionModel(df_obs, df_comps)
 
 
 
@@ -568,6 +571,128 @@ def do_phot():
     # Write log file lines:
 
 
+
+class SessionModel:
+    def __init__(self, df_obs, df_comps, state,
+                 fit_transform=False, fit_extinction=False, fit_vignette=True, fit_xy=False, fit_jd=False,
+                 do_plots=True):
+        """  Makes and holds photometric model via mixed-model regression. Affords prediction for MP mags.
+        :param df_obs:
+        :param df_comps:
+        :param state:
+        :param fit_transform: True iff transform is to be fit; never True in actual photometry model,
+                   True set only rarely, to extract transform from images of one field of view. [boolean]
+        :param fit_extinction: True iff extinction is to be fit (uncommon; usually get known value from
+                   Site object). [boolean]
+        :param fit_vignette: True iff centered, parabolic term to be included in model. [boolean]
+        :param fit_xy: True iff linear x and y terms to be included in model. [boolean]
+        :param fit_jd: True iff linear time term (zero-point creep in time seen in plot of "cirrus"
+                   random-effect term). [boolean]
+        :param do_plots: True iff plots desired; always true for actual photometry model. [boolean]
+        """
+        self.df_obs = df_obs.copy()
+        self.df_comps = df_comps.copy()
+        self.state = state
+        self.fit_transform = fit_transform
+        self.fit_extinction = fit_extinction
+        self.fit_vignette = fit_vignette
+        self.fit_xy = fit_xy
+        self.fit_jd = fit_jd
+        self.do_plots = do_plots
+
+        self.dep_var_name = 'InstMag_with_offsets'
+        self.mm_fit = None      # placeholder for the statsmodel MixedModelFit object
+        self.transform = None   # placeholder for fit parameter result [scalar]
+        self.transform_fixed = None  # "
+        self.extinction = None  # "
+        self.vignette = None    # "
+        self.x = None           # "
+        self.y = None           # "
+        self.jd1 = None         # "
+
+        self._prep_and_do_regression()
+        self._build_output()
+        if do_plots:
+            self.make_plots()
+
+    def _prep_and_do_regression(self):
+        """ Using photrix.util.MixedModelFit class (which wraps statsmodels.MixedLM.from_formula() etc).
+            Use ONLY comp data in the model. Later use model's .predict() to calculate best MP mags.
+            This is adapted from photrix package SkyModel.
+        :return: [None]
+        """
+        # First, extend comp-only obs data with appropriate data from df_comps:
+        df_comp_obs_subset = self.df_obs.loc[(self.df_obs['Type'] == 'Comp'),
+                                             ['Serial', 'FITSfile', 'SourceID', 'Type', 'InstMag',
+                                              'Airmass', 'JD_fract', 'Vignette', 'X1024', 'Y1024']].copy()
+        df_model = pd.merge(left=df_comp_obs_subset, right=self.df_comps,
+                            how='left', left_on='SourceID', right_on='CompID', sort=False)
+        df_model['CI'] = df_model['r'] - df_model['i']
+
+        # Initiate dependent-variable offset, which will aggregate all such offset terms:
+        dep_var_offset = df_model['SloanR'].copy()  # *copy* CatMag, or it will be damaged
+
+        # Build fixed-effect (x) variable list and construct dep-var offset:
+        fixed_effect_var_list = []
+        if self.fit_transform:
+            fixed_effect_var_list.append('CI')
+        else:
+            self.transform_fixed = TRANSFORM_CLEAR_SR_R_I  # TODO: measure this, then get from self.state.
+            print(' >>>>> Transform (Color Index) not fit: value fixed at',
+                  '{0:.3f}'.format(self.transform_fixed))
+        if self.fit_extinction:
+            fixed_effect_var_list.append('Airmass')
+        else:
+            extinction = self.state['extinction']['Clear']
+            dep_var_offset += extinction * df_model['Airmass']
+            print(' >>>>> Extinction (Airmass) not fit: value fixed at',
+                  '{0:.3f}'.format(extinction))
+        if self.fit_vignette:
+            fixed_effect_var_list.append('Vignette')
+        if self.fit_xy:
+            fixed_effect_var_list.extend(['X1024', 'Y1024'])
+        if self.fit_jd:
+            fixed_effect_var_list.append('JD_fract')
+
+        # Build 'random-effect' variable:
+        random_effect_var_name = 'FITSfile'  # cirrus effect is per-image
+
+        # Build dependent (y) variable:
+        df_model[self.dep_var_name] = df_model['InstMag'] - dep_var_offset
+
+        # Execute regression:
+        self.mm_fit = MixedModelFit(data=df_model, dep_var=self.dep_var_name,
+                                    fixed_vars=fixed_effect_var_list,
+                                    group_var=random_effect_var_name)
+        if self.mm_fit.statsmodels_object.scale != 0.0 and \
+                self.mm_fit.statsmodels_object.nobs == len(df_model):
+            print(self.mm_fit.statsmodels_object.summary())
+
+    def _calc_mp_mags(self):
+        df_mp_obs = self.df_obs.loc[(self.df_obs['Type'] == 'MP'),
+                                    ['Serial', 'FITSfile', 'SourceID', 'Type', 'InstMag',
+                                     'Airmass', 'JD_fract', 'Vignette', 'X1024', 'Y1024']].copy()
+        bogus_cat_mag = 0.0  # we'll need this later, to correct raw predictions.
+        df_mp_obs['CatMag'] = bogus_cat_mag  # totally bogus local value, corrected for later.
+        df_mp_obs['CI'] = DEFAULT_MP_COLOR_R_I  # best we can do without directly measuring it.
+        raw_predictions = self.mm_fit.predict(df_mp_obs, include_random_effect=False)
+
+        # Compute dependent-variable offsets for MP:
+        dep_var_offsets = pd.Series(len(df_mp_obs) * [0.0], index=raw_predictions.index)
+        if self.fit_transform is False:
+            dep_var_offsets += self.transform_fixed * df_mp_obs['CI']
+        if self.fit_extinction is False:
+            dep_var_offsets += self.state['extinction']['Clear'] * df_mp_obs['Airmass']
+
+        # Extract best MP mag (in synthetic Sloan r):
+        best_mp_mags = df_mp_obs['InstMag'] - dep_var_offsets - raw_predictions + bogus_cat_mag
+        return best_mp_mags
+
+    def _build_output(self):
+        pass
+
+    def make_plots(self):
+        pass
 
 
 
@@ -595,7 +720,7 @@ def get_context():
         return None
     mp_string = lines[1][3:].strip().upper()
     an_string = lines[2][3:].strip()
-    photrix_directory = lines[3][8:].strip()
+    photrix_directory = lines[3][len('Photrix found:'):].strip()
     return this_directory, mp_string, an_string, photrix_directory
 
 
@@ -644,8 +769,8 @@ def get_df_obs():
     """
     this_directory, _, _, _ = get_context()
     fullpath = os.path.join(this_directory, DF_OBS_FILENAME)
-    df_mp_master = pd.read_csv(fullpath, sep=';', index_col=0)
-    return df_mp_master
+    df_obs = pd.read_csv(fullpath, sep=';', index_col=0)
+    return df_obs
 
 
 def get_df_comps():
@@ -655,6 +780,9 @@ def get_df_comps():
     this_directory, _, _, _ = get_context()
     fullpath = os.path.join(this_directory, DF_COMPS_FILENAME)
     df_comps = pd.read_csv(fullpath, sep=';', index_col=0)
+    comp_ids = [str(id) for id in df_comps['CompID']]
+    df_comps.loc[:, 'CompID'] = comp_ids
+    df_comps.index = comp_ids
     return df_comps
 
 
@@ -685,17 +813,64 @@ def apply_user_selections(df_obs):
 
     # Apply directives:
     remove_for_serials = df_obs['Serial'].isin(serial_list)
-    remove_for_comps = df_obs['CompID'].isin(comp_list)
-    remove_for_image = df_obs['FITSfilename'].isin(image_list)
+    remove_for_comps = df_obs['SourceID'].isin(comp_list)
+    remove_for_image = df_obs['FITSfile'].isin(image_list)
     to_remove = remove_for_serials | remove_for_comps | remove_for_image
-    df_obs = df_obs.loc[to_remove, :].copy()
+    df_obs = df_obs.loc[~to_remove, :].copy()
     return df_obs
 
 
 
+_____CODE_TESTS________________________________________________ = 0
 
 
-# PRELIMINARY_TESTS________________________________________________ = 0
+# ----- Ultimately, the code modeled in ml_2_groups won't do.
+# Statsmodels "variance components" are just variance pools,
+#    and effects per group (per-image, or per-comp) CANNOT be extracted, just don't exist.
+# Choices, then are: (1) settle for one random effect (prob. image), or
+#    (2) use R+lmer via rpy2 or maybe pymer4 package. Groan.
+# def ml_2_groups():
+#     # This converges to right values, but fails to yield random-effect values. Sigh.
+#     from random import seed, randint, random, shuffle
+#     import statsmodels.api as sm
+#     # Make data:
+#     n = 100
+#     n1 = int(n/2)
+#     n2 = int(n) - n1
+#     # seed(2465)
+#     a = pd.Series([i + 0.1 * random() for i in range(n)])      # indep fixed var
+#     b = pd.Series([0.5 * random() for i in range(n)])   # "
+#     gp1 = n1 * ['gp1_a'] + n2 * ['gp1_b']
+#     gp2 = n1 * ['gp2_a'] + n2 * ['gp2_b']
+#     shuffle(gp1)  # works in place
+#     shuffle(gp2)  # "
+#     val_gp1 = pd.Series([-2 if g.endswith('a') else 2 for g in gp1])
+#     val_gp2 = pd.Series([-0.5 if g.endswith('a') else 0.5 for g in gp2])
+#     y_random_error = pd.Series([0.1 * random() for i in range(n)])
+#     intercept = pd.Series(n * [123.000])
+#     y = intercept + a + b + val_gp1 + val_gp2 + y_random_error
+#     df_x = pd.DataFrame({'Y': y, 'A': a, 'B': b, 'GP1': gp1, 'GP2': gp2})
+#     # df_x['Intercept'] = 1
+#     df_x['group'] = 'No group'  # because statsmodels cannot handle >1 group, but uses variance components.
+#
+#     # Make model with 2 crossed random variables:
+#     model_formula = 'Y ~ A + B'
+#     # variance_component_formula = {'Group1': '0 + C(GP1)',
+#     #                               'Group2': '0 + C(GP2)'}
+#     variance_component_formula = {'Group1': '0 + GP1',
+#                                   'Group2': '0 + GP2'}
+#     random_effect_formula = '0'
+#     model = sm.MixedLM.from_formula(model_formula,
+#                                     data=df_x,
+#                                     groups='group',
+#                                     vc_formula=variance_component_formula,
+#                                     re_formula=random_effect_formula)
+#     result = model.fit()
+#     print(result.summary())
+#     return result
+
+
+# CATALOG_TESTS________________________________________________ = 0
 
 # def get_transforms_landolt_r_mags(fits_directory):
 # # This as comparison catalog (to check ATLAS refcat2) gives unreasonably high errors,
