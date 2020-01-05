@@ -819,9 +819,8 @@ def plot_comps():
 
 
     # Write diagnostics to console:
-    # (these data may better go into a file, later)
+    # (or, these data may better go into the log file)
 
-    # Write select_comps.txt stub to mp_directory (using statistics--e.g. from above plots?):
 
 
 def finish():

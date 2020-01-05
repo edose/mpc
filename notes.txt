@@ -1,0 +1,17 @@
+NOTES.txt for mpc project, E. Dose, New Mexico Mira Project, Albuqerque.
+
+TRANSFORMS =============================================================
+
+Clear_R_R_I transform (Sloan r to Clear InstMag vs Sloan (r-i) color):
+Using only comps with narrow color range (not ideal) of synth. B-V 0.45 to 0.95,
+   and using all Clear images, get_transform():
+-0.01451 (0.01593)  from MP 1603, AN 20191118
++0.20157 (0.00815)  from MP 3460, AN 20191118
++0.02185 (0.00530)  from MP 1074, AN 20191109
+This is discouraging. Disagreements may be due simply to narrow color range.
+
+CONVERSIONS ============================================================
+From my own simple regression of catalog mag or color on catalog mags.
+Synthetic B-V (Johnson) = 0.830 * Sloan_g - 0.803 * Sloan_r  (needed? wouldn't sloan r-i be better?)
+Synthetic APASS10 R     = 0.950 * Sloan_r + 0.050 * Sloan_i  (OK, but use Sloan_r directly)
+

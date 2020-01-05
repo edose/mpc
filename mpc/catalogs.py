@@ -19,13 +19,6 @@ from photrix.image import Image, FITS
 
 # APASS_10_URL = 'https://www.aavso.org/cgi-bin/apass_dr10_download.pl'
 ATLAS_REFCAT2_DIRECTORY = 'J:/Astro/Catalogs/ATLAS-refcat2/mag-0-16/'
-MIN_G_MAG = 10  # intentionally wide screens (can narrow with control.txt later).
-MAX_G_MAG = 16  # "
-MAX_G_UNCERT = 20  # millimagnitudes
-MAX_R_UNCERT = 20  # "
-MAX_I_UNCERT = 20  # "
-MIN_BV_COLOR = 0.5
-MAX_BV_COLOR = 0.95
 RP1_LIMIT = 9  # arcseconds; closeness limit for flux = 0.1 * star flux
 R1_LIMIT = 14   # arcseconds; closeness limit for flux = 1 * star flux
 R10_LIMIT = 20  # arcseconds; closeness limit for flux = 10 * star flux
@@ -146,11 +139,6 @@ class Refcat2:
         # print('RA: ', str(ra_spec_first), str((ra_spec_last % 360) + 1))
         # print('Dec:', str(dec_spec_first), str(dec_spec_last))
         df_list = []
-        # n_degsq = (ra_spec_last + 1 - ra_spec_first) * (dec_spec_last + 1 - dec_spec_first)
-        # if n_degsq > ATLAS_REFCAT2_MAX_QUERY_DEFSQ:
-        #     print(' >>>>> Too many defsq (' + str(n_degsq) +
-        #           ') requested (max=' + str(ATLAS_REFCAT2_MAX_QUERY_DEFSQ) + '). Stopping.')
-        #     sys.exit(1)
         for ra_spec in range(ra_spec_first, ra_spec_last + 1):
             for dec_spec in range(dec_spec_first, dec_spec_last + 1):
                 df_degsq = read_one_refcat2_sqdeg(directory, ra_spec % 360, dec_spec)
@@ -171,7 +159,7 @@ class Refcat2:
 
         # Add columns for synthetic B-V color & synthetic Sloan R magnitude:
         df.loc[:, 'BminusV'] = [0.830 * g - 0.803 * r for (g, r) in zip(df['g'], df['r'])]
-        df.loc[:, 'SloanR'] = [0.950 * r + 0.05 * i for (r, i) in zip(df['r'], df['i'])]
+        df.loc[:, 'APASS_R'] = [0.950 * r + 0.05 * i for (r, i) in zip(df['r'], df['i'])]
 
         if sort_ra is True:
             self.df_raw = df.copy().sort_values(by='RA_deg')  # in case all are needed (unlikely)
@@ -193,12 +181,12 @@ class Refcat2:
     def selected_columns(self, column_list):
         return self.df_selected.loc[:, column_list].copy()
 
-    def select_min_g_mag(self, min_g_mag):
-        rows_to_keep = [(g >= min_g_mag) for g in self.df_selected['g']]
+    def select_min_r_mag(self, min_r_mag):
+        rows_to_keep = [(r >= min_r_mag) for r in self.df_selected['r']]
         self.df_selected = self.df_selected.loc[rows_to_keep, :]
 
-    def select_max_g_mag(self, max_g_mag):
-        rows_to_keep = [(g <= max_g_mag) for g in self.df_selected['g']]
+    def select_max_r_mag(self, max_r_mag):
+        rows_to_keep = [(r <= max_r_mag) for r in self.df_selected['r']]
         self.df_selected = self.df_selected.loc[rows_to_keep, :]
 
     def select_max_g_uncert(self, max_dg):
@@ -232,26 +220,6 @@ class Refcat2:
                                    for r10 in self.df_selected['R10']])
         is_overlapping = rp1_too_close | r1_too_close | r10_too_close
         self.df_selected = self.df_selected.loc[list(~is_overlapping), :].copy()
-
-    def select_for_photometry(self):
-        lines = []
-        self.select_min_g_mag(MIN_G_MAG)
-        lines.append('Refcat2: min(g) screened to ' + str(len(self.df_selected)) + ' stars.')
-        self.select_max_g_mag(MAX_G_MAG)
-        lines.append('Refcat2: max(g) screened to ' + str(len(self.df_selected)) + ' stars.')
-        self.select_max_g_uncert(MAX_G_UNCERT)
-        lines.append('Refcat2: max(dg) screened to ' + str(len(self.df_selected)) + ' stars.')
-        self.select_max_r_uncert(MAX_R_UNCERT)
-        lines.append('Refcat2: max(dr) screened to ' + str(len(self.df_selected)) + ' stars.')
-        self.select_max_i_uncert(MAX_I_UNCERT)
-        lines.append('Refcat2: max(di) screened to ' + str(len(self.df_selected)) + ' stars.')
-        self.select_bv_color(MIN_BV_COLOR, MAX_BV_COLOR)
-        lines.append('Refcat2: BV color screened to ' + str(len(self.df_selected)) + ' stars.')
-        self.select_dgaia()
-        lines.append('Refcat2: dgaia screened to ' + str(len(self.df_selected)) + ' stars.')
-        self.remove_overlapping()
-        lines.append('Refcat2: overlaps removed to ' + str(len(self.df_selected)) + ' stars.')
-        return lines
 
     def update_epoch(self, new_datetime_utc):
         d_years = (new_datetime_utc - ATLAS_REFCAT2_EPOCH_UTC).total_seconds() /\
@@ -296,6 +264,9 @@ def read_one_refcat2_sqdeg(directory=ATLAS_REFCAT2_DIRECTORY, ra_deg_min=None, d
     df['g'] *= 0.001  # in magnitudes; dg remains in millimagnitudes
     df['r'] *= 0.001  # in magnitudes; dr remains in millimagnitudes
     df['i'] *= 0.001  # in magnitudes; di remains in millimagnitudes
+    id_prefix = '{:03d}'.format(ra_deg_int) + '{:+03d}'.format(dec_deg_int) + '_'
+    id_list = [id_prefix + '{:0>6d}'.format(i + 1) for i in range(len(df))]  # unique in entire catalog.
+    df.insert(0, 'ID', id_list)
     print('Refcat2 sqdeg [' + str(ra_deg_int) + ', ' + str(dec_deg_int) + ']: ' + str(len(df)) + ' stars.')
     return df
 
