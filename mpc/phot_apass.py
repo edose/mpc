@@ -13,7 +13,7 @@ from statistics import median, mean
 import matplotlib.pyplot as plt
 
 # From this (mpc) package:
-from mpc.mpctools import *
+from mpc.mp_astrometry import *
 
 # From external (EVD) package photrix:
 from photrix.image import Image, FITS, Aperture

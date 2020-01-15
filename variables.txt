@@ -1,0 +1,30 @@
+[Refcat2 object]
+.epoch: effective datetime of listed RA,Dec [python datetime]
+.df_selected, one line per selected star from catalog:
+   CatalogID: unique ID for all Refcat2, e.g., '035+23_000298' [string]
+   RA_deg: corrected for epoch, in degrees [float]
+   Dec_deg: "
+   PM_ra: proper motion
+   dPM_ra: proper motion uncertainty
+   PM_dec: proper motion
+   dPM_dec: proper motion uncertainty
+   G_gaia: Gaia g mag (not needed)
+   dG_gaia: Gaia g mag uncertainty (not needed)
+   BP_gaia: Gaia BP mag (not needed)
+   dBP_gaia: Gaia BP mag uncertainty (not needed)
+   RP_gaia: Gaia RP mag (not needed)
+   dRP_gaia: Gaia RP mag uncertainty (not needed)
+   T_eff: effective temp, in K (not needed)
+   dupvar: X
+   RP1: distance to nearest flux > 0.1 * star flux, in arcsec, None if > 36 arcsec [float]
+   R1: distance to nearest flux > 1 * star flux, in arcsec, None if > 36 arcsec [float]
+   R10: distance to nearest flux > 10 *& star flux, in arcsec, None if > 36 arcsec [float]
+   g: Sloan g, magnitude [float]
+   dg: Sloan g uncertainty, magnitude [float]
+   r: Sloan r, magnitude [float]
+   dr: Sloan r uncertainty, magnitude [float]
+   i: Sloan i, magnitude [float]
+   di: Sloan i uncertainty, magnitude [float]
+   BminusV: synthetic Johnson B-V color, magnitude [float]
+   APASS_R: synthetic APASS 10 R, magnitude [float]
+

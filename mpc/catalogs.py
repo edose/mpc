@@ -164,6 +164,7 @@ class Refcat2:
         if sort_ra is True:
             self.df_raw = df.copy().sort_values(by='RA_deg')  # in case all are needed (unlikely)
         self.df_selected = self.df_raw.copy()  # the working copy.
+        self.epoch = ATLAS_REFCAT2_EPOCH_UTC
 
     @classmethod
     def from_fits_object(cls, fits_object):
@@ -232,7 +233,7 @@ class Refcat2:
         df_comps_new_date.loc[:, 'RA_deg'] = ra_date
         df_comps_new_date.loc[:, 'Dec_deg'] = dec_date
         self.df_selected = df_comps_new_date
-
+        self.epoch = new_datetime_utc
 
 def read_one_refcat2_sqdeg(directory=ATLAS_REFCAT2_DIRECTORY, ra_deg_min=None, dec_deg_min=None):
     ra_deg_int = int(ra_deg_min)
@@ -266,7 +267,7 @@ def read_one_refcat2_sqdeg(directory=ATLAS_REFCAT2_DIRECTORY, ra_deg_min=None, d
     df['i'] *= 0.001  # in magnitudes; di remains in millimagnitudes
     id_prefix = '{:03d}'.format(ra_deg_int) + '{:+03d}'.format(dec_deg_int) + '_'
     id_list = [id_prefix + '{:0>6d}'.format(i + 1) for i in range(len(df))]  # unique in entire catalog.
-    df.insert(0, 'ID', id_list)
+    df.insert(0, 'CatalogID', id_list)
     print('Refcat2 sqdeg [' + str(ra_deg_int) + ', ' + str(dec_deg_int) + ']: ' + str(len(df)) + ' stars.')
     return df
 

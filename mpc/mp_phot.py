@@ -11,7 +11,7 @@ import pandas as pd
 # import requests
 # from scipy.interpolate import interp1d
 # from statistics import median, mean
-# import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 
 # From this (mpc) package:
 # from mpc.mpctools import *
@@ -565,11 +565,11 @@ def mp_phot():
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
     # Load required data:
-    df_obs = read_df_obs()
-    df_comps = read_df_comps()
+    df_obs_all = read_df_obs()
+    df_comps_all = read_df_comps()
     state = get_session_state()  # for extinction and transform values.
     obs_selections = read_obs_selections()
-    df_obs = select_df_obs(df_obs, obs_selections)  # remove comps, obs, images per control.txt file.
+    df_obs = select_df_obs(df_obs_all, obs_selections)  # remove comps, obs, images per control.txt file.
 
     # Keep obs only for comps present in every Clear image (df_obs):
     n_fitsfiles = len(df_obs['FITSfile'].drop_duplicates())
@@ -581,18 +581,84 @@ def mp_phot():
 
     # Keep only comps (in df_comps) still in df_obs:
     comp_id_list = df_obs['SourceID'].copy().drop_duplicates()  # refresh list.
-    rows_to_keep = df_comps['CompID'].isin(comp_id_list)
-    df_comps = df_comps.loc[rows_to_keep, :]
+    rows_to_keep = df_comps_all['CompID'].isin(comp_id_list)
+    df_comps = df_comps_all.loc[rows_to_keep, :]
 
     # Make photometric model via mixed-model regression:
     option_dict = read_model_options()
     model = SessionModel(df_obs, df_comps, state, option_dict)
 
-    # Write df_obs_qualified, df_comps_qualified, and df_mp to CSV files:
+    # Organize data, write model_summary.txt, write canopus.txt.
 
     # Call do_plots():
+    do_plots(model, df_obs_all, df_comps_all, mp_string, an_string)
 
     # Write log file lines:
+
+
+def do_plots(model, df_obs_all, df_comps_all, mp_string, an_string):
+    """ Make all diagnostic plots. User will use the plots to decide whether to keep solution, or to
+        adjust control.txt and run mp_phot() again.
+        This is top-level fn & outside of SessionModel class, so can access all data incl
+            mag & colorlimits, original (pre-selection) obs data, etc.
+    :param model: Results of running model on comp and mp data. [SessionModel object]
+    :param df_obs_all: all observations from make_df_obs(), retained for model or not. [pandas DataFrame]
+    :param df_comps_all: all comp stars from make_df_obs(), retained for model or not. [pandas DataFrame]
+    :param mp_string:
+    :param an_string:
+    :return: [None]
+    """
+    # Preliminary data prep:
+    is_mp_obs = (model.df_obs['Type'] == 'MP')
+    is_comp_obs = (model.df_obs['Type'] == 'Comp')
+    n_mp_obs = sum(is_mp_obs)
+    n_comp_obs = sum(is_comp_obs)
+    df_mp_obs = model.df_obs.loc[is_mp_obs, :]
+    df_comp_obs = model.df_obs.loc[is_comp_obs, :]
+    model_serials = df_comp_obs['Serial']
+
+    # FIGURE 1 (Q-Q plot), one entire page:
+    # Heavily adapted from photrix.process.SkyModel.plots().
+    from scipy.stats import norm
+    df_y = pd.DataFrame({'Residual': model.mm_fit.df_observations['Residual'] * 1000.0,
+                         'Serial': model_serials})
+    df_y = df_y.sort_values(by='Residual')
+    n = len(df_y)
+    t_values = [norm.ppf((k-0.5)/n) for k in range(1, n+1)]
+
+    # Construct Q-Q plot:
+    fig, ax = plt.subplots(ncols=1, nrows=1, figsize=(12, 8))  # (width, height) in "inches"
+    ax.grid(True, color='lightgray', zorder=-1000)
+    ax.set_title('Q-Q plot of Residuals: ' + mp_string + '   ' + an_string,
+                 color='darkblue', fontsize=20, weight='bold')
+    ax.set_xlabel('t (sigma.residuals = ' + str(round(1000.0 * model.mm_fit.sigma, 1)) + ' mMag)')
+    ax.set_ylabel('Residual (mMag)')
+    ax.scatter(x=t_values, y=df_y['Residual'], alpha=0.6, color='darkgreen', zorder=+1000)
+
+    # Label potential outliers:
+    mean_y = df_y['Residual'].mean()
+    std_y = df_y['Residual'].std()
+    z_score_y = (df_y['Residual'] - mean_y) / std_y
+    df_y['T'] = t_values
+    df_to_label = df_y[abs(z_score_y) >= 2.0]
+    for x, y, label in zip(df_to_label['T'], df_to_label['Residual'], df_to_label['Serial']):
+        ax.annotate(label, xy=(x, y), xytext=(4, -4),
+                    textcoords='offset points', ha='left', va='top', rotation=-40)
+
+    # Add reference line:
+    x_low = 1.10 * min(df_y['T'])
+    x_high = 1.10 * max(df_y['T'])
+    y_low = x_low * std_y
+    y_high = x_high * std_y
+    ax.plot([x_low, x_high], [y_low, y_high], color='gray', zorder=-100, linewidth=1)
+
+    # Add annotation: number of observations:
+    fig.text(x=0.5, y=0.87,
+             s=str(n_comp_obs) + ' comp-star observations in model.',
+             verticalalignment='top', horizontalalignment='center',
+             fontsize=12)
+    fig.canvas.set_window_title('Q-Q Plot:  MP ' + mp_string + '   AN ' + an_string)
+    plt.show()
 
 
 class SessionModel:
@@ -616,16 +682,16 @@ class SessionModel:
         self.df_comps = df_comps.copy()
         self.state = state
         defaults = DEFAULT_MODEL_OPTIONS
-        self.fit_transform = option_dict.get('fit_transform', default=defaults['fit_transform'])
-        self.fit_extinction = option_dict.get('fit_extinction', default=defaults['fit_extinction'])
-        self.fit_vignette = option_dict.get('fit_vignette', default=defaults['fit_vignette'])
-        self.fit_xy = option_dict.get('fit_xy', default=defaults['fit_xy'])
-        self.fit_jd = option_dict.get('fit_jd', default=defaults['fit_jd'])
+        self.fit_transform = option_dict.get('fit_transform', defaults['fit_transform'])
+        self.fit_extinction = option_dict.get('fit_extinction', defaults['fit_extinction'])
+        self.fit_vignette = option_dict.get('fit_vignette', defaults['fit_vignette'])
+        self.fit_xy = option_dict.get('fit_xy', defaults['fit_xy'])
+        self.fit_jd = option_dict.get('fit_jd', defaults['fit_jd'])
         self.do_plots = do_plots
 
         self.dep_var_name = 'InstMag_SR_with_offsets'
-        self.mm_fit = None      # placeholder for the statsmodel MixedModelFit object
-        self.transform = None   # placeholder for fit parameter result [scalar]
+        self.mm_fit = None      # placeholder for the fit result [photrix MixedModelFit object].
+        self.transform = None   # placeholder for this fit parameter result [scalar].
         self.transform_fixed = None  # "
         self.extinction = None  # "
         self.vignette = None    # "

@@ -57,8 +57,9 @@ MIN_TABLE_WORDS = 25  # any line with this many white-space-delimited words pres
 MIN_MP_ALTITUDE = 40
 MAX_SUN_ALTITUDE = -12
 MAX_V_MAG = 19.0  # in Clear filter
+MINIMUM_SCORING = {'v_mag': 18.2, 'uncert': 4}
 MIN_UNCERTAINTY = 2.1  # minimum orbit uncertainty to consider following up (in arcseconds).
-MIN_MOON_DIST = 45
+MIN_MOON_DIST = 45  # degrees
 FORCE_INCLUDE_IN_YEARS = 2.0
 DF_COLUMN_ORDER = ['number', 'score', 'transit', 'ACP', 'min9', 'uncert', 'v_mag',
                    'comments', 'last_obs', 'motion',
@@ -109,7 +110,7 @@ TARGET_OVERHEAD = 60  # seconds to start new target
 IMAGE_OVERHEAD = 19  # seconds to start, download, solve new image
 EXPOSURES_PER_BLOCK = 9  # assuming 3 stacks of 3 exposures (thus 9 images taken consecutively).
 PROCESSING_OVERHEAD = 600  # penalty (seconds) for processing data from one target
-EXP_TIME_TABLE = [(16, 50), (17, 75), (18, 150), (19, 300)]  # entry = (v_mag, exp_time sec).
+EXP_TIME_TABLE_ASTROMETRY = [(16, 50), (17, 75), (18, 150), (19, 300)]  # entry = (v_mag, exp_time sec).
 MP_FILTER_NAME = 'Clear'
 
 THIS_LONGITUDE = float(PAYLOAD_DICT_TEMPLATE['long'])
@@ -120,46 +121,23 @@ THIS_LOCATION = Observer(latitude=THIS_LATITUDE,
                          elevation=THIS_ELEVATION * u.m)
 
 
-def calc_exp_time(v_mag):
-    # Check for outside limits:
-    if v_mag < EXP_TIME_TABLE[0][0]:
-        return EXP_TIME_TABLE[0][1]
-    n = len(EXP_TIME_TABLE)
-    # Check for equals an entry:
-    if v_mag > EXP_TIME_TABLE[n-1][0]:
-        return EXP_TIME_TABLE[n-1][1]
-    for (v_mag_i, t_i) in EXP_TIME_TABLE:
-        if v_mag == v_mag_i:
-            return t_i
-    # Usual case: linear interpolation in mag (& thus in log(i)):
-    for i, entry in enumerate(EXP_TIME_TABLE[:-1]):
-        v_mag_i, t_i = entry
-        v_mag_next, t_next = EXP_TIME_TABLE[i + 1]
-        if v_mag < v_mag_next:
-            slope = log(t_next / t_i) / (v_mag_next - v_mag_i)
-            log_t = log(t_i) + (v_mag - v_mag_i) * slope
-            return exp(log_t)
+USER_FUNCTIONS___________________________________ = 0
 
 
-def calc_seconds_per_block(v_mag):
-    return TARGET_OVERHEAD + EXPOSURES_PER_BLOCK * (calc_exp_time(v_mag) + IMAGE_OVERHEAD)
-
-
-def calc_score(v_mag, uncert):
-    # benefit is roughly: improvement in arcsec uncertainty.
-    # cost is roughly hours of scope+user time.
-    benefit = uncert - UNCERTAINTY_AFTER_OBS
-    cost_in_hours = (calc_seconds_per_block(v_mag) + PROCESSING_OVERHEAD) / 3600.0
-    return benefit / cost_in_hours
-
-
-MIN_SCORE = calc_score(v_mag=18.2, uncert=4)  # scores less than this do not get included.
-# MIN_SCORE = 0  # for test only
-
-
-def go(mp_list=None, mp_start=100000, date_utc=None, max_mps=100, max_candidates=100,
+def go(mp_list=None, mp_start=150000, date_utc=None, max_mps=10000, max_candidates=100,
        keep_useful_only=True, include_old_in_years=FORCE_INCLUDE_IN_YEARS):
-    print('Minimum score =', '{:.1f}'.format(MIN_SCORE))
+    """ Print list and return dataframe of MPs suitable for astrometric followup on given night.
+    :param mp_list: list of MP numbers to screen (in place of mp_start and max_mps). [int]
+    :param mp_start: starting MP number of consecutive range to screen [int]
+    :param date_utc: UTC date string, e.g. '20200110'; if None, uses next night [string]
+    :param max_mps: maximum number of MPs to screen. [int]
+    :param max_candidates: maximum number of candidates to return. [int]
+    :param keep_useful_only: True to keep all MPC "useful for orbit refinement" MPs. [boolean]
+    :param include_old_in_years: True to keep all MPs whose last obs was at least this old. [float]
+    :return:
+    """
+    min_score = calc_score(MINIMUM_SCORING['v_mag'], MINIMUM_SCORING['uncert'])
+    print('Minimum score =', '{:.1f}'.format(min_score))
     if date_utc is None:
         date_string = next_date_utc()
     else:
@@ -195,15 +173,71 @@ def go(mp_list=None, mp_start=100000, date_utc=None, max_mps=100, max_candidates
         print(' --> ' + str(len(all_dict_list)))
     # This sort order in case LST zero comes in middle of night:
     df = pd.DataFrame(all_dict_list).reindex(columns=DF_COLUMN_ORDER).sort_values(by=['transit', 'ra'])
-    pd.set_option('display.width', 108)  # default is 80
+    pd.set_option('display.width', 144)  # default is 80
     pd.set_option('display.max_colwidth', 100)
     print('Done. ' + str(len(df)) + ' found.')
     if len(df) >= 1:
         print(df.reindex(columns=['score', 'uncert', 'ACP', 'min9', 'last_obs']))
+        for idx in df.index:
+            print(df.loc[idx, 'number'])
         return df
     else:
         print('No MPs found.')
         return None
+
+
+def pets(date_utc=None):
+    """ Make browser page for MPC ephemeres for all pet MPS.
+    :param date_utc: UTC date string, e.g. '20200110'; if None, uses next night [string]
+    """
+    html([mp for (mp, name) in PET_MPS], date_utc=date_utc)
+
+
+def go_pets(years=0.5):
+    """ Print list and return dataframe of *pet* MPs suitable for astrometric followup on given night.
+    [may never happen, as most are very bright.]
+    USAGE: df = go_pets()
+    :param years: accept pet MPs with most recent obs older than this. [float]
+    """
+    df = go(mp_list=[mp for (mp, x) in PET_MPS],
+            keep_useful_only=False, include_old_in_years=years)
+
+
+SUPPORT___________________________________________ = 0
+
+
+def calc_exp_time(v_mag, exp_time_table=None):
+    # Check for outside limits:
+    if v_mag < exp_time_table[0][0]:
+        return exp_time_table[0][1]
+    n = len(exp_time_table)
+    # Check for equals an entry:
+    if v_mag > exp_time_table[n-1][0]:
+        return exp_time_table[n-1][1]
+    for (v_mag_i, t_i) in exp_time_table:
+        if v_mag == v_mag_i:
+            return t_i
+    # Usual case: linear interpolation in mag (& thus in log(i)):
+    for i, entry in enumerate(exp_time_table[:-1]):
+        v_mag_i, t_i = entry
+        v_mag_next, t_next = exp_time_table[i + 1]
+        if v_mag < v_mag_next:
+            slope = log(t_next / t_i) / (v_mag_next - v_mag_i)
+            log_t = log(t_i) + (v_mag - v_mag_i) * slope
+            return exp(log_t)
+
+
+def calc_seconds_per_block(v_mag):
+    return TARGET_OVERHEAD + EXPOSURES_PER_BLOCK \
+           * (calc_exp_time(v_mag, EXP_TIME_TABLE_ASTROMETRY) + IMAGE_OVERHEAD)
+
+
+def calc_score(v_mag, uncert):
+    # benefit is roughly: improvement in arcsec uncertainty.
+    # cost is roughly hours of scope+user time.
+    benefit = uncert - UNCERTAINTY_AFTER_OBS
+    cost_in_hours = (calc_seconds_per_block(v_mag) + PROCESSING_OVERHEAD) / 3600.0
+    return benefit / cost_in_hours
 
 
 def combine(df_list):
@@ -232,6 +266,7 @@ def get_transit_time(ra, dec, date_string):
 
 
 def parse_html_lines(lines, keep_useful_only=False, include_old_in_years=None):
+    min_score = calc_score(MINIMUM_SCORING['v_mag'], MINIMUM_SCORING['uncert'])
     mp_dict_list = []
     mp_block_limits = chop_html(lines)
     for limits in mp_block_limits:
@@ -254,7 +289,7 @@ def parse_html_lines(lines, keep_useful_only=False, include_old_in_years=None):
             elif keep_useful_only and not useful:
                 worth_including = False  # skip if required to be MPC-useful but is not.
             else:
-                worth_including = score >= MIN_SCORE
+                worth_including = score >= min_score
             if worth_including:
                 mp_dict_list.append(mp_dict)
                 # print(mp_dict['number'])
@@ -427,7 +462,7 @@ def extract_mp_data(html_lines, mp_block_limits, keep_always=False, keep_useful_
                     mp_dict['moon_dist'] = line_split[21]
                     mp_dict['moon_alt'] = '{:d}'.format(round(moon_alt))
                     mp_dict['min9'] = '{:d}'.format(round(calc_seconds_per_block(v_mag) / 60.0))
-                    exp_time = calc_exp_time(v_mag)
+                    exp_time = calc_exp_time(v_mag, EXP_TIME_TABLE_ASTROMETRY)
                     uncertainty_raw_url = [word for word in line_split
                                            if 'cgi.minorplanetcenter.net/cgi' in word][1]
                     ra_degrees = ra_as_degrees(mp_dict['ra'])
@@ -437,7 +472,7 @@ def extract_mp_data(html_lines, mp_block_limits, keep_always=False, keep_useful_
                     mp_dict['transit'] = '{0:02d}{1:02d}'.format(transit_time.hour, transit_time.minute)
                     mp_dict['ACP'] = 'IMAGE MP_' + mp_dict['number'].zfill(6) + \
                                      '_t' + mp_dict['transit'] + \
-                                     '  ' + MP_FILTER_NAME + '={:.0f}'.format(exp_time) + 'sec(9)' + \
+                                     '  ' + MP_FILTER_NAME + '={:.0f}'.format(exp_time) + 'sec(3)' + \
                                      '  ' + mp_dict['ra'] + \
                                      '  ' + mp_dict['dec']
 
@@ -573,15 +608,6 @@ def write_csv(df=None, an_date=None):
     # Usage: write_csv(df=df, an_date='20190119')  NB: an_date is prob. 1 day before UTC_date.
     fullpath = os.path.join(PLANNING_ROOT_DIRECTORY, 'AN' + an_date, 'mps_' + an_date + '.csv')
     df.to_csv(fullpath)
-
-
-def pets(date_utc=None):
-    html([mp for (mp, name) in PET_MPS], date_utc=date_utc)
-
-
-def go_pets(years=0.5):
-    df = go(mp_list=[mp for (mp, x) in PET_MPS],
-            keep_useful_only=False, include_old_in_years=years)
 
 
 UTILITY_FUNCTIONS___________________________________ = 0
