@@ -157,7 +157,7 @@ class Refcat2:
         df = df[~radec_outside_requested]
         print('Refcat2: RADec-trimmed to', str(len(df)), 'stars.')
 
-        # Add columns for synthetic B-V color & synthetic Sloan R magnitude:
+        # Add columns for synthetic B-V color & synthetic APASS (~Sloan) R magnitude:
         df.loc[:, 'BminusV'] = [0.830 * g - 0.803 * r for (g, r) in zip(df['g'], df['r'])]
         df.loc[:, 'APASS_R'] = [0.950 * r + 0.05 * i for (r, i) in zip(df['r'], df['i'])]
 
@@ -235,6 +235,7 @@ class Refcat2:
         self.df_selected = df_comps_new_date
         self.epoch = new_datetime_utc
 
+
 def read_one_refcat2_sqdeg(directory=ATLAS_REFCAT2_DIRECTORY, ra_deg_min=None, dec_deg_min=None):
     ra_deg_int = int(ra_deg_min)
     dec_deg_int = int(dec_deg_min)
@@ -245,11 +246,11 @@ def read_one_refcat2_sqdeg(directory=ATLAS_REFCAT2_DIRECTORY, ra_deg_min=None, d
                      usecols=[0, 1, 4, 5, 6, 7,
                               8, 9, 10, 11, 12, 13,
                               14, 16, 18, 19, 20,
-                              21, 22, 25, 26, 29, 30], prefix='X')
+                              21, 22, 25, 26, 29, 30, 33, 34], prefix='col')
     df.columns = ['RA_deg', 'Dec_deg', 'PM_ra', 'dPM_ra', 'PM_dec', 'dPM_dec',
                   'G_gaia', 'dG_gaia', 'BP_gaia', 'dBP_gaia', 'RP_gaia', 'dRP_gaia',
                   'T_eff', 'dupvar', 'RP1', 'R1', 'R10',
-                  'g', 'dg', 'r', 'dr', 'i', 'di']
+                  'g', 'dg', 'r', 'dr', 'i', 'di', 'z', 'dz']
     df['RA_deg'] *= 0.00000001
     df['Dec_deg'] *= 0.00000001
     df['PM_ra'] *= 0.00001    # proper motion in arcsec/year
@@ -265,6 +266,7 @@ def read_one_refcat2_sqdeg(directory=ATLAS_REFCAT2_DIRECTORY, ra_deg_min=None, d
     df['g'] *= 0.001  # in magnitudes; dg remains in millimagnitudes
     df['r'] *= 0.001  # in magnitudes; dr remains in millimagnitudes
     df['i'] *= 0.001  # in magnitudes; di remains in millimagnitudes
+    df['z'] *= 0.001  # in magnitudes; dz remains in millimagnitudes
     id_prefix = '{:03d}'.format(ra_deg_int) + '{:+03d}'.format(dec_deg_int) + '_'
     id_list = [id_prefix + '{:0>6d}'.format(i + 1) for i in range(len(df))]  # unique in entire catalog.
     df.insert(0, 'CatalogID', id_list)

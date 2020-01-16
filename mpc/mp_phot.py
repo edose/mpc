@@ -28,29 +28,36 @@ VALID_FITS_FILE_EXTENSIONS = ['.fits', '.fit', '.fts']
 DEGREES_PER_RADIAN = 180.0 / pi
 
 # To assess FITS files in assess():
+MP_PHOTOMETRY_FILTER = 'Clear'
+MIN_MP_PHOTOMETRY_FILES = 5
 MIN_FWHM = 1.5  # in pixels.
 MAX_FWHM = 14  # "
-REQUIRED_FILES_PER_FILTER = [('Clear', 5)]
 FOCUS_LENGTH_MAX_PCT_DEVIATION = 3.0
 
 MARGIN_RA_ZERO = 5  # in degrees, to handle RA ~zero; s/be well larger than images' height or width.
 
+# For color handling:
+FILTERS_FOR_COLOR_INDEX = ('R', 'I')
+DEFAULT_MP_COLOR_R_I = 0.2  # close to known Sloan mean (r-i) for MPs.
+
 # To screen observations:
 MAX_MAG_UNCERT = 0.03  # min signal/noise for comp obs (as InstMagSigma).
-ADU_CAL_SATURATED = 60000
-ADU_UR_SATURATED = 54000  # This probably should go in Instrument class, but ok for now.
+# The next two probably should go in Instrument class, but ok for now.
+ADU_SATURATED = 56000  # Max ADU allowable in original (Ur) images.
+VIGNETTING = (1846, 0.62)  # (px from center, max fract of ADU_SATURATED allowed) both at corner.
 
 # For this package:
 MP_TOP_DIRECTORY = 'J:/Astro/Images/MP Photometry/'
 LOG_FILENAME = 'mp_photometry.log'
 CONTROL_FILENAME = 'control.txt'
 DF_OBS_FILENAME = 'df_obs.csv'
+DF_IMAGES_FILENAME = 'df_images.csv'
 DF_COMPS_FILENAME = 'df_comps.csv'
 TRANSFORM_CLEAR_SR_SR_SI = 0.025  # estimate from MP 1047 20191109 (37 images).
 DEFAULT_MODEL_OPTIONS = {'fit_transform': False, 'fit_extinction': False,
                          'fit_vignette': True, 'fit_xy': False,
                          'fit_jd': False}  # defaults if not found in file control.txt.
-DEFAULT_MP_COLOR_R_I = 0.2  # close to known Sloan mean (r-i) for MPs.
+
 
 # For selecting comps within Refcat2 object (intentionally wide; can narrow with control.txt later):
 MIN_R_MAG = 10
@@ -60,12 +67,6 @@ MAX_R_UNCERT = 20  # "
 MAX_I_UNCERT = 20  # "
 MIN_BV_COLOR = 0.45
 MAX_BV_COLOR = 0.95
-
-# For package photrix:
-PHOTRIX_TOP_DIRECTORIES = ['C:/Astro/Borea Photrix/', 'J:/Astro/Images/Borea Photrix Archives/']
-FILE_RENAMING_FILENAME = 'File-renaming.txt'
-UR_FILE_RENAMING_PATH = 'Photometry/File-renaming.txt'
-DF_MASTER_FILENAME = 'df_master.csv'
 
 
 _____ATLAS_BASED_WORKFLOW________________________________________________ = 0
@@ -90,26 +91,11 @@ def start(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     os.chdir(mp_directory)
     print('Working directory set to:', mp_directory)
 
-    # Find correct photrix directory:
-    photrix_directory = None
-    for p_dir in PHOTRIX_TOP_DIRECTORIES:
-        this_directory = os.path.join(p_dir, an_string)
-        df_master_fullpath = os.path.join(this_directory, 'Photometry', DF_MASTER_FILENAME)
-        if os.path.exists(df_master_fullpath):
-            if os.path.isfile(df_master_fullpath):
-                print(df_master_fullpath, 'found.')
-                photrix_directory = this_directory
-                break
-    if photrix_directory is None:
-        print(' >>>>> start() cannot find photrix directory. Log file unchanged.')
-        return
-
     # Initiate log file and finish:
     log_file = open(LOG_FILENAME, mode='w')  # new file; wipe old one out if it exists.
     log_file.write(mp_directory + '\n')
     log_file.write('MP: ' + mp_string + '\n')
     log_file.write('AN: ' + an_string + '\n')
-    log_file.write('Photrix found: ' + photrix_directory + '\n')
     log_file.write('This log started: ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
     log_file.close()
@@ -135,7 +121,7 @@ def resume(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     os.chdir(this_directory)
 
     # Verify that proper log file already exists in the working directory:
-    log_this_directory, log_mp_string, log_an_string, _ = get_context()
+    log_this_directory, log_mp_string, log_an_string = get_context()
     if log_mp_string.lower() == mp_string.lower() and log_an_string.lower() == an_string.lower():
         print('READY TO GO in', this_directory)
     else:
@@ -148,7 +134,7 @@ def assess():
          Modeled after and extended from assess() found in variable-star photometry package 'photrix'.
     :return: [None]
     """
-    this_directory, mp_string, an_string, photrix_directory = get_context()
+    this_directory, mp_string, an_string = get_context()
     log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
     log_file.write('\n===== access()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
@@ -159,49 +145,34 @@ def assess():
     print(str(len(fits_filenames)) + ' FITS files found:')
     log_file.write(str(len(fits_filenames)) + ' FITS files found:' + '\n')
 
-    # Ensure that relevant uncalibrated (Ur) files and cross-reference to them all accessible:
-    print(' >>>>>', os.path.join(photrix_directory, 'Photometry', FILE_RENAMING_FILENAME))
-    df_ur = pd.read_csv(os.path.join(photrix_directory, 'Photometry', FILE_RENAMING_FILENAME),
-                        sep=';', index_col='PhotrixName')
-    print('   Verifying presence of', len(fits_filenames), 'Ur (uncalibrated) FITS files...')
-    ur_fits_missing = []
-    for fits_name in fits_filenames:
-        ur_fits_name = df_ur.loc[fits_name, 'UrName']
-        ur_fits = FITS(photrix_directory, 'Ur', ur_fits_name)
-        if not ur_fits.is_valid:
-            ur_fits_missing.append(ur_fits_name)
-            print(' >>>>> UR file ' + ur_fits_name + ' not found.')
-            log_file.write(' >>>>> UR file ' + ur_fits_name + ' not found.')
-    if len(ur_fits_missing) >= 1:
-        print(' >>>>> ' + str(len(ur_fits_missing)) + ' Ur FITS files missing.')
-        log_file.write(' >>>>> ' + str(len(ur_fits_missing)) + ' Ur FITS files missing.\n')
-    else:
-        print('   All Ur files found.')
-        log_file.write('   All Ur files found.\n')
-    n_warnings += len(ur_fits_missing)
-
     # Verify that all required FITS file types exist within this directory and are valid:
     filter_counter = Counter()
+    filters_to_use = [MP_PHOTOMETRY_FILTER] + list(FILTERS_FOR_COLOR_INDEX)
+    filenames_to_use = []
     for filename in fits_filenames:
         fits = FITS(this_directory, '', filename)
         if fits.is_valid:
             filter_counter[fits.filter] += 1
-    for filt, required in REQUIRED_FILES_PER_FILTER:
-        if filter_counter[filt] >= required:
-            print('   ' + str(filter_counter[filt]), 'in filter', filt + '.')
-            log_file.write('   ' + str(filter_counter[filt]) + ' in filter ' + filt + '.\n')
+            if fits.filter in filters_to_use:
+                filenames_to_use.append(filename)
+
+    if filter_counter[MP_PHOTOMETRY_FILTER] < MIN_MP_PHOTOMETRY_FILES:
+        print(' >>>>> ERROR:', str(MIN_MP_PHOTOMETRY_FILES),
+              'valid files in main photometry filter (' + MP_PHOTOMETRY_FILTER + ') required but only'
+              + str(filter_counter[MP_PHOTOMETRY_FILTER]), 'found.')
+        exit(1)
+    for filter in filter_counter.keys():
+        if filter == MP_PHOTOMETRY_FILTER:
+            filter_category = 'MAIN PHOTOMETRIC filter'
+        elif filter in FILTERS_FOR_COLOR_INDEX:
+            filter_category = 'for COLOR INDEX'
         else:
-            print(' >>>>> ' + str(filter_counter[filt]) +
-                  ' in filter ' + filt + ' found: NOT ENOUGH. ' +
-                  str(required) + ' are required.')
-            log_file.write(' >>>>> ' + str(filter_counter[filt]) +
-                           ' in filter ' + filt + ' found: NOT ENOUGH. ' +
-                           str(required) + ' are required.')
-            n_warnings += 1
+            filter_category = '(ignored)'
+        print('   ' + str(filter_counter[filter]), 'in filter', filter + '. ', filter_category)
 
     # Start dataframe for main FITS integrity checks:
-    fits_extensions = pd.Series([os.path.splitext(f)[-1].lower() for f in fits_filenames])
-    df = pd.DataFrame({'Filename': fits_filenames,
+    fits_extensions = pd.Series([os.path.splitext(f)[-1].lower() for f in filenames_to_use])
+    df = pd.DataFrame({'Filename': filenames_to_use,
                        'Extension': fits_extensions.values}).sort_values(by=['Filename'])
     df = df.set_index('Filename', drop=False)
     df['Valid'] = False
@@ -221,7 +192,7 @@ def assess():
             df.loc[filename, 'FocalLength'] = fits.focal_length
             df.loc[filename, 'UTC_mid'] = fits.utc_mid  # needed below for control.txt stub.
 
-    # Non-FITS files: should be none; report and REMOVE THEM from df:
+    # Invalid FITS files: should be none; report and REMOVE THEM from df:
     invalid_fits = df.loc[~ df['Valid'], 'Filename']
     if len(invalid_fits) >= 1:
         print('\nINVALID FITS files:')
@@ -286,7 +257,7 @@ def assess():
     # Summarize and write instructions for next steps:
     if n_warnings == 0:
         print('\n >>>>> ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.')
-        print('Next: (1) enter MP pixel positions in control.txt,\n      (2) make_df_obs()')
+        print('Next: (1) enter MP pixel positions in control.txt,\n      (2) make_dfs()')
         log_file.write('assess(): ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.' + '\n')
     else:
         print('\n >>>>> ' + str(n_warnings) + ' warnings (see listing above).')
@@ -301,7 +272,7 @@ def assess():
     latest_filename = df.loc[i_latest, 'Filename']
     lines = [';----- This is control.txt for directory ' + this_directory,
              ';',
-             ';===== For make_df_obs() ===========================================',
+             ';===== For make_dfs() ===========================================',
              ';----- REQUIRED:',
              '#MP  ' + earliest_filename + '  [mp_x_pixel]  [mp_y_pixel]   ; '
                                            'early filename, change if needed',
@@ -344,21 +315,24 @@ def assess():
     log_file.close()
 
 
-def make_df_obs():
+def make_dfs():
     """ For one MP on one night: gather images and ATLAS refcat2 catalog data, make df_comps and df_obs.
     :return: [None]
-    USAGE: make_df_obs()
+    USAGE: make_dfs()
     """
-    this_directory, mp_string, an_string, photrix_directory = get_context()
+    # TODO: probably we should have a df_images as well. May lighten df_obs, as a side benefit.
+    this_directory, mp_string, an_string = get_context()
     log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
     mp_int = int(mp_string)  # put this in try/catch block.
     mp_string = str(mp_int)
-    log_file.write('\n===== make_df_obs()  ' +
+    log_file.write('\n===== make_dfs()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
     # Get all relevant FITS filenames, make lists of FITS and Image objects (per photrix):
     fits_names = get_fits_filenames(this_directory)
     fits_list = [FITS(this_directory, '', fits_name) for fits_name in fits_names]  # FITS objects
+    filters_to_use = [MP_PHOTOMETRY_FILTER] + list(FILTERS_FOR_COLOR_INDEX)
+    fits_list = [fits for fits in fits_list if fits.filter in filters_to_use]
     image_list = [Image(fits_object) for fits_object in fits_list]  # Image objects
 
     # Get time range of all MP images:
@@ -401,7 +375,7 @@ def make_df_obs():
     # Add apertures for all comps within all Image objects:
     df_radec = refcat2.selected_columns(['RA_deg', 'Dec_deg'])
     for image in image_list:
-        if image.fits.filter == 'Clear':
+        if image.fits.filter in [MP_PHOTOMETRY_FILTER] + list(FILTERS_FOR_COLOR_INDEX):
             for i_comp in df_radec.index:
                 ra = df_radec.loc[i_comp, 'RA_deg']
                 dec = df_radec.loc[i_comp, 'Dec_deg']
@@ -455,9 +429,8 @@ def make_df_obs():
         image.add_aperture(mp_id, x0, y0)
         mp_radec_dict[image.fits.filename] = (ra, dec)  # in degrees; later inserted into df_obs.
 
-    # Make df_obs, by building from Image apertures (adapted from photrix.process.make_df_master()):
-    df_ur = pd.read_csv(os.path.join(photrix_directory, 'Photometry', 'File-renaming.txt'),
-                        sep=';', index_col='PhotrixName')
+    # Gather data for df_image and df_obs (this code adapted from photrix.process.make_df_master()):
+    image_dict_list = []
     df_image_obs_list = []
     for image in image_list:
         # Collect info from all Aperture objects:
@@ -478,62 +451,69 @@ def make_df_obs():
                                      'vignette': 'Vignette',
                                      'sky_bias': 'SkyBias'},
                             inplace=True)
-        df_apertures = df_apertures.loc[df_apertures['net_flux'] > 0.0, :]  # remove absent sources.
-        df_apertures = df_apertures.loc[df_apertures['max_adu'] <= ADU_CAL_SATURATED, :]
+
+        # Remove apertures with no flux or with saturated pixel(s):
+        has_positive_flux = df_apertures['net_flux'] > 0.0
+        df_apertures = df_apertures.loc[has_positive_flux, :]
+        adus_saturated = [adu_sat_from_xy(x1024, y1024)
+                          for (x1024, y1024) in zip(df_apertures['X1024'], df_apertures['Y1024'])]
+        is_not_saturated = [mx <= sat for (mx, sat) in zip(df_apertures['max_adu'], adus_saturated)]
+        df_apertures = df_apertures.loc[is_not_saturated, :]
+
+        # Complete df_apertures (requires positive flux, screened for in lines just above:
         df_apertures['InstMag'] = -2.5 * np.log10(df_apertures['net_flux'])\
             + 2.5 * log10(image.fits.exposure)
         df_apertures['InstMagSigma'] = (2.5 / log(10)) * \
                                        (df_apertures['net_flux_sigma'] / df_apertures['net_flux'])
+
+        # Remove apertures with low signal-to-noise ratio:
         snr_ok = [sig < MAX_MAG_UNCERT for sig in df_apertures['InstMagSigma']]
         df_apertures = df_apertures.loc[snr_ok, :]
-        df_apertures.drop(['n_disc_pixels', 'n_annulus_pixels', 'max_adu',
-                           'net_flux', 'net_flux_sigma'],
+        df_apertures.drop(['n_disc_pixels', 'n_annulus_pixels', 'max_adu', 'net_flux', 'net_flux_sigma'],
                           axis=1, inplace=True)  # delete unneeded columns.
-
-        # Find and add each aperture's max ADU from Ur (pre-calibrated) image (to enforce non-saturation):
-        ur_filename = df_ur.loc[image.fits.filename, 'UrName']
-        df_apertures['UrFITSfile'] = ur_filename
-        ur_image = Image.from_fits_path(photrix_directory, 'Ur', ur_filename)
-        max_adu_list, log_adu_list = [], []
-        for star_id in df_apertures.index:
-            ap = Aperture(ur_image, star_id, df_apertures.loc[star_id, 'Xcentroid'],
-                          df_apertures.loc[star_id, 'Ycentroid'], df_punches=None)
-            max_adu_list.append(ap.max_adu)
-        df_apertures['MaxADU_Ur'] = max_adu_list
-        not_saturated = [(max_adu > 0.0) for max_adu in max_adu_list]  # screen for saturation right here.
-        df_image_obs = df_apertures[not_saturated].copy()
-
-        # Add FITS-specific columns:
+        df_image_obs = df_apertures.copy()
         df_image_obs['FITSfile'] = image.fits.filename
-        df_image_obs['JD_start'] = jd_from_datetime_utc(image.fits.utc_start)
-        df_image_obs['UTC_start'] = image.fits.utc_start
-        df_image_obs['Exposure'] = image.fits.exposure
-        df_image_obs['UTC_mid'] = image.fits.utc_mid
-        df_image_obs['JD_mid'] = jd_from_datetime_utc(image.fits.utc_mid)
-        df_image_obs['Filter'] = image.fits.filter
-        df_image_obs['Airmass'] = image.fits.airmass
-        df_image_obs['JD_fract'] = np.nan  # placeholder (actual value requires that all JDs be known).
-
+        df_image_obs['JD_mid'] = image.fits.utc_mid  # to help sort the obs by time; could discard later.
         df_image_obs_list.append(df_image_obs)
 
+        # Add image-specific data to image_dict_list:
+        image_dict = dict()
+        image_dict['FITSfile'] = image.fits.filename
+        image_dict['JD_start'] = jd_from_datetime_utc(image.fits.utc_start)
+        image_dict['UTC_start'] = image.fits.utc_start
+        image_dict['Exposure'] = image.fits.exposure
+        image_dict['UTC_mid'] = image.fits.utc_mid
+        image_dict['JD_mid'] = jd_from_datetime_utc(image.fits.utc_mid)
+        image_dict['Filter'] = image.fits.filter
+        image_dict['Airmass'] = image.fits.airmass
+        image_dict['JD_fract'] = np.nan  # placeholder (actual value requires that all JDs be known).
+        image_dict_list.append(image_dict)
+
+    # Make df_obs (one row per observation across all images):
     df_obs = pd.DataFrame(pd.concat(df_image_obs_list, ignore_index=True, sort=True))
     df_obs['Type'] = ['MP' if id.startswith('MP_') else 'Comp' for id in df_obs['SourceID']]
     df_obs.sort_values(by=['JD_mid', 'Type', 'SourceID'], inplace=True)
     df_obs.insert(0, 'Serial', range(1, 1 + len(df_obs)))
-    df_obs.index = list(df_obs['Serial'])
+    df_obs.index = list(df_obs['Serial'])  # list to prevent naming the index
     df_obs = reorder_df_columns(df_obs, ['Serial', 'FITSfile', 'JD_mid', 'SourceID', 'Type',
-                                         'Filter', 'Exposure', 'InstMag', 'InstMagSigma'])
-    jd_floor = floor(df_obs['JD_mid'].min())  # requires that all JD_mid values be known.
-    df_obs['JD_fract'] = df_obs['JD_mid'] - jd_floor
+                                         'InstMag', 'InstMagSigma'])
     print('   ' + str(len(df_obs)) + ' obs retained.')
 
-    # Make df_comps:
+    # Make df_images (one row per FITS file):
+    df_images = pd.DataFrame(data=image_dict_list)
+    df_images.index = list(df_images['FITSfile'])  # list to prevent naming the index
+    jd_floor = floor(df_images['JD_mid'].min())  # requires that all JD_mid values be known.
+    df_images['JD_fract'] = df_images['JD_mid'] - jd_floor
+    df_images.sort_values(by='JD_mid')
+    df_images = reorder_df_columns(df_images, ['FITSfile', 'JD_mid', 'Filter', 'Exposure', 'Airmass'])
+
+    # Make df_comps (one row per comp star, mostly catalog data):
     df_comps = refcat2.selected_columns(['RA_deg', 'Dec_deg', 'RP1', 'R1', 'R10',
-                                         'g', 'dg', 'r', 'dr', 'i', 'di', 'BminusV', 'R', 'T_eff'])
+                                         'g', 'dg', 'r', 'dr', 'i', 'di', 'z', 'dz',
+                                         'BminusV', 'APASS_R', 'T_eff'])
     comp_ids = [str(i) for i in df_comps.index]
     df_comps.index = comp_ids
     df_comps.insert(0, 'CompID', comp_ids)
-
     print('   ' + str(len(df_comps)) + ' comps retained.')
 
     # Write df_obs to CSV file (rather than returning the df):
@@ -542,9 +522,16 @@ def make_df_obs():
                   quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
     n_comp_obs = sum([t.lower() == 'comp' for t in df_obs['Type']])
     n_mp_obs = sum([t.lower() == 'mp' for t in df_obs['Type']])
+    print('df_obs written to', fullpath_df_obs)
     log_file.write(DF_OBS_FILENAME + ' written: ' + str(n_comp_obs) + ' comp obs & ' +
                    str(n_mp_obs) + ' MP obs.\n')
-    print('df_obs written to', fullpath_df_obs)
+
+    # Write df_images to CSV file (rather than returning the df):
+    fullpath_df_images = os.path.join(this_directory, DF_IMAGES_FILENAME)
+    df_images.to_csv(fullpath_df_images, sep=';', quotechar='"',
+                     quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
+    print('df_images written to', fullpath_df_images)
+    log_file.write(DF_IMAGES_FILENAME + ' written: ' + str(len(df_images)) + ' images.\n')
 
     # Write df_comps to CSV file (rather than returning the df):
     fullpath_df_comps = os.path.join(this_directory, DF_COMPS_FILENAME)
@@ -557,7 +544,7 @@ def make_df_obs():
 
 def mp_phot():
     """ Use obs quality and user's control.txt to screen obs for photometry and diagnostic plotting."""
-    this_directory, mp_string, an_string, photrix_directory = get_context()
+    this_directory, mp_string, an_string = get_context()
     log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
     mp_int = int(mp_string)  # put this in try/catch block.
     mp_string = str(mp_int)
@@ -566,10 +553,14 @@ def mp_phot():
 
     # Load required data:
     df_obs_all = read_df_obs()
+    df_images_all = read_df_images()
     df_comps_all = read_df_comps()
     state = get_session_state()  # for extinction and transform values.
     obs_selections = read_obs_selections()
     df_obs = select_df_obs(df_obs_all, obs_selections)  # remove comps, obs, images per control.txt file.
+
+    # TODO: Get MP color index, if images present for filter pair (R, I).
+    mp_ci = get_mp_color_index(df_obs_all, df_comps_all)
 
     # Keep obs only for comps present in every Clear image (df_obs):
     n_fitsfiles = len(df_obs['FITSfile'].drop_duplicates())
@@ -602,8 +593,8 @@ def do_plots(model, df_obs_all, df_comps_all, mp_string, an_string):
         This is top-level fn & outside of SessionModel class, so can access all data incl
             mag & colorlimits, original (pre-selection) obs data, etc.
     :param model: Results of running model on comp and mp data. [SessionModel object]
-    :param df_obs_all: all observations from make_df_obs(), retained for model or not. [pandas DataFrame]
-    :param df_comps_all: all comp stars from make_df_obs(), retained for model or not. [pandas DataFrame]
+    :param df_obs_all: all observations from make_dfs(), retained for model or not. [pandas DataFrame]
+    :param df_comps_all: all comp stars from make_dfs(), retained for model or not. [pandas DataFrame]
     :param mp_string:
     :param an_string:
     :return: [None]
@@ -794,7 +785,7 @@ _____SUPPORT________________________________________________ = 0
 
 def get_context():
     """ This is run at beginning of workflow functions (except start()) to orient the function.
-    :return: 4-tuple: (this_directory, mp_string, an_string, photrix_directory) [3 strings]
+    :return: 3-tuple: (this_directory, mp_string, an_string) [3 strings]
     """
     this_directory = os.getcwd()
     if not os.path.isfile(LOG_FILENAME):
@@ -810,8 +801,7 @@ def get_context():
         return None
     mp_string = lines[1][3:].strip().upper()
     an_string = lines[2][3:].strip()
-    photrix_directory = lines[3][len('Photrix found:'):].strip()
-    return this_directory, mp_string, an_string, photrix_directory
+    return this_directory, mp_string, an_string
 
 
 def get_fits_filenames(directory):
@@ -853,6 +843,18 @@ def reorder_df_columns(df, left_column_list=None, right_column_list=None):
     return df
 
 
+def adu_sat_from_xy(x1024, y1024):
+    """ Return estimated saturation ADU limit from aperture's distances from image center.
+    :param x1024: pixels/1024 in x-direction of aperture center from image center. [float]
+    :param y1024: pixels/1024 in y-direction of aperture center from image center. [float]
+    :return: estimated saturation ADU at given image position. [float]
+    """
+    r2 = x1024 ** 2 + y1024 ** 2
+    fract_dist2_to_vign_pt = r2 / ((VIGNETTING[0] / 1024.0) ** 2)
+    fract_decr = (1.0 - VIGNETTING[1]) * fract_dist2_to_vign_pt
+    return ADU_SATURATED * (1.0 - fract_decr)
+
+
 def read_mp_positions():
     """ Reads control.txt, parses 2 #MP lines, returns MP-position filenames, x-pixels, and y_pixels.
     :return: mp_position_filenames [list of 2 strings], x_pixels, y_pixels [each list of 2 floats].
@@ -883,25 +885,67 @@ def read_mp_positions():
 
 def read_df_obs():
     """  Simple utility to read df_obs.csv file and return the original DataFrame.
-    :return: df_obs from make_df_obs() [pandas Dataframe]
+    :return: df_obs from make_dfs() [pandas Dataframe]
     """
-    this_directory, _, _, _ = get_context()
+    this_directory, _, _ = get_context()
     fullpath = os.path.join(this_directory, DF_OBS_FILENAME)
     df_obs = pd.read_csv(fullpath, sep=';', index_col=0)
     return df_obs
 
 
+def read_df_images():
+    """  Simple utility to read df_images.csv file and return the original DataFrame.
+    :return: df_images from make_dfs() [pandas Dataframe]
+    """
+    this_directory, _, _ = get_context()
+    fullpath = os.path.join(this_directory, DF_IMAGES_FILENAME)
+    df_images = pd.read_csv(fullpath, sep=';', index_col=0)
+    return df_images
+
+
 def read_df_comps():
     """  Simple utility to read df_comps.csv file and return the original DataFrame.
-    :return: df_comps from make_df_obs() [pandas Dataframe]
+    :return: df_comps from make_dfs() [pandas Dataframe]
     """
-    this_directory, _, _, _ = get_context()
+    this_directory, _, _ = get_context()
     fullpath = os.path.join(this_directory, DF_COMPS_FILENAME)
     df_comps = pd.read_csv(fullpath, sep=';', index_col=0)
     comp_ids = [str(id) for id in df_comps['CompID']]
     df_comps.loc[:, 'CompID'] = comp_ids
     df_comps.index = comp_ids
     return df_comps
+
+
+def get_mp_color_index(df_obs_all, df_comps_all):
+    """  Gets minor planet's Sloan r-i color index from regression on R & I instrument magnitudes.
+    :param df_obs_all:
+    :param df_comps_all:
+    :return: One best color index (Sloan r-i). [float]
+    """
+    is_for_ci = [f in FILTERS_FOR_COLOR_INDEX for f in df_obs_all['Filter']]
+    df_obs_ci = df_obs_all[is_for_ci].copy()
+
+    # Make list of all comps with a good obs in every CI image and high signal-to-noise.
+    ci_images = df_obs_ci['Filename'].drop_duplicates()
+    if (FILTERS_FOR_COLOR_INDEX[0] not in df_obs_ci['Filter'])\
+        and (FILTERS_FOR_COLOR_INDEX[1] not in df_obs_ci['Filter']):
+        return DEFAULT_MP_COLOR_R_I
+    n_ci_images = len(ci_images)
+    is_comp_obs_ci = [type == 'Comp' for type in df_obs_ci['Type']]
+    ci_comps = df_obs_ci.loc[is_comp_obs_ci, 'ID'].drop_duplicates()
+    is_high_snr = [(df_comps_all.loc[c, 'dr'] < 10.0) and (df_comps_all.loc[c, 'di'] < 10.0)
+                   for c in ci_comps]
+    ci_comps = ci_comps[is_high_snr].copy()
+    ci_comp_list = []
+    for ci_comp in ci_comps:
+        n_images_this_comp = sum(df_obs_ci['CompID'] == ci_comp)
+        if n_images_this_comp == n_ci_images:
+            ci_comp_list.append(ci_comp)
+
+    # Make dependent variable for regression:
+    # TODO: Crap--here's where we're going to need df_images. Too hard without it. Crap.
+
+    return 0.0
 
 
 def screen_comps_for_photometry(refcat2):
@@ -958,7 +1002,7 @@ def read_obs_selections():
 
 def select_df_obs(df_obs, obs_selections):
     """ Reads file control.txt and applies selections, returns curated df_obs.
-    :param df_obs: observation dataframe from make_df_obs(). [pandas DataFrame]
+    :param df_obs: observation dataframe from make_dfs(). [pandas DataFrame]
     :param obs_selections: dict of lists of items to remove from df_obs before use in model. [dict of lists]
     :return df_obs: curated observation dataframe for use in mp_phot(). [pandas DataFrame]
     """
@@ -999,29 +1043,38 @@ def read_model_options():
 _____ANCILLARY_CODE________________________________________________ = 0
 
 
-def get_transform():
+def get_transform(filter='Clear', passband='r'):
+    # TODO: have this decide to use OLS (1 image) vs MixedModelFit (more than 1 image).
     """ Get transform (filter=Clear, passband=SloanR, color=(SloanR-SloanI) from one directory's df_obs.
         First, user must ensure that current working directory is correct (prob. by running resume().
+        Color index hard-coded as Sloan r - Sloan i.
+    :param filter: filter in which images were taken (to select from df_obs). [string]
+    :param passband: passband (e.g., Johnson-Cousins 'R' or Sloan 'i') to target. [string]
     :return: dataframe, each row one image, columns=T, dT (transform & its uncertainty). [pandas DataFrame]
     USAGE: fit = get_transform()
     """
     df_obs = read_df_obs()
     is_comp = pd.Series([t.lower() == 'comp' for t in df_obs['Type']])
-    is_clear = pd.Series([f.lower() == 'clear' for f in df_obs['Filter']])
-    to_keep = is_comp & is_clear
+    is_filter = pd.Series([f.lower() == filter.lower() for f in df_obs['Filter']])
+    to_keep = is_comp & is_filter
     df_comp_obs = df_obs[list(to_keep)]
     df_comps = read_df_comps()
     df = pd.merge(left=df_comp_obs, right=df_comps,
-                      how='left', left_on='SourceID', right_on='CompID', sort=False)
+                  how='left', left_on='SourceID', right_on='CompID', sort=False)
     df['CI'] = df['r'] - df['i']
-    df['CI2'] = df['CI'] * df['CI']
-    df['Difference'] = df['InstMag'] - df['r']
-    # fit = MixedModelFit(data=df, dep_var='Difference', fixed_vars=['CI', 'CI2'], group_var='FITSfile')
-    fit = MixedModelFit(data=df, dep_var='Difference', fixed_vars=['CI'], group_var='FITSfile')
-    print('Transform(CI) =', str(fit.df_fixed_effects.loc['CI', 'Value']),
-          'stdev =', str(fit.df_fixed_effects.loc['CI', 'Stdev']))
-    # print('Transform(CI2) =', str(fit.df_fixed_effects.loc['CI2', 'Value']),
-    #       'stdev =', str(fit.df_fixed_effects.loc['CI2', 'Stdev']))
+    # df['CI2'] = df['CI'] * df['CI']
+    df['Difference'] = df['InstMag'] - df[passband]
+    n_images = len(df['FITSfile'].drop_duplicates())
+    if n_images == 1:
+        print('OLS:')
+        fit = 0.0  # TODO: insert code for OLS here.
+    else:
+        print('MixedModel (' + str(n_images) + ' images):')
+        # fit = MixedModelFit(data=df, dep_var='Difference', fixed_vars=['CI', 'CI2'], group_var='FITSfile')
+        fit = MixedModelFit(data=df, dep_var='Difference', fixed_vars=['CI'], group_var='FITSfile')
+        print('Transform(' + passband + '->' + filter + ') =',
+              str(fit.df_fixed_effects.loc['CI', 'Value']),
+              'stdev =', str(fit.df_fixed_effects.loc['CI', 'Stdev']))
     return fit
 
 
