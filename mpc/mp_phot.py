@@ -12,6 +12,7 @@ import pandas as pd
 # from scipy.interpolate import interp1d
 # from statistics import median, mean
 import matplotlib.pyplot as plt
+import statsmodels.formula.api as smf
 
 # From this (mpc) package:
 # from mpc.mpctools import *
@@ -38,7 +39,7 @@ MARGIN_RA_ZERO = 5  # in degrees, to handle RA ~zero; s/be well larger than imag
 
 # For color handling:
 FILTERS_FOR_COLOR_INDEX = ('R', 'I')
-DEFAULT_MP_COLOR_R_I = 0.2  # close to known Sloan mean (r-i) for MPs.
+DEFAULT_MP_RI_COLOR = 0.2  # close to known Sloan mean (r-i) for MPs.
 
 # To screen observations:
 MAX_MAG_UNCERT = 0.03  # min signal/noise for comp obs (as InstMagSigma).
@@ -320,7 +321,6 @@ def make_dfs():
     :return: [None]
     USAGE: make_dfs()
     """
-    # TODO: probably we should have a df_images as well. May lighten df_obs, as a side benefit.
     this_directory, mp_string, an_string = get_context()
     log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
     mp_int = int(mp_string)  # put this in try/catch block.
@@ -493,9 +493,10 @@ def make_dfs():
     df_obs = pd.DataFrame(pd.concat(df_image_obs_list, ignore_index=True, sort=True))
     df_obs['Type'] = ['MP' if id.startswith('MP_') else 'Comp' for id in df_obs['SourceID']]
     df_obs.sort_values(by=['JD_mid', 'Type', 'SourceID'], inplace=True)
+    df_obs.drop(['JD_mid'], axis=1)
     df_obs.insert(0, 'Serial', range(1, 1 + len(df_obs)))
     df_obs.index = list(df_obs['Serial'])  # list to prevent naming the index
-    df_obs = reorder_df_columns(df_obs, ['Serial', 'FITSfile', 'JD_mid', 'SourceID', 'Type',
+    df_obs = reorder_df_columns(df_obs, ['Serial', 'FITSfile', 'SourceID', 'Type',
                                          'InstMag', 'InstMagSigma'])
     print('   ' + str(len(df_obs)) + ' obs retained.')
 
@@ -559,8 +560,10 @@ def mp_phot():
     obs_selections = read_obs_selections()
     df_obs = select_df_obs(df_obs_all, obs_selections)  # remove comps, obs, images per control.txt file.
 
-    # TODO: Get MP color index, if images present for filter pair (R, I).
-    mp_ci = get_mp_color_index(df_obs_all, df_comps_all)
+    # Get MP color index, if images present for filter pair (R, I).
+    mp_ci, source_string = get_mp_color_index(df_obs_all, df_images_all, df_comps_all)
+    print('MP color index (r-i) =', '{0:.3f}'.format(mp_ci))
+    log_file.write('MP color index (r-i) = ' + '{0:.3f}'.format(mp_ci))
 
     # Keep obs only for comps present in every Clear image (df_obs):
     n_fitsfiles = len(df_obs['FITSfile'].drop_duplicates())
@@ -755,7 +758,7 @@ class SessionModel:
                                      'Airmass', 'JD_fract', 'Vignette', 'X1024', 'Y1024']].copy()
         bogus_cat_mag = 0.0  # we'll need this later, to correct raw predictions.
         df_mp_obs['CatMag'] = bogus_cat_mag  # totally bogus local value, corrected for later.
-        df_mp_obs['CI'] = DEFAULT_MP_COLOR_R_I  # best we can do without directly measuring it.
+        df_mp_obs['CI'] = DEFAULT_MP_RI_COLOR  # best we can do without directly measuring it.
         raw_predictions = self.mm_fit.predict(df_mp_obs, include_random_effect=False)
 
         # Compute dependent-variable offsets for MP:
@@ -916,36 +919,124 @@ def read_df_comps():
     return df_comps
 
 
-def get_mp_color_index(df_obs_all, df_comps_all):
+def get_mp_color_index(df_obs_all, df_images_all, df_comps_all):
     """  Gets minor planet's Sloan r-i color index from regression on R & I instrument magnitudes.
+    Use first of these color index values that exists:
+        (1) value extracted from R & I images,
+        (2) value given in control.txt #MP_RI_COLOR, or
+        (3) DEFAULT_RI_COLOR as constant atop this python file.
     :param df_obs_all:
+    :param df_images_all:
     :param df_comps_all:
-    :return: One best color index (Sloan r-i). [float]
+    :return: tuple (color index (Sloan r-i), source of value) [2-tuple of float, string]
     """
-    is_for_ci = [f in FILTERS_FOR_COLOR_INDEX for f in df_obs_all['Filter']]
-    df_obs_ci = df_obs_all[is_for_ci].copy()
+    # Case: R & I images are available in this directory:
+    is_r_image = (df_images_all['Filter'] == 'R')
+    is_i_image = (df_images_all['Filter'] == 'I')
+    ri_both_available = any(is_r_image) and any(is_i_image)
+    if ri_both_available:
+        r_filenames = list(df_images_all.loc[is_r_image, 'FITSfile'])
+        i_filenames = list(df_images_all.loc[is_i_image, 'FITSfile'])
+        ci_filenames = r_filenames + i_filenames
 
-    # Make list of all comps with a good obs in every CI image and high signal-to-noise.
-    ci_images = df_obs_ci['Filename'].drop_duplicates()
-    if (FILTERS_FOR_COLOR_INDEX[0] not in df_obs_ci['Filter'])\
-        and (FILTERS_FOR_COLOR_INDEX[1] not in df_obs_ci['Filter']):
-        return DEFAULT_MP_COLOR_R_I
-    n_ci_images = len(ci_images)
-    is_comp_obs_ci = [type == 'Comp' for type in df_obs_ci['Type']]
-    ci_comps = df_obs_ci.loc[is_comp_obs_ci, 'ID'].drop_duplicates()
-    is_high_snr = [(df_comps_all.loc[c, 'dr'] < 10.0) and (df_comps_all.loc[c, 'di'] < 10.0)
-                   for c in ci_comps]
-    ci_comps = ci_comps[is_high_snr].copy()
-    ci_comp_list = []
-    for ci_comp in ci_comps:
-        n_images_this_comp = sum(df_obs_ci['CompID'] == ci_comp)
-        if n_images_this_comp == n_ci_images:
-            ci_comp_list.append(ci_comp)
+        # Keep only color-index images with a valid MP observation:
+        valid_mp_filenames = []
+        for filename in ci_filenames:
+            is_filename_mp_row = (df_obs_all['FITSfile'] == filename) & (df_obs_all['Type'] == 'MP')
+            if sum(is_filename_mp_row) == 1:
+                mp_instmag = df_obs_all.loc[is_filename_mp_row, 'InstMag'].iloc[0]
+                mp_instmagsigma = df_obs_all.loc[is_filename_mp_row, 'InstMagSigma'].iloc[0]
+                if (mp_instmag is not None) and (mp_instmagsigma is not None):
+                    if (not np.isnan(mp_instmag)) and (not np.isnan(mp_instmagsigma)):
+                        if mp_instmagsigma < MAX_MAG_UNCERT:
+                            valid_mp_filenames.append(filename)
+        ci_filenames = valid_mp_filenames.copy()
 
-    # Make dependent variable for regression:
-    # TODO: Crap--here's where we're going to need df_images. Too hard without it. Crap.
+        # Make list of all comps in color-index images, and having high signal-to-noise:
+        is_ci_obs = [(f in ci_filenames) for f in df_obs_all['FITSfile']]
+        df_ci_obs = df_obs_all[is_ci_obs].copy()  # includes MP observations.
+        is_ci_comp_obs = [type == 'Comp' for type in df_ci_obs['Type']]
+        ci_comp_ids = df_ci_obs.loc[is_ci_comp_obs, 'SourceID'].drop_duplicates()
+        is_high_snr = [(df_comps_all.loc[c, 'dr'] < 10.0) and (df_comps_all.loc[c, 'di'] < 10.0)
+                       for c in ci_comp_ids]
+        ci_comp_ids = ci_comp_ids[is_high_snr].copy()
 
-    return 0.0
+        # Keep only comps which are represented in every color-index image:
+        ci_comp_list = []
+        n_ci_images = len(r_filenames) + len(i_filenames)
+        for this_comp_id in ci_comp_ids:
+            n_images_this_comp = sum(df_ci_obs['SourceID'] == this_comp_id)
+            if n_images_this_comp == n_ci_images:
+                ci_comp_list.append(this_comp_id)
+        is_comp_in_list = [(id in ci_comp_list) for id in df_ci_obs['SourceID']]
+        df_ci_obs = df_ci_obs[is_comp_in_list].copy()
+
+        # Make one merged dataframe, one row per eligible comp observation, but only selected rows:
+        df_fit_obs = pd.merge(left=df_ci_obs.loc[:, ['FITSfile', 'SourceID', 'Type', 'InstMag']],
+                              right=df_comps_all.loc[:, ['CompID', 'r', 'i']],
+                              how='left', left_on='SourceID', right_on='CompID', sort=False)
+        df_fit_obs = pd.merge(left=df_fit_obs, right=df_images_all.loc[:, ['FITSfile', 'Filter']],
+                              how='left', on='FITSfile', sort=False)
+        df_fit_obs = df_fit_obs.sort_values(by=['SourceID', 'Filter', 'FITSfile'])  # for review/debugging.
+
+        # Make variables for regression fit:
+        fit_dict_list = []
+        is_r_row = (df_fit_obs['Filter'] == 'R')
+        is_i_row = (df_fit_obs['Filter'] == 'I')
+        for this_comp_id in ci_comp_list:
+            fit_dict = dict()
+            fit_dict['comp_id'] = this_comp_id
+            fit_dict['dep_var'] = df_comps_all.loc[this_comp_id, 'r'] - df_comps_all.loc[this_comp_id, 'i']
+
+            is_comp_id = (df_fit_obs['SourceID'] == this_comp_id)
+            is_comp_id_r = is_comp_id & is_r_row
+            is_comp_id_i = is_comp_id & is_i_row
+            comp_id_mean_r_instmag = df_fit_obs.loc[is_comp_id_r, 'InstMag'].mean()  # averaged over images.
+            comp_id_mean_i_instmag = df_fit_obs.loc[is_comp_id_i, 'InstMag'].mean()  # "
+            fit_dict['indep_var'] = comp_id_mean_r_instmag - comp_id_mean_i_instmag
+            fit_dict_list.append(fit_dict)
+        df_fit = pd.DataFrame(data=fit_dict_list)
+        df_fit.index = list(df_fit['comp_id'])
+
+        # Perform regression fit:
+        result = smf.ols(formula='dep_var ~ indep_var', data=df_fit).fit()
+
+        # Build MP input data for color-index (Sloan r-i) prediction:
+        instmag_list_r, instmag_list_i = [], []
+        mp_dict = dict()
+        for filename in df_fit_obs['FITSfile'].drop_duplicates():
+            mp_instmag = df_obs_all.loc[(df_obs_all['FITSfile'] == filename) &
+                                        (df_obs_all['Type'] == 'MP'), 'InstMag'].iloc[0]
+            if df_images_all.loc[filename, 'Filter'] == 'R':
+                instmag_list_r.append(mp_instmag)
+            else:
+                instmag_list_i.append(mp_instmag)
+        mp_dict['indep_var'] = sum(instmag_list_r) / len(instmag_list_r)\
+            - sum(instmag_list_i) / len(instmag_list_i)
+
+        # Predict & return MP color index:
+        df_prediction = pd.DataFrame(data=mp_dict, index=range(len(mp_dict)))
+        mp_color = result.predict(df_prediction)
+        return mp_color[0], 'R & I images'
+
+    # Case: return MP_COLOR_INDEX from control.txt:
+    with open(CONTROL_FILENAME, 'r') as cf:
+        lines = cf.readlines()
+        lines = [line.split(";")[0] for line in lines]  # remove all comments
+        lines = [line.strip() for line in lines]  # remove lead/trail blanks
+        lines = [line for line in lines if line != '']  # remove empty lines
+        for line in lines:
+            if line.upper().startswith('#MP_RI_COLOR '):
+                ri_string = line[len('#MP_RI_COLOR '):].split()[0]
+                try:
+                    ri_color = float(ri_string)
+                except ValueError:
+                    ri_color = None
+        if ri_color is not None:
+            return ri_color, 'control.txt'
+
+    # Default case: return value hard-coded atop this python file:
+    return DEFAULT_MP_RI_COLOR, 'default'
 
 
 def screen_comps_for_photometry(refcat2):
@@ -989,7 +1080,7 @@ def read_obs_selections():
         content = line.strip().split(';')[0].strip()  # upper case, comments removed.
         content_upper = content.upper()
         if content_upper.startswith('#SERIAL'):
-            values = content[len('#SERIAL'):].strip().replace(',',' ').split()
+            values = content[len('#SERIAL'):].strip().replace(',', ' ').split()
             serial_list.extend([int(v) for v in values])
         if content_upper.startswith('#COMP'):
             values = content[len('#COMP'):].strip().replace(',', ' ').split()
