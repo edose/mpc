@@ -116,7 +116,7 @@ def mask_mp(top_directory=DEFAULT_TOP_DIRECTORY, df_fits=None, mp_xy1=None, mp_x
 
 
 ######################################################################################################
-# pca-mp_phot.py UTILITY functions:
+# pca-do_mp_phot.py UTILITY functions:
 
 
 def clean_subdirectory(top_directory, subdirectory_name):
