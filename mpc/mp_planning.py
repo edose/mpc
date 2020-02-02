@@ -1,5 +1,6 @@
 __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
+import os
 from datetime import datetime, timezone, timedelta
 
 import pandas as pd
@@ -14,6 +15,11 @@ MIN_MP_ALTITUDE = 30  # degrees
 DSW = ('254.34647d', '35.11861269964489d', '2220m')
 DSNM = ('251.10288d', '31.748657576406853d', '1372m')
 EXP_TIME_TABLE_PHOTOMETRY = [(13, 40), (14, 60), (15, 120), (16, 240)]  # (v_mag, exp_time sec), phot only.
+
+MPFILE_DIRECTORY = 'C:/Dev/Photometry/MPfile'
+CURRENT_MPFILE_VERSION = '1.0'
+MPEC_REQUIRED_HEADER_START = 'Date (UTC)   RA              Dec         delta   r     elong  ' +\
+                             'ph_ang   ph_ang_bisector   mag  \'/hr    PA'
 
 
 def make_an_table(an, location=DSW):
@@ -173,3 +179,113 @@ def exp_time_from_V(v_mag):
     :return: suitable exposure time in Clear filter suited to lightcurve photometry. [float]
     """
     return calc_exp_time(v_mag, EXP_TIME_TABLE_PHOTOMETRY)
+
+
+def make_mpfile_dict(mpfile_directory=MPFILE_DIRECTORY):
+    """  Returns dict of MPfiles, as: MP number: MPfile object.
+    Usage: d = make_mpfile_dict()  --> returns *all* MPfiles. [dict]
+    :param mpfile_directory: where the MPfiles reside. [string]
+    :return: all MPfiles in a dictionary. [dict of MPfiles objects]
+    """
+    mpfile_names = all_mpfile_names(mpfile_directory)
+    mpfile_dict = {mpfile_name[:-4]: MPfile(mpfile_name, mpfile_directory) for mpfile_name in mpfile_names}
+    return mpfile_dict
+
+
+def all_mpfile_names(mpfile_directory=MPFILE_DIRECTORY):
+    """ Returns list of all MPfile names (from filenames in mpfile_directory). """
+    mpfile_names = [fname for fname in os.listdir(mpfile_directory)
+                    if (fname.endswith(".txt")) and (not fname.startswith("$"))]
+    return mpfile_names
+
+
+class MPfile:
+    def __init__(self, mpfile_name, mpfile_directory=MPFILE_DIRECTORY):
+        mpfile_fullpath = os.path.join(mpfile_directory, mpfile_name)
+        if os.path.exists(mpfile_fullpath) and os.path.isfile(mpfile_fullpath):
+            with open(mpfile_fullpath) as mpfile:
+                lines = mpfile.readlines()
+            self.is_valid = True  # conditional on parsing in rest of __init__()
+        else:
+            print('>>>>> MP file \'' + mpfile_fullpath + '\' not found. MPfile object invalid.')
+            self.is_valid = False
+            return
+        lines = [line.split(";")[0] for line in lines]  # remove all comments.
+        lines = [line.strip() for line in lines]  # remove leading and trailing whitespace.
+
+        # ---------- Header section:
+        self.format_version = MPfile._directive_value(lines, '#VERSION')
+        if self.format_version != CURRENT_MPFILE_VERSION:
+            print(' >>>>> ERROR: ' + mpfile_name + ':  Version Error. MPfile object invalid.')
+            self.is_valid = False
+            return
+        self.number = self._directive_value(lines, '#MP')
+        self.name = self._directive_value(lines, '#NAME')
+        self.apparition = self._directive_value(lines, '#APPARITION')
+        self.motive = self._directive_value(lines, '#MOTIVE')
+        words = self._directive_words(lines, '#PERIOD')
+        self.period = float(words[0])
+        if len(words) >= 2:
+            self.period_certainty = words[1]
+        else:
+            self.period_certainty = '?'
+        self.priority = int(self._directive_words(lines, '#PRIORITY')[0])
+        self.date_range = self._directive_words(lines, '#DATE_RANGE')[:2]
+        words = self._directive_words(lines, '#MIN_PHASE')
+        self.min_phase = float(words[0])
+        self.an_min_phase = words[1]
+
+        # ---------- Observations (already made) section:
+        obs_values = [line[len('#OBS'):].strip() for line in lines if line.upper().startswith('#OBS')]
+        obs = [value.split() for value in obs_values]  # nested list
+
+        # ---------- MPEC (projectpluto.com) section:
+        mpec_dict_list = []
+        i_mpec_directive = None
+        for i, line in enumerate(lines):
+            if line.upper().startswith('#MPEC'):
+                i_mpec_directive = i
+                break
+        if not lines[i_mpec_directive + 1].startswith('Ephemerides'):
+            print(' >>>>> ERROR: ' + mpfile_name + ':  MPEC section appears to be missing')
+            self.is_valid = False
+            return
+        if (not lines[i_mpec_directive + 2].startswith(MPEC_REQUIRED_HEADER_START)) or\
+            (not (lines[i_mpec_directive + 3].startswith('----'))):
+            print(' >>>>> ERROR: ' + mpfile_name +
+                  ':  MPEC header wrong (wrong options selected when downloading MPEC?)')
+            self.is_valid = False
+            return
+        mpec_lines = lines[i_mpec_directive + 4:]
+        for line in mpec_lines:
+            mpec_dict = dict()
+            words = line.split()
+            mpec_dict['Date_utc'] = datetime(year=int(words[0]), month=int(words[1]), day=int(words[2]))
+            mpec_dict['RA'] = 15.0 * (float(words[3]) + float(words[4]) / 60.0 + float(words[5]) / 3600.0)
+            mpec_dict['Dec'] = float(words[6]) + float(words[7]) / 60.0 + float(words[8]) / 3600.0
+            mpec_dict['Delta'] = float(words[9])           # earth-MP, in AU
+            mpec_dict['R'] = float(words[10])              # sun-MP, in AU
+            mpec_dict['Elong'] = float(words[11])          # from sun, in degrees
+            mpec_dict['Phase'] = float(words[12])          # degrees
+            mpec_dict['PAB_longitude'] = float(words[13])  # "
+            mpec_dict['PAB_latitude'] = float(words[14])   # "
+            mpec_dict['V_mag'] = float(words[15])
+            mpec_dict['Motion'] = float(words[16])      # arcseconds per minute (0.50 normal)
+            mpec_dict['Motion_dir'] = float(words[17])  # motion direction, deg eastward from north
+            mpec_dict_list.append(mpec_dict)
+        self.mpec_dict_list = mpec_dict_list
+        self.df_mpec = pd.DataFrame(data=mpec_dict_list)
+        self.is_valid = True
+
+    @staticmethod
+    def _directive_value(lines, directive_string, default_value=None):
+        for line in lines:
+            if line.upper().startswith(directive_string):
+                return line[len(directive_string):].strip()
+        return default_value  # if directive absent.
+
+    def _directive_words(self, lines, directive_string):
+        value = self._directive_value(lines, directive_string, default_value=None)
+        if value is None:
+            return None
+        return value.split()
