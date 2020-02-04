@@ -1,6 +1,6 @@
 # Python core packages:
 import os
-from math import cos, pi, log10, log, floor
+from math import cos, pi, log10, log, floor, ceil
 from collections import Counter
 from datetime import datetime, timezone
 # from statistics import pstdev, mean
@@ -38,7 +38,7 @@ FOCUS_LENGTH_MAX_PCT_DEVIATION = 3.0
 MARGIN_RA_ZERO = 5  # in degrees, to handle RA ~zero; s/be well larger than images' height or width.
 
 # For color handling:
-FILTERS_FOR_COLOR_INDEX = ('R', 'I')
+FILTERS_FOR_MP_COLOR_INDEX = ('R', 'I')
 DEFAULT_MP_RI_COLOR = 0.2  # close to known Sloan mean (r-i) for MPs.
 
 # To screen observations:
@@ -66,8 +66,10 @@ MAX_R_MAG = 16
 MAX_G_UNCERT = 20  # millimagnitudes
 MAX_R_UNCERT = 20  # "
 MAX_I_UNCERT = 20  # "
-MIN_BV_COLOR = 0.20  # mags (difference)
-MAX_BV_COLOR = 1.10  # "
+# MIN_BV_COLOR = 0.20  # mags (difference)
+# MAX_BV_COLOR = 1.10  # "
+MIN_SLOAN_RI_COLOR = -0.4
+MAX_SLOAN_RI_COLOR = 0.8
 
 
 _____ATLAS_BASED_WORKFLOW________________________________________________ = 0
@@ -149,7 +151,7 @@ def assess(min_mp_photometry_files=MIN_MP_PHOTOMETRY_FILES):
 
     # Verify that all required FITS file types exist within this directory and are valid:
     filter_counter = Counter()
-    filters_to_use = [MP_PHOTOMETRY_FILTER] + list(FILTERS_FOR_COLOR_INDEX)
+    filters_to_use = [MP_PHOTOMETRY_FILTER] + list(FILTERS_FOR_MP_COLOR_INDEX)
     filenames_to_use = []
     for filename in fits_filenames:
         fits = FITS(this_directory, '', filename)
@@ -166,8 +168,8 @@ def assess(min_mp_photometry_files=MIN_MP_PHOTOMETRY_FILES):
     for filter in filter_counter.keys():
         if filter == MP_PHOTOMETRY_FILTER:
             filter_category = 'MAIN PHOTOMETRIC filter'
-        elif filter in FILTERS_FOR_COLOR_INDEX:
-            filter_category = 'for COLOR INDEX'
+        elif filter in FILTERS_FOR_MP_COLOR_INDEX:
+            filter_category = 'for MP COLOR INDEX'
         else:
             filter_category = '(ignored)'
         print('   ' + str(filter_counter[filter]), 'in filter', filter + '. ', filter_category)
@@ -291,10 +293,13 @@ def assess(min_mp_photometry_files=MIN_MP_PHOTOMETRY_FILES):
              ';#IMAGE  Obj-0000-V           ; to omit FITS image Obj-0000-V.fts specifically',
              (';#MIN_R_MAG ' + str(MIN_R_MAG)).ljust(30) + '; default=' + str(MIN_R_MAG),
              (';#MAX_R_MAG ' + str(MAX_R_MAG)).ljust(30) + '; default=' + str(MAX_R_MAG),
-             (';#MIN_BV_COLOR ' + str(MIN_BV_COLOR)).ljust(30) + '; default=' + str(MIN_BV_COLOR),
-             (';#MAX_BV_COLOR ' + str(MAX_BV_COLOR)).ljust(30) + '; default=' + str(MAX_BV_COLOR),
+             (';#MAX_CATALOG_DR_MMAG ' + str(MAX_R_UNCERT)).ljust(30) + '; default=' + str(MAX_R_UNCERT),
+             (';#MIN_SLOAN_RI_COLOR ' + str(MIN_SLOAN_RI_COLOR)).ljust(30) +
+             '; default=' + str(MIN_SLOAN_RI_COLOR),
+             (';#MAX_SLOAN_RI_COLOR ' + str(MAX_SLOAN_RI_COLOR)).ljust(30) +
+             '; default=' + str(MAX_SLOAN_RI_COLOR),
              ';',
-             ';===== Enter before do_mp_phot(): ==================================='
+             ';===== Enter before do_mp_phot(): ===================================',
              ';----- OPTIONS for regression model:',
              (';#FIT_TRANSFORM ' + str(DEFAULT_MODEL_OPTIONS['fit_transform'])).ljust(30) + '; default='
              + str(DEFAULT_MODEL_OPTIONS['fit_transform']) + ' or yes, False, No  (case-insensitive)',
@@ -333,7 +338,7 @@ def make_dfs():
     # Get all relevant FITS filenames, make lists of FITS and Image objects (per photrix):
     fits_names = get_fits_filenames(this_directory)
     fits_list = [FITS(this_directory, '', fits_name) for fits_name in fits_names]  # FITS objects
-    filters_to_use = [MP_PHOTOMETRY_FILTER] + list(FILTERS_FOR_COLOR_INDEX)
+    filters_to_use = [MP_PHOTOMETRY_FILTER] + list(FILTERS_FOR_MP_COLOR_INDEX)
     fits_list = [fits for fits in fits_list if fits.filter in filters_to_use]
     image_list = [Image(fits_object) for fits_object in fits_list]  # Image objects
 
@@ -377,7 +382,7 @@ def make_dfs():
     # Add apertures for all comps within all Image objects:
     df_radec = refcat2.selected_columns(['RA_deg', 'Dec_deg'])
     for image in image_list:
-        if image.fits.filter in [MP_PHOTOMETRY_FILTER] + list(FILTERS_FOR_COLOR_INDEX):
+        if image.fits.filter in [MP_PHOTOMETRY_FILTER] + list(FILTERS_FOR_MP_COLOR_INDEX):
             for i_comp in df_radec.index:
                 ra = df_radec.loc[i_comp, 'RA_deg']
                 dec = df_radec.loc[i_comp, 'Dec_deg']
@@ -568,8 +573,8 @@ def do_mp_phot():
 
     # Get MP color index, if images present for filter pair (R, I).
     mp_color_ri, source_string = get_mp_color_index(df_obs_all, df_images_all, df_comps_all)
-    print('MP color index (r-i) =', '{0:.3f}'.format(mp_color_ri))
-    log_file.write('MP color index (r-i) = ' + '{0:.3f}'.format(mp_color_ri))
+    print('MP color index (r-i) =', '{0:.3f}'.format(mp_color_ri), 'from', source_string)
+    log_file.write('MP color index (r-i) = ' + '{0:.3f}'.format(mp_color_ri) + ' from ' + source_string)
 
     # Make df_full: all data (obs, comp, image) only from images that...
     #     (1) are taken in main photometric filter AND (2) have a valid MP obs:
@@ -600,9 +605,9 @@ def do_mp_phot():
     user_selections = read_user_selections()
     apply_user_selections(df_model, user_selections)  # modifies in-place.
 
-    # Sync the comp and image dataframes (esp. user selections); may be needed later for plotting:
-    df_model_comps, df_model_images = sync_comps_and_images(df_model, df_comps_all, df_images_all)
-    print(str(len(df_model_comps)), 'comps retained in model.')
+    # # Sync the comp and image dataframes (esp. user selections); may be needed later for plotting:
+    # df_model_comps, df_model_images = sync_comps_and_images(df_model, df_comps_all, df_images_all)
+    # print(str(len(df_model_comps)), 'comps retained in model.')
 
     # # Make data diagnostics for plotting:
     # df_model = make_diagnostics(df_model)
@@ -736,7 +741,94 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
     y_labels = df_y.index.values
     make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_values, y_labels)
 
-    # ################ FIGURE 3: Residual plots:
+    # ################ FIGURE 3: Time plots:
+    fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(15, 9))  # (width, height) in "inches"
+    fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
+    fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
+    fig.suptitle('MP ' + mp_string + '   AN ' + an_string + '     ::     catalog and time plots',
+                 color='darkblue', fontsize=20)
+    fig.canvas.set_window_title('Catalog and Time Plots: ' + 'MP ' + mp_string + '   AN ' + an_string)
+    subplot_text = 'rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
+    fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12, color='dimgray')
+
+    # Catalog mag uncertainty plot (comps only, one point per comp, x=cat r mag, y=cat r uncertainty):
+    ax = axes[0, 0]
+    make_labels_9_subplots(ax, 'Catalog Mag Uncertainty (dr)', 'Catalog Mag (r)', 'mMag', '',
+                           zero_line=False)
+    ax.scatter(x=df_plot_comp_obs['r'], y=df_plot_comp_obs['dr'], s=14, alpha=0.3, color='black')
+
+    # Catalog color plot (comps only, one point per comp, x=cat r mag, y=cat color (r-i)):
+    ax = axes[0, 1]
+    make_labels_9_subplots(ax, 'Catalog Color Index', 'Catalog Mag (r)', 'CI Mag', '', zero_line=False)
+    ax.scatter(x=df_plot_comp_obs['r'], y=(df_plot_comp_obs['r'] - df_plot_comp_obs['i']),
+               s=14, alpha=0.3, color='black')
+    ax.scatter(x=model.df_mp_mags['MP_Mags'], y=len(model.df_mp_mags) * [mp_color_ri],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)
+
+    # Inst Mag plot (comps only, one point per obs, x=cat r mag, y=InstMagSigma):
+    ax = axes[0, 2]
+    make_labels_9_subplots(ax, 'Instrument Magnitude Uncertainty', 'Catalog Mag (r)', 'mMag', '',
+                           zero_line=True)
+    ax.scatter(x=df_plot_comp_obs['r'], y=df_plot_comp_obs['InstMagSigma'], s=14, alpha=0.3, color='black')
+    ax.scatter(x=model.df_mp_mags['MP_Mags'], y=model.df_mp_mags['InstMagSigma'],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)
+
+    # Cirrus plot (comps only, one point per image, x=JD_fract, y=Image Effect):
+    ax = axes[1, 0]
+    make_labels_9_subplots(ax, 'Image effect (cirrus plot)', xlabel_jd, 'mMag', '', zero_line=False)
+    df_this_plot = pd.merge(df_image_effect, df_plot_comp_obs.loc[:, ['FITSfile', 'JD_fract']],
+                            how='left', on='FITSfile', sort=False).drop_duplicates()
+    ax.scatter(x=df_this_plot['JD_fract'], y=1000.0 * df_this_plot['ImageEffect'],
+               s=14, alpha=1, color='black')
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
+    ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
+
+    # SkyADU plot (comps only, one point per obs: x=JD_fract, y=SkyADU):
+    ax = axes[1, 1]
+    make_labels_9_subplots(ax, 'SkyADU vs time', xlabel_jd, 'ADU', '', zero_line=False)
+    ax.scatter(x=df_plot_comp_obs['JD_fract'], y=df_plot_comp_obs['SkyADU'],
+               s=14, alpha=0.3, color='black')
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
+    ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
+
+    # FWHM plot (comps only, one point per obs: x=JD_fract, y=FWHM):
+    ax = axes[1, 2]
+    make_labels_9_subplots(ax, 'FWHM vs time', xlabel_jd, 'FWHM (pixels)', '', zero_line=False)
+    ax.scatter(x=df_plot_comp_obs['JD_fract'], y=df_plot_comp_obs['FWHM'],
+               s=14, alpha=0.3, color='black')
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
+    ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
+
+    # InstMagSigma plot (comps only, one point per obs; x=JD_fract, y=InstMagSigma):
+    ax = axes[2, 0]
+    make_labels_9_subplots(ax, 'Inst Mag Sigma vs time', xlabel_jd, 'mMag', '', zero_line=False)
+    ax.scatter(x=df_plot_comp_obs['JD_fract'], y=1000.0 * df_plot_comp_obs['InstMagSigma'],
+               s=14, alpha=0.3, color='black')
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
+    ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
+
+    # Airmass plot (comps only, one point per obs; x=JD_fract, y=Airmass):
+    ax = axes[2, 1]
+    make_labels_9_subplots(ax, 'Airmass vs time', xlabel_jd, 'Airmass', '', zero_line=False)
+    ax.scatter(x=df_plot_comp_obs['JD_fract'], y=df_plot_comp_obs['Airmass'],
+               s=14, alpha=0.3, color='black')
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
+    ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
+
+    # MP Magnitude plot (comps only, one point per obs; x=JD_fract, y=Airmass):
+    ax = axes[2, 2]
+    make_labels_9_subplots(ax, 'MP Lightcurve for this session', xlabel_jd, 'Mag (r)', '', zero_line=False)
+    ax.errorbar(x=model.df_mp_mags['JD_mid'] - jd_floor, y=model.df_mp_mags['MP_Mags'],
+                yerr=model.df_mp_mags['InstMagSigma'], fmt='none', color='black',
+                linewidth=0.5, capsize=3, capthick=0.5, zorder=-100)
+    ax.scatter(x=model.df_mp_mags['JD_mid'] - jd_floor, y=model.df_mp_mags['MP_Mags'],
+               s=14, alpha=1, color='black')
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
+    ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
+
+    plt.show()
+
+    # ################ FIGURE 4: Residual plots:
     fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(15, 9))  # (width, height) in "inches"
     fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
     fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
@@ -749,52 +841,15 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
         (12 * ' ') + ' rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
     fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12, color='dimgray')
 
-    # #################################################################################################
-    # Keep the following 2 (commented out) "Canopus plots" for full-screen plots as demos for SAS talk.
-
-    # # "CANOPUS plot" (comps only, one point per obs:
-    # #     x=catalog r mag, y=obs InstMag(r) adjusted for extinction and transform):
-    # ax = axes[0, 0]
-    # make_labels_9_subplots(ax, 'Adjusted CANOPUS (all images)',
-    #                        'Catalog Mag (r)', 'Image-adjusted InstMag (r)', zero_line=False)
-    # df_canopus = df_plot_comp_obs.loc[:,
-    #              ['SourceID', 'Airmass', 'r', 'i', 'FITSfile', 'JD_fract', 'InstMag']]
-    # df_canopus['CI'] = df_canopus['r'] - df_canopus['i']
-    # df_canopus = pd.merge(df_canopus, df_image_effect, how='left', on='FITSfile', sort=False)
-    # extinction_adjustments = extinction * df_canopus['Airmass']
-    # transform_adjustments = transform * df_canopus['CI']
-    # image_adjustments = df_canopus['ImageEffect']
-    # jd_adjustments = jd_coefficient * df_canopus['JD_fract']
-    # sum_adjustments = extinction_adjustments + transform_adjustments + image_adjustments + jd_adjustments
-    # adjusted_instmags = df_canopus['InstMag'] - sum_adjustments
-    # df_canopus['AdjInstMag'] = adjusted_instmags
-    # # ax.scatter(x=df_canopus['r'], y=adjusted_instmags, alpha=0.6, color='darkblue')
-    # ax.scatter(x=df_canopus['r'], y=adjusted_instmags, alpha=0.6, color=comp_color)
-    # # first_comp_id = df_canopus.iloc[0, 0]
-    # # df_first_comp = df_canopus.loc[df_canopus['SourceID'] == first_comp_id, :]
-    # draw_x_line(ax, user_selections['min_r_mag'])
-    # draw_x_line(ax, user_selections['min_r_mag'])
-    #
-    # # "CANOPUS plot" (comps only, one point per obs:
-    # #     x=catalog r mag adjusted for extinction and transform, y=obs InstMag(r)):
-    # ax = axes[0, 1]
-    # make_labels_9_subplots(ax, 'Adjusted CANOPUS DIFF plot (all images)',
-    #                        'Catalog Mag (r)', 'Adjusted InstMag - r(cat)', zero_line=False)
-    # # Using data from previous plot:
-    # ax.scatter(x=df_canopus['r'], y=(adjusted_instmags - df_canopus['r']), alpha=0.6, color=comp_color)
-    # # ax.scatter(x=df_canopus['r'], y=adjusted_instmags, alpha=0.6, color='darkblue')
-    # draw_x_line(ax, user_selections['min_r_mag'])
-    # draw_x_line(ax, user_selections['min_r_mag'])
-    # #################################################################################################
-
     # Comp residual plot (comps only, one point per obs: x=catalog r mag, y=model residual):
     ax = axes[0, 0]
     make_labels_9_subplots(ax, 'Model residual vs r (catalog)',
                            'Catalog Mag (r)', 'mMag',
                            '', zero_line=True)
-    ax.scatter(x=df_plot_comp_obs['r'],
-               y=1000.0 * df_plot_comp_obs['Residual'],
+    ax.scatter(x=df_plot_comp_obs['r'], y=1000.0 * df_plot_comp_obs['Residual'],
                s=14, alpha=0.3, color='black')
+    ax.scatter(x=model.df_mp_mags['MP_Mags'], y=len(model.df_mp_mags) * [0.0],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)
     draw_x_line(ax, user_selections['min_r_mag'])
     draw_x_line(ax, user_selections['min_r_mag'])
 
@@ -803,18 +858,20 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
     make_labels_9_subplots(ax, 'Model residual vs raw Instrument Mag',
                            'Raw instrument mag', 'mMag',
                            '', zero_line=True)
-    ax.scatter(x=df_plot_comp_obs['InstMag'],
-               y=1000.0 * df_plot_comp_obs['Residual'],
+    ax.scatter(x=df_plot_comp_obs['InstMag'], y=1000.0 * df_plot_comp_obs['Residual'],
                s=14, alpha=0.3, color='black')
+    ax.scatter(x=model.df_mp_mags['InstMag'], y=len(model.df_mp_mags) * [0.0],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)
 
     # Comp residual plot (comps only, one point per obs: x=catalog r-i color, y=model residual):
     ax = axes[0, 2]
     make_labels_9_subplots(ax, 'Model residual vs Color Index (cat)',
                            'Catalog Color (r-i)', 'mMag',
                            '', zero_line=True)
-    ax.scatter(x=(df_plot_comp_obs['r'] - df_plot_comp_obs['i']),
-               y=1000.0 * df_plot_comp_obs['Residual'],
+    ax.scatter(x=(df_plot_comp_obs['r'] - df_plot_comp_obs['i']), y=1000.0 * df_plot_comp_obs['Residual'],
                s=14, alpha=0.3, color='black')
+    ax.scatter(x=[mp_color_ri], y=[0.0],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)
 
     # Comp residual plot (comps only, one point per obs: x=Julian Date fraction, y=model residual):
     ax = axes[1, 0]
@@ -874,89 +931,131 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
                y=1000.0 * df_plot_comp_obs['Residual'],
                s=14, alpha=0.3, color='black')
 
-    plt.show()
+    # ################ FIGURE(S) 5: Variability plots:
+    # Several comps on a subplot, vs JD, normalized by (minus) the mean of all other comps' responses.
+    # Make df_offsets (one row per obs, at first with only raw offsets):
+    dict_list = []
+    for comp_id in comp_ids:
+        is_comp_id = df_plot_comp_obs['SourceID'] == comp_id
+        serials = df_plot_comp_obs.loc[is_comp_id, 'Serial']
+        jd_fracts = df_plot_comp_obs.loc[is_comp_id, 'JD_fract']
+        inst_mags = df_plot_comp_obs.loc[is_comp_id, 'InstMag']
+        r_catmag = df_plot_comp_obs.loc[is_comp_id, 'r']
+        color_ri = r_catmag - df_plot_comp_obs.loc[is_comp_id, 'i']
+        raw_offsets = inst_mags - r_catmag - transform * color_ri  # pd Series
+        for i in range(len(serials)):
+            comp_dict = dict()
+            comp_dict['SourceID'] = comp_id
+            comp_dict['Serial'] = serials.iloc[i]
+            comp_dict['JD_fract'] = jd_fracts.iloc[i]
+            comp_dict['RawOffset'] = raw_offsets.iloc[i]
+            dict_list.append(comp_dict)
+    df_comp_offsets = pd.DataFrame(data=dict_list)
+    df_comp_offsets.index = df_comp_offsets['Serial']
 
-    # ################ FIGURE 4: Time plots:
-    fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(15, 9))  # (width, height) in "inches"
-    fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
-    fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
-    fig.suptitle('MP ' + mp_string + '   AN ' + an_string + '     ::     catalog and time plots',
-                 color='darkblue', fontsize=20)
-    fig.canvas.set_window_title('Catalog and Time Plots: ' + 'MP ' + mp_string + '   AN ' + an_string)
-    subplot_text = 'rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
-    fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12, color='dimgray')
-    # gs = axes[1, 0].get_gridspec()
-    # for row in [1, 2]:
-    #     for col in range(3):
-    #         axes[row, col].remove()
+    # Normalize offsets by subtracting mean of *other* comps' offsets at each JD_fract:
+    all_jd_fracts = df_comp_offsets['JD_fract'].copy().drop_duplicates().sort_values()
+    df_comp_offsets['NormalizedOffset'] = None
+    df_comp_offsets['LatestNormalizedOffset'] = None
+    for comp_id in comp_ids:
+        is_comp_id = (df_comp_offsets['SourceID'] == comp_id)
+        latest_jd_fract = all_jd_fracts.iloc[0]
+        for jd_fract in all_jd_fracts:
+            is_this_jd_fract = (df_comp_offsets['JD_fract'] == jd_fract)
+            mean_other_offsets = df_comp_offsets.loc[(~is_comp_id) & is_this_jd_fract, 'RawOffset'].mean()
+            is_this_obs = is_comp_id & is_this_jd_fract
+            this_raw_offset = df_comp_offsets.loc[is_this_obs, 'RawOffset'].mean()
+            normalized_offset = this_raw_offset - mean_other_offsets
+            df_comp_offsets.loc[is_this_obs, 'NormalizedOffset'] = normalized_offset
+            if normalized_offset is not None:
+                latest_jd_fract = jd_fract
+        is_latest_jd_fract = df_comp_offsets['JD_fract'] == latest_jd_fract
+        latest_normalized_offset = df_comp_offsets.loc[is_comp_id & is_latest_jd_fract, 'NormalizedOffset']
+        df_comp_offsets.loc[is_comp_id, 'LatestNormalizedOffset'] = latest_normalized_offset.iloc[0]
+    df_comp_offsets = df_comp_offsets.sort_values(by=['LatestNormalizedOffset', 'SourceID', 'JD_fract'],
+                                                  ascending=[False, True, True])
+    df_plot_index = df_comp_offsets[['SourceID']].drop_duplicates()
+    df_plot_index['PlotIndex'] = range(len(df_plot_index))
+    df_comp_offsets = pd.merge(left=df_comp_offsets, right=df_plot_index,
+                               how='left', on='SourceID', sort=False)
 
-    # Catalog mag uncertainty plot (comps only, one point per comp, x=cat r mag, y=cat r uncertainty):
-    ax = axes[0, 0]
-    make_labels_9_subplots(ax, 'Catalog Mag Uncertainty', xlabel_jd, 'mMag', '', zero_line=False)
-
-    # Catalog color plot (comps only, one point per comp, x=cat r mag, y=cat color (r-i)):
-    ax = axes[0, 1]
-    make_labels_9_subplots(ax, 'Catalog Color Index', xlabel_jd, 'mMag', '', zero_line=False)
-
-    # Inst Mag plot (comps only, one point per obs, x=cat r mag, y=InstMagSigma):
-    ax = axes[0, 2]
-    make_labels_9_subplots(ax, 'Instrument Magnitude', xlabel_jd, 'mMag', '', zero_line=False)
-
-    # Cirrus plot (comps only, one point per image, x=JD_fract, y=Image Effect):
-    ax = axes[1, 0]
-    make_labels_9_subplots(ax, 'Image effect (cirrus plot)', xlabel_jd, 'mMag', '', zero_line=False)
-    df_this_plot = pd.merge(df_image_effect, df_plot_comp_obs.loc[:, ['FITSfile', 'JD_fract']],
-                            how='left', on='FITSfile', sort=False).drop_duplicates()
-    ax.scatter(x=df_this_plot['JD_fract'], y=1000.0 * df_this_plot['ImageEffect'],
-               s=14, alpha=1, color='black')
-    ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
-    ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
-
-    # SkyADU plot (comps only, one point per obs: x=JD_fract, y=SkyADU):
-    ax = axes[1, 1]
-    make_labels_9_subplots(ax, 'SkyADU vs time', xlabel_jd, 'ADU', '', zero_line=False)
-    ax.scatter(x=df_plot_comp_obs['JD_fract'], y=df_plot_comp_obs['SkyADU'],
-               s=14, alpha=0.3, color='black')
-    ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
-    ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
-
-    # FWHM plot (comps only, one point per obs: x=JD_fract, y=FWHM):
-    ax = axes[1, 2]
-    make_labels_9_subplots(ax, 'FWHM vs time', xlabel_jd, 'FWHM (pixels)', '', zero_line=False)
-    ax.scatter(x=df_plot_comp_obs['JD_fract'], y=df_plot_comp_obs['FWHM'],
-               s=14, alpha=0.3, color='black')
-    ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
-    ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
-
-    # InstMagSigma plot (comps only, one point per obs; x=JD_fract, y=InstMagSigma):
-    ax = axes[2, 0]
-    make_labels_9_subplots(ax, 'Inst Mag Sigma vs time', xlabel_jd, 'mMag', '', zero_line=False)
-    ax.scatter(x=df_plot_comp_obs['JD_fract'], y=1000.0 * df_plot_comp_obs['InstMagSigma'],
-               s=14, alpha=0.3, color='black')
-    ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
-    ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
-
-    # Airmass plot (comps only, one point per obs; x=JD_fract, y=Airmass):
-    ax = axes[2, 1]
-    make_labels_9_subplots(ax, 'Airmass vs time', xlabel_jd, 'Airmass', '', zero_line=False)
-    ax.scatter(x=df_plot_comp_obs['JD_fract'], y=df_plot_comp_obs['Airmass'],
-               s=14, alpha=0.3, color='black')
-    ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
-    ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
-
-    # MP Magnitude plot (comps only, one point per obs; x=JD_fract, y=Airmass):
-    ax = axes[2, 2]
-    make_labels_9_subplots(ax, 'MP Lightcurve for this session', xlabel_jd, 'Mag (r)', '', zero_line=False)
-    ax.scatter(x=model.df_mp_mags['JD_mid'] - jd_floor, y=model.df_mp_mags['MP_Mags'],
-               s=14, alpha=1, color='black')
-    ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
-    ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
-
-    # axbig = fig.add_subplot(gs[1:, 1:])
-    # axbig.set_title('MP Target Lightcurve', loc='center', pad=-3)  # pad in points
-    # ax.set_xlabel(xlabel_jd, labelpad=-29)  # labelpad in points
-    # ax.set_ylabel('Mag (r)', labelpad=-5)  # "
-    plt.show()
+    # Plot the normalized offsets vs JD for each comp_id, 4 comp_ids to a subplot:
+    n_cols, n_rows = 3, 3
+    n_plots_per_figure = n_cols * n_rows
+    n_comps_per_plot = 4
+    n_plots = ceil(n_comps / n_comps_per_plot)
+    plot_colors = ['r', 'g', 'm', 'b']
+    n_figures = ceil(n_plots / n_plots_per_figure)
+    jd_range = max(all_jd_fracts) - min(all_jd_fracts)
+    jd_low_limit = min(all_jd_fracts) - 0.05 * jd_range
+    jd_high_limit = max(all_jd_fracts) + 0.40 * jd_range
+    normalized_offset_mmag = 1000.0 * df_comp_offsets['NormalizedOffset']
+    offset_range = max(normalized_offset_mmag) - min(normalized_offset_mmag)
+    offset_low_limit = min(normalized_offset_mmag) - 0.05 * offset_range
+    offset_high_limit = max(normalized_offset_mmag) + 0.05 * offset_range
+    plotted_comp_ids = []
+    for i_figure in range(n_figures):
+        n_plots_remaining = n_plots - (i_figure * n_plots_per_figure)
+        n_plots_this_figure = min(n_plots_remaining, n_plots_per_figure)
+        if n_plots_this_figure >= 1:
+            # Start new Figure:
+            fig, axes = plt.subplots(ncols=n_cols, nrows=n_rows, figsize=(15, 9))
+            fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
+            fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
+            fig.suptitle('MP ' + mp_string + '   AN ' + an_string + '     ::     Comp Variability Page ' +
+                         str(i_figure + 1) + ' of ' + str(n_figures),
+                         color='darkblue', fontsize=20)
+            fig.canvas.set_window_title(
+                'Comp Variability Plots: ' + 'MP ' + mp_string + '   AN ' + an_string)
+            subplot_text = str(n_comps) + ' comps    ' + \
+                'sigma=' + '{0:.0f}'.format(1000.0 * sigma) + ' mMag' + (12 * ' ') + \
+                ' rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
+            fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12,
+                     color='dimgray')
+            for i_plot in range(n_plots_this_figure):
+                first_index_in_plot = i_figure * n_plots_per_figure + i_plot
+                i_col = i_plot % n_cols
+                i_row = int(floor(i_plot / n_cols))
+                ax = axes[i_row, i_col]
+                make_labels_9_subplots(ax, 'Comp Variability plot', xlabel_jd, 'mMag', '', zero_line=True)
+                # Make a scatter plot for each chosen comp:
+                scatterplots = []
+                legend_labels = []
+                for i_plot_comp in range(n_comps_per_plot):
+                    i_plot_index = first_index_in_plot + i_plot_comp * n_plots
+                    if i_plot_index <= n_comps - 1:
+                        is_this_plot = (df_comp_offsets['PlotIndex'] == i_plot_index)
+                        x = df_comp_offsets.loc[is_this_plot, 'JD_fract']
+                        y = 1000.0 * df_comp_offsets.loc[is_this_plot, 'NormalizedOffset']
+                        ax.plot(x, y, linewidth=2, alpha=0.8, color=plot_colors[i_plot_comp])
+                        sc = ax.scatter(x=x, y=y, s=24, alpha=0.8, color=plot_colors[i_plot_comp])
+                        scatterplots.append(sc)
+                        this_comp_id = (df_comp_offsets.loc[is_this_plot, 'SourceID']).iloc[0]
+                        # print('i_figure ' + str(i_figure) +\
+                        #       '  i_plot ' + str(i_plot) +\
+                        #       '  i_plot_comp ' + str(i_plot_comp) +\
+                        #       '  i_plot_index ' + str(i_plot_index) +\
+                        #       '  this_comp_id ' + this_comp_id)  # (debug)
+                        legend_labels.append(this_comp_id)
+                        plotted_comp_ids.append(this_comp_id)
+                ax.set_xlim(jd_low_limit, jd_high_limit)
+                ax.set_ylim(offset_low_limit, offset_high_limit)
+                ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
+                ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
+                ax.legend(scatterplots, legend_labels, loc='upper right')
+            # Remove any empty subplots from this (last) Figure:
+            for i_plot in range(n_plots_this_figure, n_plots_per_figure):
+                i_col = i_plot % n_cols
+                i_row = int(floor(i_plot / n_cols))
+                ax = axes[i_row, i_col]
+                ax.remove()
+        plt.show()
+    # Verify that all comps were plotted exactly once (debug):
+    all_comps_plotted_once = (sorted(comp_ids) == sorted(plotted_comp_ids))
+    print('all comp ids were plotted exactly once = ', str(all_comps_plotted_once))
+    if not all_comps_plotted_once:
+        print('comp ids plotted more than once',
+              [item for item, count in Counter(plotted_comp_ids).items() if count > 1])
 
 
 def write_canopus_file(model):
@@ -990,11 +1089,12 @@ class SessionModel:
             fit_jd: True iff linear time term (zero-point creep in time seen in plot of "cirrus"
                    random-effect term). [boolean]
         """
-        self.df_model = df_model.copy()
-        self.df_model_comps_only = self.df_model.loc[(df_model['Type'] == 'Comp'), :].copy()
-        self.df_model_mps_only = self.df_model.loc[(df_model['Type'] == 'MP'), :].copy()
+        self.df_model = df_model
         self.mp_ci = mp_color_ri
         self.state = state
+        self.df_used = df_model.copy().loc[df_model['UseInModel'], :]  # only observations used in model.
+        self.df_used_comps_only = self.df_used.loc[(self.df_used['Type'] == 'Comp'), :].copy()
+        self.df_used_mps_only = self.df_used.loc[(self.df_used['Type'] == 'MP'), :].copy()
 
         defaults = DEFAULT_MODEL_OPTIONS
         self.fit_transform = options_dict.get('fit_transform', defaults['fit_transform'])
@@ -1015,7 +1115,6 @@ class SessionModel:
 
         self._prep_and_do_regression()
         self.df_mp_mags = self._calc_mp_mags()
-        self._build_output()
 
     def _prep_and_do_regression(self):
         """ Using photrix.util.MixedModelFit class (which wraps statsmodels.MixedLM.from_formula() etc).
@@ -1024,10 +1123,10 @@ class SessionModel:
             This function uses comp data only (no minor planet data).
         :return: [None]
         """
-        self.df_model_comps_only['CI'] = self.df_model_comps_only['r'] - self.df_model_comps_only['i']
+        self.df_used_comps_only['CI'] = self.df_used_comps_only['r'] - self.df_used_comps_only['i']
 
         # Initiate dependent-variable offset, which will aggregate all such offset terms:
-        dep_var_offset = self.df_model_comps_only['r'].copy()  # *copy* CatMag, or it will be damaged
+        dep_var_offset = self.df_used_comps_only['r'].copy()  # *copy* CatMag, or it will be damaged
 
         # Build fixed-effect (x) variable list and construct dep-var offset:
         fixed_effect_var_list = []
@@ -1035,14 +1134,14 @@ class SessionModel:
             fixed_effect_var_list.append('CI')
         else:
             self.transform_fixed = TRANSFORM_CLEAR_SR_SR_SI
-            dep_var_offset += self.transform_fixed * self.df_model_comps_only['CI']
+            dep_var_offset += self.transform_fixed * self.df_used_comps_only['CI']
             print(' >>>>> Transform (Color Index) not fit: value fixed at',
                   '{0:.3f}'.format(self.transform_fixed))
         if self.fit_extinction:
             fixed_effect_var_list.append('Airmass')
         else:
             extinction = self.state['extinction']['Clear']
-            dep_var_offset += extinction * self.df_model_comps_only['Airmass']
+            dep_var_offset += extinction * self.df_used_comps_only['Airmass']
             print(' >>>>> Extinction (Airmass) not fit: value fixed at',
                   '{0:.3f}'.format(extinction))
         if self.fit_vignette:
@@ -1058,10 +1157,10 @@ class SessionModel:
         random_effect_var_name = 'FITSfile'  # cirrus effect is per-image
 
         # Build dependent (y) variable:
-        self.df_model_comps_only[self.dep_var_name] = self.df_model_comps_only['InstMag'] - dep_var_offset
+        self.df_used_comps_only[self.dep_var_name] = self.df_used_comps_only['InstMag'] - dep_var_offset
 
         # Execute regression:
-        self.mm_fit = MixedModelFit(data=self.df_model_comps_only,
+        self.mm_fit = MixedModelFit(data=self.df_used_comps_only,
                                     dep_var=self.dep_var_name,
                                     fixed_vars=fixed_effect_var_list,
                                     group_var=random_effect_var_name)
@@ -1069,28 +1168,25 @@ class SessionModel:
 
     def _calc_mp_mags(self):
         bogus_cat_mag = 0.0  # we'll need this below, to correct raw predictions.
-        self.df_model_mps_only['CatMag'] = bogus_cat_mag  # totally bogus local value, corrected for later.
-        self.df_model_mps_only['CI'] = self.mp_ci
-        raw_predictions = self.mm_fit.predict(self.df_model_mps_only, include_random_effect=True)
+        self.df_used_mps_only['CatMag'] = bogus_cat_mag  # totally bogus local value, corrected for later.
+        self.df_used_mps_only['CI'] = self.mp_ci
+        raw_predictions = self.mm_fit.predict(self.df_used_mps_only, include_random_effect=True)
 
         # Compute dependent-variable offsets for MP:
-        dep_var_offsets = pd.Series(len(self.df_model_mps_only) * [0.0], index=raw_predictions.index)
+        dep_var_offsets = pd.Series(len(self.df_used_mps_only) * [0.0], index=raw_predictions.index)
         if self.fit_transform is False:
-            dep_var_offsets += self.transform_fixed * self.df_model_mps_only['CI']
+            dep_var_offsets += self.transform_fixed * self.df_used_mps_only['CI']
         if self.fit_extinction is False:
-            dep_var_offsets += self.state['extinction']['Clear'] * self.df_model_mps_only['Airmass']
+            dep_var_offsets += self.state['extinction']['Clear'] * self.df_used_mps_only['Airmass']
 
         # Extract best MP mag (in Sloan r):
-        mp_mags = self.df_model_mps_only['InstMag'] \
+        mp_mags = self.df_used_mps_only['InstMag'] \
             - dep_var_offsets - raw_predictions + bogus_cat_mag  # correct for use of bogus cat mag.
         df_mp_mags = pd.DataFrame({'MP_Mags': mp_mags}, index=list(mp_mags.index))
         df_mp_mags = pd.merge(left=df_mp_mags,
-                              right=self.df_model_mps_only.loc[:, ['JD_mid', 'InstMagSigma']],
+                              right=self.df_used_mps_only.loc[:, ['JD_mid', 'InstMag', 'InstMagSigma']],
                               how='left', left_index=True, right_index=True, sort=False)
         return df_mp_mags
-
-    def _build_output(self):  # (this may not be needed)
-        pass
 
 
 _____SUPPORT________________________________________________ = 0
@@ -1298,20 +1394,20 @@ def get_mp_color_index(df_obs_all, df_images_all, df_comps_all):
         for this_comp_id in ci_comp_list:
             fit_dict = dict()
             fit_dict['comp_id'] = this_comp_id
-            fit_dict['dep_var'] = df_comps_all.loc[this_comp_id, 'r'] - df_comps_all.loc[this_comp_id, 'i']
+            fit_dict['CI'] = df_comps_all.loc[this_comp_id, 'r'] - df_comps_all.loc[this_comp_id, 'i']
 
             is_comp_id = (df_fit_obs['SourceID'] == this_comp_id)
             is_comp_id_r = is_comp_id & is_r_row
             is_comp_id_i = is_comp_id & is_i_row
             comp_id_mean_r_instmag = df_fit_obs.loc[is_comp_id_r, 'InstMag'].mean()  # averaged over images.
             comp_id_mean_i_instmag = df_fit_obs.loc[is_comp_id_i, 'InstMag'].mean()  # "
-            fit_dict['indep_var'] = comp_id_mean_r_instmag - comp_id_mean_i_instmag
+            fit_dict['InstMagDiff'] = comp_id_mean_r_instmag - comp_id_mean_i_instmag
             fit_dict_list.append(fit_dict)
         df_fit = pd.DataFrame(data=fit_dict_list)
         df_fit.index = list(df_fit['comp_id'])
 
         # Perform regression fit:
-        result = smf.ols(formula='dep_var ~ indep_var', data=df_fit).fit()
+        result = smf.ols(formula='CI ~ InstMagDiff', data=df_fit).fit()
         # print(result.summary())
         # fig = plt.figure(figsize=(12, 8))
         # fig = sm.graphics.plot_regress_exog(result, "indep_var", fig=fig)
@@ -1325,13 +1421,13 @@ def get_mp_color_index(df_obs_all, df_images_all, df_comps_all):
                                         (df_obs_all['Type'] == 'MP'), 'InstMag'].iloc[0]
             if df_images_all.loc[filename, 'Filter'] == 'R':
                 instmag_list_r.append(mp_instmag)
-            else:
+            if df_images_all.loc[filename, 'Filter'] == 'I':
                 instmag_list_i.append(mp_instmag)
-        mp_dict['indep_var'] = sum(instmag_list_r) / len(instmag_list_r)\
+        mp_dict['InstMagDiff'] = sum(instmag_list_r) / len(instmag_list_r)\
             - sum(instmag_list_i) / len(instmag_list_i)
+        df_prediction = pd.DataFrame(data=mp_dict, index=range(len(mp_dict)))
 
         # Predict & return MP color index:
-        df_prediction = pd.DataFrame(data=mp_dict, index=range(len(mp_dict)))
         mp_color = result.predict(df_prediction)
         return mp_color[0], 'R & I images'
 
@@ -1371,8 +1467,8 @@ def screen_comps_for_photometry(refcat2):
     lines.append('Refcat2: max(dr) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.select_max_i_uncert(MAX_I_UNCERT)
     lines.append('Refcat2: max(di) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
-    refcat2.select_bv_color(MIN_BV_COLOR, MAX_BV_COLOR)
-    lines.append('Refcat2: BV color screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    refcat2.select_sloan_ri_color(MIN_SLOAN_RI_COLOR, MAX_SLOAN_RI_COLOR)
+    lines.append('Refcat2: Sloan ri color screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.select_dgaia()
     lines.append('Refcat2: dgaia screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.remove_overlapping()
@@ -1393,7 +1489,9 @@ def read_user_selections():
         lines = [line for line in lines if line != '']  # remove empty lines
 
     serial_list, comp_list, image_list = [], [], []
-    min_r_mag, max_r_mag, min_bv_color, max_bv_color = MIN_R_MAG, MAX_R_MAG, MIN_BV_COLOR, MAX_BV_COLOR
+    min_r_mag, max_r_mag = MIN_R_MAG, MAX_R_MAG
+    max_catalog_dr_mmag = MAX_R_UNCERT
+    min_sloan_ri_color, max_sloan_ri_color = MIN_SLOAN_RI_COLOR, MAX_SLOAN_RI_COLOR
     for line in lines:
         content = line.strip().split(';')[0].strip()  # upper case, comments removed.
         content_upper = content.upper()
@@ -1416,21 +1514,28 @@ def read_user_selections():
                 max_r_mag = float(content[len('#MAX_R_MAG'):].strip())
             except ValueError:
                 print(' >>>>> WARNING: #MAX_R_MAG in control.txt cannot be parsed as float; default used.')
-        if content_upper.startswith('#MIN_BV_COLOR'):
+        if content_upper.startswith('#MAX_CATALOG_DR_MMAG'):
             try:
-                min_bv_color = float(content[len('#MIN_BV_COLOR'):].strip())
+                max_catalog_dr_mmag = float(content[len('#MAX_CATALOG_DR_MMAG'):].strip())
             except ValueError:
-                print(' >>>>> WARNING: #MIN_BV_COLOR in control.txt cannot be parsed as float; ' +
+                print(' >>>>> WARNING: #MAX_CATALOG_DR_MMAG in control.txt cannot be parsed as float; '
                       'default used.')
-        if content_upper.startswith('#MAX_BV_COLOR'):
+        if content_upper.startswith('#MIN_SLOAN_RI_COLOR'):
             try:
-                max_bv_color = float(content[len('#MAX_BV_COLOR'):].strip())
+                min_sloan_ri_color = float(content[len('#MIN_SLOAN_RI_COLOR'):].strip())
             except ValueError:
-                print(' >>>>> WARNING: #MAX_BV_COLOR in control.txt cannot be parsed as float; ' +
+                print(' >>>>> WARNING: #MIN_SLOAN_RI_COLOR in control.txt cannot be parsed as float; ' +
+                      'default used.')
+        if content_upper.startswith('#MAX_SLOAN_RI_COLOR'):
+            try:
+                max_sloan_ri_color = float(content[len('#MAX_SLOAN_RI_COLOR'):].strip())
+            except ValueError:
+                print(' >>>>> WARNING: #MAX_SLOAN_RI_COLOR in control.txt cannot be parsed as float; ' +
                       'default used.')
     return {'serials': serial_list, 'comps': comp_list, 'images': image_list,
             'min_r_mag': min_r_mag, 'max_r_mag': max_r_mag,
-            'min_bv_color': min_bv_color, 'max_bv_color': max_bv_color}
+            'max_catalog_dr_mmag': max_catalog_dr_mmag,
+            'min_sloan_ri_color': min_sloan_ri_color, 'max_sloan_ri_color': max_sloan_ri_color}
 
 
 def apply_user_selections(df_model, user_selections):
@@ -1445,11 +1550,14 @@ def apply_user_selections(df_model, user_selections):
     deselect_for_image = df_model['FITSfile'].isin(user_selections['images'])
     deselect_for_low_r_mag = (df_model['r'] < user_selections['min_r_mag'])
     deselect_for_high_r_mag = (df_model['r'] > user_selections['max_r_mag'])
-    deselect_for_low_bv_color = (df_model['BminusV'] < user_selections['min_bv_color'])
-    deselect_for_high_bv_color =(df_model['BminusV'] > user_selections['max_bv_color'])
+    deselect_for_high_catalog_dr_mmag = (df_model['dr'] > user_selections['max_catalog_dr_mmag'])
+    sloan_ri_color = df_model['r'] - df_model['i']
+    deselect_for_low_sloan_ri_color = (sloan_ri_color < user_selections['min_sloan_ri_color'])
+    deselect_for_high_sloan_ri_color = (sloan_ri_color > user_selections['max_sloan_ri_color'])
     obs_to_deselect = list(deselect_for_serial | deselect_for_comp_id | deselect_for_image
                            | deselect_for_low_r_mag | deselect_for_high_r_mag
-                           | deselect_for_low_bv_color | deselect_for_high_bv_color)
+                           | deselect_for_high_catalog_dr_mmag
+                           | deselect_for_low_sloan_ri_color | deselect_for_high_sloan_ri_color)
     df_model.loc[obs_to_deselect, ['UseInModel']] = False
 
 
@@ -1754,9 +1862,50 @@ def mp_phot_test():
 #             fov_object = Fov(fov_name)
 #             for star in fov_object.aavso_stars:
 
+# #################################################################################################
+# Keep the following 2 (commented out) "Canopus plots" for full-screen plots as demos for SAS talk.
 
+# # "CANOPUS plot" (comps only, one point per obs:
+# #     x=catalog r mag, y=obs InstMag(r) adjusted for extinction and transform):
+# ax = axes[0, 0]
+# make_labels_9_subplots(ax, 'Adjusted CANOPUS (all images)',
+#                        'Catalog Mag (r)', 'Image-adjusted InstMag (r)', zero_line=False)
+# df_canopus = df_plot_comp_obs.loc[:,
+#              ['SourceID', 'Airmass', 'r', 'i', 'FITSfile', 'JD_fract', 'InstMag']]
+# df_canopus['CI'] = df_canopus['r'] - df_canopus['i']
+# df_canopus = pd.merge(df_canopus, df_image_effect, how='left', on='FITSfile', sort=False)
+# extinction_adjustments = extinction * df_canopus['Airmass']
+# transform_adjustments = transform * df_canopus['CI']
+# image_adjustments = df_canopus['ImageEffect']
+# jd_adjustments = jd_coefficient * df_canopus['JD_fract']
+# sum_adjustments = extinction_adjustments + transform_adjustments + image_adjustments + jd_adjustments
+# adjusted_instmags = df_canopus['InstMag'] - sum_adjustments
+# df_canopus['AdjInstMag'] = adjusted_instmags
+# # ax.scatter(x=df_canopus['r'], y=adjusted_instmags, alpha=0.6, color='darkblue')
+# ax.scatter(x=df_canopus['r'], y=adjusted_instmags, alpha=0.6, color=comp_color)
+# # first_comp_id = df_canopus.iloc[0, 0]
+# # df_first_comp = df_canopus.loc[df_canopus['SourceID'] == first_comp_id, :]
+# draw_x_line(ax, user_selections['min_r_mag'])
+# draw_x_line(ax, user_selections['min_r_mag'])
+#
+# # "CANOPUS plot" (comps only, one point per obs:
+# #     x=catalog r mag adjusted for extinction and transform, y=obs InstMag(r)):
+# ax = axes[0, 1]
+# make_labels_9_subplots(ax, 'Adjusted CANOPUS DIFF plot (all images)',
+#                        'Catalog Mag (r)', 'Adjusted InstMag - r(cat)', zero_line=False)
+# # Using data from previous plot:
+# ax.scatter(x=df_canopus['r'], y=(adjusted_instmags - df_canopus['r']), alpha=0.6, color=comp_color)
+# # ax.scatter(x=df_canopus['r'], y=adjusted_instmags, alpha=0.6, color='darkblue')
+# draw_x_line(ax, user_selections['min_r_mag'])
+# draw_x_line(ax, user_selections['min_r_mag'])
+# #################################################################################################
 
-
-
-
-
+# For spanning one subplot across more than one subplot tile:
+# gs = axes[1, 0].get_gridspec()
+# for row in [1, 2]:
+#     for col in range(3):
+#         axes[row, col].remove()
+# axbig = fig.add_subplot(gs[1:, 1:])
+# axbig.set_title('MP Target Lightcurve', loc='center', pad=-3)  # pad in points
+# ax.set_xlabel(xlabel_jd, labelpad=-29)  # labelpad in points
+# ax.set_ylabel('Mag (r)', labelpad=-5)  # "

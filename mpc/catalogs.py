@@ -208,6 +208,13 @@ class Refcat2:
         rows_to_keep = [a and b for (a, b) in zip(above_min, below_max)]
         self.df_selected = self.df_selected.loc[rows_to_keep, :]
 
+    def select_sloan_ri_color(self, min_sloan_ri=None, max_sloan_ri=None):
+        sloan_ri_color = self.df_selected['r'] - self.df_selected['i']
+        above_min = [True if min_sloan_ri is None else (ri >= min_sloan_ri) for ri in sloan_ri_color]
+        below_max = [True if max_sloan_ri is None else (ri <= max_sloan_ri) for ri in sloan_ri_color]
+        rows_to_keep = [a and b for (a, b) in zip(above_min, below_max)]
+        self.df_selected = self.df_selected.loc[rows_to_keep, :]
+
     def select_dgaia(self):
         rows_to_keep = [(dgaia > 0) for dgaia in self.df_selected['dG_gaia']]
         self.df_selected = self.df_selected.loc[rows_to_keep, :]
