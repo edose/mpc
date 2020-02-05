@@ -306,13 +306,14 @@ def get_one_html_contiguous(start=200000, n=MAX_MP_PER_HTML, date='20181122'):
     return get_one_html_from_list(mp_list, date)
 
 
-def get_one_html_from_list(mp_list=None, utc_date_string='20181122'):
+def get_one_html_from_list(mp_list=None, utc_date_string='20181122', payload_dict=None):
     """ Gets MPC HTML text for a list of MPs, on a given UTC date.
     :param mp_list: list of MP numbers [list of ints].
     :param utc_date_string: UTC date to query (not necessarily AN date!) [string].
     :return: MPC HTML text from MPEC [list of strings].
     """
-    payload_dict = PAYLOAD_DICT_TEMPLATE.copy()
+    if payload_dict is None:
+        payload_dict = PAYLOAD_DICT_TEMPLATE.copy()
 
     # Construct TextArea field:
     text_area = '%0D%0A'.join([str(mp) for mp in mp_list])
