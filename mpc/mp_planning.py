@@ -2,7 +2,7 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
 import os
 from datetime import datetime, timezone, timedelta
-from math import ceil
+from math import ceil, floor
 
 import pandas as pd
 from astroquery.mpc import MPC
@@ -11,13 +11,16 @@ from bs4 import BeautifulSoup
 
 from mpc.mp_astrometry import calc_exp_time, PAYLOAD_DICT_TEMPLATE, get_one_html_from_list
 from photrix.user import Astronight
-from photrix.util import degrees_as_hex, ra_as_hours
+from photrix.util import degrees_as_hex, ra_as_hours, RaDec, datetime_utc_from_jd
 
 CURRENT_PHOT_MPS_FULLPATH = 'J:/Astro/Images/MP Photometry/$Planning/current_phot_mps.txt'
 MIN_MP_ALTITUDE = 30  # degrees
+MIN_MOON_DISTANCE = 45  # degrees
 DSW = ('254.34647d', '35.11861269964489d', '2220m')
 DSNM = ('251.10288d', '31.748657576406853d', '1372m')
 EXP_TIME_TABLE_PHOTOMETRY = [(13, 40), (14, 60), (15, 120), (16, 240)]  # (v_mag, exp_time sec), phot only.
+EXP_OVERHEAD = 20  # Nominal exposure overhead, in seconds.
+MIN_OBSERVABLE_MINUTES = 40  # in minutes
 
 MPFILE_DIRECTORY = 'C:/Dev/Photometry/MPfile'
 CURRENT_MPFILE_VERSION = '1.0'
@@ -27,155 +30,96 @@ EPH_REQUIRED_HEADER_START = 'Date         RA            Dec       Mag       E.D.
                             '      E    Alt   Az    PABL    PABB     M Ph    ME    GL    GB'
 
 
-def make_an_table(an, location=DSW):
+def make_an_table(an, location=DSNM):
     """  Make dataframe of one night's MP photometry planning data, one row per MP.
-    :param an: Astronight, e.g. 1604 [string or int]
+         Uses: (1) Astronight object and (2) dict of MPfile objects.
+    :param an: Astronight, e.g. 20200201 [string or int]
     :param location: Astropy-style location tuple (long, lat, elev). [3-tuple of strings]
     :return: table of planning data, one row per current MP. [pandas DataFrame]
     """
     an_string = str(an)
-    an_object = Astronight(an_string, 'DSW')
+    an_object = Astronight(an_string, 'DSNM')
     dark_start, dark_end = an_object.ts_dark.start, an_object.ts_dark.end
-    df_mps = read_current_phot_mps()
-    dict_list = []
-    for mp in df_mps['MP']:
-        mp_dict = {'MP': mp}
-        df_eph = get_eph(mp, an, location)
+    mid_dark = an_object.local_middark_utc
+    dark_no_moon_start, dark_no_moon_end = an_object.ts_dark_no_moon.start, an_object.ts_dark_no_moon.end
+    mpfile_dict = make_mpfile_dict()
 
-        # Add rows for min & max altitude, drop low-altitude rows from top and bottom.
-        # TODO: this is not right, needs to take into account dark_start and dark_end, as well.
-        # Probably: find fractional row for each of altitude and darkness, take more restrictive,
-        #     and only then do the interpolation and truncation.
-        df_eph['Status'] = 'OK'
-        alt = df_eph['Altitude']
-        idx = df_eph.index
-        for irow in range(len(df_eph) - 1):
-            if alt[irow] <= MIN_MP_ALTITUDE < alt[irow + 1]:
-                df_eph.loc[idx[:irow], 'Status'] = 'Drop'
-                fract = (MIN_MP_ALTITUDE - alt[irow]) / (alt[irow + 1] - alt[irow])
-                for col in df_eph.columns:
-                    this_val = df_eph.loc[idx[irow], col]
-                    next_val = df_eph.loc[idx[irow + 1], col]
-                    df_eph.loc[idx[irow], col] = this_val + fract * (next_val - this_val)
-            elif alt[irow] > MIN_MP_ALTITUDE >= alt[irow + 1]:
-                df_eph.loc[idx[irow + 1:]] = 'Drop'
-                fract = (MIN_MP_ALTITUDE - alt[irow]) / (alt[irow + 1] - alt[irow])
-                for col in df_eph.columns:
-                    this_val = df_eph.loc[idx[irow], col]
-                    next_val = df_eph.loc[idx[irow + 1], col]
-                    df_eph.loc[idx[irow + 1], col] = this_val + fract * (next_val - this_val)
-        rows_to_keep = (df_eph['Status'] != 'Drop')
-        df_eph = df_eph[rows_to_keep]
+    def get_eph_for_utc(mpfile, datetime_utc):
+        """ Interpolate data from mpfile object's ephemeris; return dict and status string.
+        :param mpfile: MPfile filename of MP in question. [string]
+        :param datetime_utc: target utc date and time. [python datetime object]
+        :return: dict of results specific to this MP and datetime, status string 'OK' or other
+                 (2-tuple of dict and string)
+        """
+        #
+        mpfile_first_date_utc = mpfile.eph_dict_list[0]['DatetimeUTC']
+        index = (datetime_utc - mpfile_first_date_utc).days
+        if index < 0:
+            return None, ' >>>>> Error: Requested datetime before mpfile ephemeris.'
+        if index > len(mpfile.eph_dict_list):
+            return None, ' >>>>> Error: Requested datetime after mpfile ephemeris.'
+        return_dict = dict()
+        i_low = int(floor(index))
+        i_high = int(ceil(index))
+        fract = int(index - i_low)
+        for k in mpfile.eph_dict_list[0].keys():
+            return_dict[k] = (1.0 - fract) * mpfile.eph_dict_list[i_low] +\
+                             fract * mpfile.eph_dict_list[i_low]
+        return return_dict, 'OK'
 
-        # Make dict for this MP:
-        mp_dict['V'] = df_eph['Vmag'].mean()
-        mp_dict['exp_time'] = calc_exp_time(mp_dict['V'], EXP_TIME_TABLE_PHOTOMETRY)
-        mp_dict['UTC_start'] = df_eph['Date'][0]
-        mp_dict['UTC_end'] = df_eph['Date'][-1]
-        mp_dict['ACP_string'] = '#IMAGE MP_' + mp + '  Clear=' + str(int(mp_dict['exp_time']))\
-                                + 'sec(100)  ' + ra_as_hours(df_eph['RA'].mean()) + ' ' \
-                                + degrees_as_hex(df_eph['Dec'].mean() + '  ;')
-        mp_dict['Elongation'] = df_eph['Elongation'].mean()
-        mp_dict['Phase'] = df_eph['Phase'].mean()
-        mp_dict['Moon_dist'] = df_eph['Moon distance'].min()
-        mp_dict['Moon_alt'] = df_eph['Moon altitude'].max()
-        dict_list.append(mp_dict)
-    df_an_table = pd.DataFrame(data=dict_list)
-    df_an_table.index = df_an_table['MP']
-    return df_an_table
+    an_dict_list = []  # results to be deposited here, to make a dataframe later.
+    for mp in mpfile_dict.keys():
+        mpfile = mpfile_dict[mp]
+        # an_dict doesn't need to include defaults for case before or after mpfile ephemeris,
+        #    because making the dataframe should put in NANs for missing keys anyway (check this later):
+        an_dict = {'MPnumber': mpfile.number, 'MPname': mpfile.name, 'Motive': mpfile.motive,
+                   'Priority': mpfile.priority, 'Period': mpfile.period}
+        # Two iterations only:
+        data, status, ts_observable, mp_radec = None, None, None, None  # keep stupid IDE happy.
+        best_utc = mid_dark
+        for i in range(2):
+            data, status = get_eph_for_utc(mpfile, best_utc)
+            an_dict['Status'] = status
+            if status.upper() != 'OK':
+                an_dict_list.append(an_dict)
+                break
+            mp_radec = RaDec(data['RA'], data['Dec'])
+            ts_observable = an_object.ts_observable(mp_radec,
+                                                    min_alt=MIN_MP_ALTITUDE,
+                                                    min_moon_dist=MIN_MOON_DISTANCE)  # Timespan object
+            mid_observable = ts_observable.midpoint  # for loop exit
+            best_utc = mid_observable  # for loop continuation
+        if ts_observable.seconds / 60.0 < MIN_OBSERVABLE_MINUTES:
+            status = '(observable for only ' + str(int(ts_observable.seconds / 60.0)) + ' minutes)'
+        if status.upper() == 'OK':
+            an_dict['RA'] = data['RA']
+            an_dict['Dec'] = data['Dec']
+            an_dict['StartUTC'] = ts_observable.start
+            an_dict['EndUTC'] = ts_observable.end
+            an_dict['TransitUTC'] = an_object.transit(mp_radec)
+            an_dict['V_mag'] = data['V_mag']
+            an_dict['ExpTime'] = int(calc_exp_time(an_dict['V_mag'], EXP_TIME_TABLE_PHOTOMETRY))
+            if an_dict['Period'] is not None:
+                # Duty cycle is % of time spent observing this MP if one exposure per 1/60 of period.
+                an_dict['DutyCyclePct'] = 100.0 * ((an_dict['ExpTime'] + EXP_OVERHEAD) / 60.0) / \
+                                          an_dict['Period']
+            else:
+                an_dict['DutyCyclePct'] = None
+            an_dict['PhotrixPlanning'] = 'IMAGE MP_' + mpfile.number + \
+                                         '  Clear=' + str(an_dict['ExpTime']) + 'sec(1)  ' + \
+                                         ra_as_hours(an_dict['RA']) + ' ' + \
+                                         degrees_as_hex(an_dict['Dec'])
+            if an_dict['Period'] is not None:
+                df_coverage = make_df_coverage(an_dict['Period'], mpfile.obs_jds,
+                                               (an_dict['StartUTC'], an_dict['StartUTC']))
+            else:
+                df_coverage = None
 
 
-def get_eph(mp, an, location='V28'):
-    """ Get one night's ephemeris for one minor planet.
-    :param mp: minor planet id [string or int]
-    :param an: Astronight ID, e.g. 20200110 [string or int]
-    :param location: (longitude, latitude, elevation) [tuple of strings, as in astropy]
-    :return: [pandas DataFrame], with columns:
-       Date [string], RA (degrees), Dec (degrees), Delta (earth dist, AU), r (sun dist, AU),
-       Elongation (deg), Phase (deg), V (magnitudes), Proper motion (arcsec/hour),
-       Direction (as compass, degrees).
-    """
-    mp_string = str(mp)
-    an_string = str(an)
-    date_string = '-'.join([an_string[0:4], an_string[4:6], an_string[6:8]])
-    time_string = '00:00:00'
-    df = MPC.get_ephemeris(mp_string, start=date_string + ' ' + time_string,
-                           number=14, step='1h', location=location).to_pandas()
-    df['Date'] = [dt.to_pydatetime().replace(tzinfo=timezone.utc) for dt in df['Date']]
-    print(df.columns)
-    df = df.drop(['Uncertainty 3sig', 'Unc. P.A.'], axis=1)
-    return df
 
 
-def read_current_phot_mps():
-    """ Read current_phot_mps.txt, deliver dataframe of photometry target MPs and their motives.
-    In current_phot_mps.txt, each MP row looks like: MP 2005 XS1  4.55  ;  motive
-       where 4.55 is the period in hours (or ? if unknown),
-       and motive is the reason we want data *for this night* (e.g., 'late phase').
-    :return: [pandas DataFrame] with columns MP, Motive [both string].
-    """
-    mp_dict_list = []
-    with open(CURRENT_PHOT_MPS_FULLPATH, 'r') as f:
-        lines = f.readlines()
-        for line in lines:
-            line = line.strip()
-            if line.startswith('MP '):
-                halves = line[len('MP '):].split(';', maxsplit=1) + ['']  # (to ensure at least 2 elements)
-                content = halves[0]
-                mp = ''
-                # Extract period from line content:
-                p_index = content.find('P=')
-                if p_index == -1:
-                    period = '?'
-                else:
-                    period_word = content[p_index:].split(maxsplit=1)[0]
-                    try:
-                        period = period_word[2:]
-                        x = float(period)
-                    except ValueError:
-                        period = '?'
-                    mp = content[0:p_index].strip()  # use only content to the left of period.
-                    content = content[0:p_index] + content[p_index + len(period_word):]  # remove period.
-                # Complete remaining data for the MP entry:
-                if mp == '':
-                    mp = content.strip()
-                motive = halves[1].strip()
-                mp_dict_list.append({'MP': mp, 'Period': period, 'Motive': motive, 'Coverage': []})
-            if line.startswith('AN'):
-                halves = line[len('AN'):].split(';', maxsplit=1) + ['']  # (to ensure at least 2 elements)
-                content = halves[0].split()
-                an_string = content[0].strip()
-                # Ensure that hhmm values are OK to use:
-                hhmm_start = content[1].strip()
-                hhmm_end = content[2].strip()
-                if len(hhmm_start) != 4 or len(hhmm_end) != 4:
-                    print('ERROR: hhmm_start and hhmm_end must have length 4 [',
-                          hhmm_start, hhmm_end, ']')
-                    return
-                try:
-                    hh_start = int(hhmm_start[0:2])
-                    mm_start = int(hhmm_start[2:4])
-                    hh_end = int(hhmm_end[0:2])
-                    mm_end = int(hhmm_end[2:4])
-                except ValueError:
-                    print('ERROR: hhmm_start and hhmm_end must be legal hhmm time values [',
-                          hhmm_start, hhmm_end, ']')
-                    return
-                if not((0 <= hh_start <= 23) and (0 <= mm_start <= 59) and
-                       (0 <= hh_end <= 23) and (0 <= mm_end <= 59)):
-                    print('ERROR: hhmm_start and hhmm_end must be legal hhmm time values [',
-                          hhmm_start, hhmm_end, ']')
-                    return
-                comment = halves[1].strip()
-                if not mp_dict_list:  # if it's empty.
-                    print('ERROR in current_phot_mps_txt: AN line must follow a MP line.')
-                    exit(-1)
-                (mp_dict_list[-1])['Coverage'].append({'AN': an_string,
-                                                       'hhmm_start': hhmm_start, 'hmm_end': hhmm_end,
-                                                       'comment': comment})
-    df = pd.DataFrame(data=mp_dict_list)
-    df.index = df['MP']
-    return df
+
+
 
 
 def photometry_exp_time_from_v_mag(v_mag):
@@ -184,6 +128,44 @@ def photometry_exp_time_from_v_mag(v_mag):
     :return: suitable exposure time in Clear filter suited to lightcurve photometry. [float]
     """
     return calc_exp_time(v_mag, EXP_TIME_TABLE_PHOTOMETRY)
+
+
+def make_df_coverage(period, obs_jds, target_jds, resolution_minutes=10):
+    """ Construct high-resolution array describing how well tonight's phases have previously been observed.
+    :param period: MP lightcurve period, in hours. [float]
+    :param obs_jds: start,end pairs of Julian Dates for previous obs, this MP. [list of 2-tuples of floats]
+    :param target_jds: start,end pair of JDs of proposed new observations. [2-tuple or list of floats]
+    :param resolution_minutes: approximate time resolution of output dataframe, in minutes. [float]
+    :return: 1 row / timepoint in new obs window, columns = JD, DateTimeUTC, Phase, Nobs. [pandas DataFrame]
+    """
+    # First, accumulate coverage by MP phase only:
+    raw_n_phase_array = int(ceil(period * 60.0 / resolution_minutes))
+    n_phase_array = min(max(raw_n_phase_array, 100), 1000)
+    phase_array = n_phase_array * [0]
+    phase_zero_jd = min([float(obs_jd[0]) for obs_jd in obs_jds])  # earliest obs JD
+    for obs_jd in obs_jds:
+        raw_phase_start = (float(obs_jd[0]) - phase_zero_jd) * 24 / period  # jd in days, period in hours.
+        raw_phase_end = (float(obs_jd[1]) - phase_zero_jd) * 24 / period    # "
+        phase_floor = floor(raw_phase_start)
+        i_phase_start = int(round((raw_phase_start - phase_floor) * n_phase_array))
+        i_phase_end = int(round((raw_phase_end - phase_floor) * n_phase_array))
+        for i in range(i_phase_start, i_phase_end + 1):
+            i_to_increment = i % n_phase_array
+            phase_array[i_to_increment] += 1
+
+    # Now, propagate the phase-coverage array to a time-coverage array:
+    n_time_array = ceil((target_jds[1] - target_jds[0]) * 24 * 60 / resolution_minutes) + 1
+    actual_resolution_days = (target_jds[1] - target_jds[0]) / (n_time_array - 1)
+    jd_array = [target_jds[0] + i * actual_resolution_days for i in range(n_time_array)]
+    target_phase_array = [((jd - phase_zero_jd) * 24 / period) % 1 for jd in jd_array]
+    phase_index_array = [int((phase * n_phase_array) % n_phase_array) for phase in target_phase_array]
+    time_array = [phase_array[i] for i in phase_index_array]
+
+    # Make dataframe:
+    dt_array = [datetime_utc_from_jd(jd) for jd in jd_array]
+    df_coverage = pd.DataFrame({'JD': jd_array, 'DateTimeUTC': dt_array, 'Phase': target_phase_array,
+                                'Nobs': time_array})
+    return df_coverage
 
 
 MPFILE_STUFF____________________________________________________ = 0
@@ -199,7 +181,7 @@ def make_mpfile(mp_number, utc_date_start=None, days=90, mpfile_directory=MPFILE
     """
     mp_number = str(mp_number)
     s = str(utc_date_start).replace('-', '')
-    utc_start = '-'.join([s[0:4], s[5:6], s[7:8]])
+    # utc_start = '-'.join([s[0:4], s[5:6], s[7:8]])
     datetime_start = datetime(year=int(s[0:4]), month=int(s[5:6]), day=int(s[7:8]))
     days = max(days, 7)
 
@@ -325,7 +307,6 @@ def all_mpfile_names(mpfile_directory=MPFILE_DIRECTORY):
 
 class MPfile:
     def __init__(self, mpfile_name, mpfile_directory=MPFILE_DIRECTORY):
-        data_dict = dict()
         mpfile_fullpath = os.path.join(mpfile_directory, mpfile_name)
         if os.path.exists(mpfile_fullpath) and os.path.isfile(mpfile_fullpath):
             with open(mpfile_fullpath) as mpfile:
@@ -346,64 +327,88 @@ class MPfile:
             return
         self.number = self._directive_value(lines, '#MP')
         self.name = self._directive_value(lines, '#NAME')
+        if self.name is None:
+            print(' >>>>> Warning: Name is missing. (MP=' + self.number + ')')
+            self.name = None
         self.apparition = self._directive_value(lines, '#APPARITION')
         self.motive = self._directive_value(lines, '#MOTIVE')
         words = self._directive_words(lines, '#PERIOD')
-        self.period = float(words[0])
-        if len(words) >= 2:
-            self.period_certainty = words[1]
+        if words is not None:
+            try:
+                self.period = float(words[0])
+            except ValueError:
+                print(' >>>>> Error: Period present but incorrect. (MP=' + self.number + ')')
+                self.period = None
+            if len(words) >= 2:
+                self.period_certainty = words[1]
+            else:
+                self.period_certainty = '?'
+        amplitude_string = self._directive_value(lines, '#AMPLITUDE')
+        if amplitude_string is None:
+            print(' >>>>> Warning: Amplitude is missing. (MP=' + self.number + ')')
+            self.amplitude = None
         else:
-            self.period_certainty = '?'
-        self.priority = int(self._directive_words(lines, '#PRIORITY')[0])
-        self.date_range = self._directive_words(lines, '#DATE_RANGE')[:2]
-        words = self._directive_words(lines, '#MIN_PHASE')
-        self.min_phase = float(words[0])
-        self.an_min_phase = words[1]
+            try:
+                self.amplitude = float(amplitude_string)
+            except ValueError:
+                print(' >>>>> Error: Amplitude present but incorrect. (MP=' + self.number + ')')
+                self.amplitude = None
+        priority_string = self._directive_value(lines, '#PRIORITY')
+        try:
+            self.priority = int(priority_string)
+        except ValueError:
+            print(' >>>>> Error: Priority present but incorrect. (MP=' + self.number + ')')
+            self.priority = None
+        self.utc_range = self._directive_words(lines, '#UTC_RANGE')[:2]
 
         # ---------- Observations (already made) section:
-        obs_values = [line[len('#OBS'):].strip() for line in lines if line.upper().startswith('#OBS')]
-        obs = [value.split() for value in obs_values]  # nested list
+        obs_strings = [line[len('#OBS'):].strip() for line in lines if line.upper().startswith('#OBS')]
+        self.obs_jds = [value.split() for value in obs_strings]  # nested list of strings (not floats)
 
-        # ---------- Ephemeris (minor) section:
+        # ---------- Ephemeris section:
         eph_dict_list = []
         i_eph_directive = None
         for i, line in enumerate(lines):
             if line.upper().startswith('#EPHEMERIS'):
                 i_eph_directive = i
                 break
-        if (not lines[i_eph_directive + 1].strip().startswith(EPH_REQUIRED_HEADER_START)) or\
-            (not (lines[i_eph_directive + 2].startswith('----'))):
+        if ((not (lines[i_eph_directive + 1].startswith('==========')) or
+             (not lines[i_eph_directive + 3].strip().startswith('UTC')) or
+             (not lines[i_eph_directive + 4].strip().startswith('----------')))):
             print(' >>>>> ERROR: ' + mpfile_name +
                   ':  MPEC header doesn\'t match expected from minorplanet.info page.')
             self.is_valid = False
             return
-        eph_lines = lines[i_eph_directive + 3:]
+        eph_lines = lines[i_eph_directive + 5:]
         for line in eph_lines:
             eph_dict = dict()
-            # words = line.split()
-            # eph_dict['DateString'] = words[0]
-            # date_parts = words[0].split('-')
-            # eph_dict['Datetime'] = datetime(year=int(date_parts[0]),
-            #                                 month=int(date_parts[1]),
-            #                                 day=int(date_parts[2]))
-            # eph_dict['RA'] = 15.0 * (float(words[1]) + float(words[2]) / 60.0 + float(words[3]) / 3600.0)
-            # dec_sign = -1 if words[4].startswith('-') else 1.0
-            # dec_abs_value = abs(float(words[4])) + float(words[5]) / 60.0 + float(words[6]) / 3600.0
-            # eph_dict['Dec'] = dec_sign * dec_abs_value
-            # eph_dict['V_mag'] = float(words[7])
-            # eph_dict['Delta'] = float(words[8])          # earth-MP, in AU
-            # eph_dict['R'] = float(words[9])              # sun-MP, in AU
-            # eph_dict['Phase'] = float(words[10])         # phase angle, in degrees
-            # eph_dict['Elong'] = float(words[11])         # from sun, in degrees
-            # eph_dict['PAB_longitude'] = float(words[14])  # phase angle bisector longitude, in degrees
-            # eph_dict['PAB_latitude'] = float(words[15])   # phase angle bisector latitude, in degrees
-            # # Motion and direction not given by minorplanet.info, must be merged in from MPC. Ugh.
-            # eph_dict['Gal_longitude'] = float(words[18])
-            # eph_dict['Gal_latitude'] = float(words[19])
+            words = line.split()
+            eph_dict['DateUTC'] = words[0]
+            date_parts = words[0].split('-')
+            eph_dict['Datetime'] = datetime(year=int(date_parts[0]),
+                                            month=int(date_parts[1]),
+                                            day=int(date_parts[2]))
+            eph_dict['RA'] = 15.0 * (float(words[1]) + float(words[2]) / 60.0 + float(words[3]) / 3600.0)
+            dec_sign = -1 if words[4].startswith('-') else 1.0
+            dec_abs_value = abs(float(words[4])) + float(words[5]) / 60.0 + float(words[6]) / 3600.0
+            eph_dict['Dec'] = dec_sign * dec_abs_value
+            eph_dict['Delta'] = float(words[7])           # earth-MP, in AU
+            eph_dict['R'] = float(words[8])               # sun-MP, in AU
+            eph_dict['Elong'] = float(words[9])           # from sun, in degrees
+            eph_dict['Phase'] = float(words[10])          # phase angle, in degrees
+            eph_dict['V_mag'] = float(words[11])
+            eph_dict['MotionRate'] = float(words[12])     # MP speed in arcseconds per minute.
+            eph_dict['MotionAngle'] = float(words[13])    # MP direction, from North=0 toward East.
+            eph_dict['PAB_longitude'] = float(words[14])  # phase angle bisector longitude, in degrees
+            eph_dict['PAB_latitude'] = float(words[15])   # phase angle bisector latitude, in degrees
+            eph_dict['MoonPhase'] = float(words[16])      # -1 to 1, where neg is waxing, pos is waning.
+            eph_dict['MoonDistance'] = float(words[17])   # in degrees from MP
+            eph_dict['Galactic_longitude'] = float(words[18])  # in degrees
+            eph_dict['Galactic_latitude'] = float(words[19])   # in degrees
             eph_dict_list.append(eph_dict)
         self.eph_dict_list = eph_dict_list
         self.df_eph = pd.DataFrame(data=eph_dict_list)
-        self.df_eph.index = self.df_eph
+        self.df_eph.index = self.df_eph['DateUTC'].values
         self.is_valid = True
 
     @staticmethod
@@ -419,79 +424,24 @@ class MPfile:
             return None
         return value.split()
 
-    def _write_new_file(self):
-        # eph_lines = ['#EPHEMERIS',
-        #              '; ================= For MP ' + str(mp_number) +
-        #              ', retrieved from minorplanet.info One Asteroid Info '
-        #              '{:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))]
-        pass
 
-    # This is from a previous version from class MPfile, which read ephem data from projectpluto.com.
-    # Replaced 20200204 by code to read (30 days at a time, merged) from minorplanet.info.
-    # # ---------- MPEC (projectpluto.com) section:
-    # mpec_dict_list = []
-    # i_mpec_directive = None
-    # for i, line in enumerate(lines):
-    #     if line.upper().startswith('#MPEC'):
-    #         i_mpec_directive = i
-    #         break
-    # if not lines[i_mpec_directive + 1].startswith('Ephemerides'):
-    #     print(' >>>>> ERROR: ' + mpfile_name + ':  MPEC section appears to be missing')
-    #     self.is_valid = False
-    #     return
-    # if (not lines[i_mpec_directive + 2].startswith(MPEC_REQUIRED_HEADER_START)) or\
-    #     (not (lines[i_mpec_directive + 3].startswith('----'))):
-    #     print(' >>>>> ERROR: ' + mpfile_name +
-    #           ':  MPEC header wrong (wrong options selected when downloading MPEC?)')
-    #     self.is_valid = False
-    #     return
-    # mpec_lines = lines[i_mpec_directive + 4:]
-    # for line in mpec_lines:
-    #     mpec_dict = dict()
-    #     words = line.split()
-    #     mpec_dict['Date_utc'] = datetime(year=int(words[0]), month=int(words[1]), day=int(words[2]))
-    #     mpec_dict['RA'] = 15.0 * (float(words[3]) + float(words[4]) / 60.0 + float(words[5]) / 3600.0)
-    #     mpec_dict['Dec'] = float(words[6]) + float(words[7]) / 60.0 + float(words[8]) / 3600.0
-    #     mpec_dict['Delta'] = float(words[9])           # earth-MP, in AU
-    #     mpec_dict['R'] = float(words[10])              # sun-MP, in AU
-    #     mpec_dict['Elong'] = float(words[11])          # from sun, in degrees
-    #     mpec_dict['Phase'] = float(words[12])          # degrees
-    #     mpec_dict['PAB_longitude'] = float(words[13])  # "
-    #     mpec_dict['PAB_latitude'] = float(words[14])   # "
-    #     mpec_dict['V_mag'] = float(words[15])
-    #     mpec_dict['Motion'] = float(words[16])      # arcseconds per minute (0.50 normal)
-    #     mpec_dict['Motion_dir'] = float(words[17])  # motion direction, deg eastward from north
-    #     mpec_dict_list.append(mpec_dict)
-    # self.mpec_dict_list = mpec_dict_list
-    # self.df_mpec = pd.DataFrame(data=mpec_dict_list)
-    # self.is_valid = True
-
-    # Previous code, superseded by get_minorplanet_info_eph().
-    # def get_mpec_eph_lines(mp_number, an_start, days, mpc_code='V16'):
-    #     """ Return ephemeris-only text of projectpluto.com's pseudo-MPEC web service for one MP."""
-    #     s = str(an_start)
-    #     data_dict = {'obj_name': str(mp_number),
-    #                  'year': ' '.join([s[0:4], s[5:6], s[7:8]]),
-    #                  'n_steps': str(days),
-    #                  'stepsize': '1',
-    #                  'mpc_code': mpc_code,
-    #                  'faint_limit': '20', 'ephem_type': '0', 'alt_az': 'on', 'phase': 'on', 'pab': '0',
-    #                  'motion': '1', 'element_center': '-2', 'epoch': 'default', 'resids': '0', 'language': 'e'}
-    #     r = requests.post('https://www.projectpluto.com/cgi-bin/fo/fo_serve.cgi', data=data_dict)
-    #     in_lines = r.text.split('\n')
-    #     out_lines = ['; ================= Retrieved from projectpluto.com '
-    #                  '{:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))]
-    #     header_line_found = False
-    #     for line in in_lines:
-    #         if not header_line_found:
-    #             if line.startswith('<a name=\"eph\">'):
-    #                 idx_start = line.find('<b>Ephem', 60) + 3
-    #                 idx_end = line.find('</b></a>', idx_start)
-    #                 header_line = line[idx_start:idx_end]
-    #                 out_lines.append(header_line)
-    #                 header_line_found = True
-    #         else:
-    #             if not line.startswith('</pre>'):
-    #                 out_lines.append(line)
-    #     return '\n'.join(out_lines)
-
+# def get_eph(mp, an, locan dftion='V28'):
+#     """ Get one night's ephemeris for one minor planet.
+#     :param mp: minor planet id [string or int]
+#     :param an: Astronight ID, e.g. 20200110 [string or int]
+#     :param location: (longitude, latitude, elevation) [tuple of strings, as in astropy]
+#     :return: [pandas DataFrame], with columns:
+#        Date [string], RA (degrees), Dec (degrees), Delta (earth dist, AU), r (sun dist, AU),
+#        Elongation (deg), Phase (deg), V (magnitudes), Proper motion (arcsec/hour),
+#        Direction (as compass, degrees).
+#     """
+#     mp_string = str(mp)
+#     an_string = str(an)
+#     date_string = '-'.join([an_string[0:4], an_string[4:6], an_string[6:8]])
+#     time_string = '00:00:00'
+#     df = MPC.get_ephemeris(mp_string, start=date_string + ' ' + time_string,
+#                            number=14, step='1h', location=location).to_pandas()
+#     df['Date'] = [dt.to_pydatetime().replace(tzinfo=timezone.utc) for dt in df['Date']]
+#     print(df.columns)
+#     df = df.drop(['Uncertainty 3sig', 'Unc. P.A.'], axis=1)
+#     retur
