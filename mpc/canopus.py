@@ -2,7 +2,7 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
 import os
 
-MP_TOP_DIRECTORY = 'J:/Astro/Images/MP Photometry/'
+MP_TOP_DIRECTORY = 'C:/Astro/MP Photometry/'
 
 
 def canopus(mp_top_directory=MP_TOP_DIRECTORY, rel_directory=None):

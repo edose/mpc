@@ -5,7 +5,7 @@ import os
 from random import randint
 from time import sleep
 from webbrowser import open_new_tab
-from math import sqrt, log, exp
+from math import sqrt, log, exp, ceil
 from datetime import datetime, timezone, timedelta
 import webbrowser
 
@@ -66,42 +66,114 @@ DF_COLUMN_ORDER = ['number', 'score', 'transit', 'ACP', 'min9', 'uncert', 'v_mag
                    'name', 'code', 'status', 'motion_pa', 'mp_alt',
                    'moon_phase', 'moon_alt', 'ra', 'dec', 'utc']
 
-PET_MPS = [(588, 'Achilles'),
+PET_MPS = [(8900, 'AAVSO'),
+           (588, 'Achilles'),
+           (396, 'Aeolia'),
            (911, 'Agamemnon'),
            (1404, 'Ajax'),
+           (1172, 'Aneas'),
+           (29401, 'Asterix'),
+           (24265, 'Banthonytwarog'),
+           (12709, 'Bergen op Zoom'),
+           (13053, 'Bertrandrussell'),
+           (2689, 'Bruxelles'),
+           (19521, 'Chaos'),
+           (1991, 'Darwin'),
+           (23257, 'Denny'),
            (209, 'Dido'),
+           (55555, 'DNA'),
+           (12410, 'Donald Duck'),
            (435, 'Ella'),
            (4954, 'Eric'),
            (23989, 'Farpoint'),
-           (2415, 'Ganesa'),
-           (3124, 'Kansas'),
-           (6480, 'Scarlatti'),
-           (54439, 'Topeka'),
-           (8900, 'AAVSO'),
-           (396, 'Aeolia'),
-           (13053, 'Bertrandrussell'),
+           (17473, 'Freddiemercury'),
            (121022, 'Galliano'),
+           (2415, 'Ganesa'),
+           (16452, 'Goldfinger'),
            (100027, 'Hannaharendt'),
            (33529, 'Henden'),
            (361450, 'Houellebecq'),
-           (1172, 'Aneas'),
+           (7470, 'Jabberwock'),
+           (9007, 'James Bond'),
            (221150, ' Jerryfoote'),
+           (6758, 'Jesseowens'),
+           (4738, 'Jimihendrix'),
+           (8974, 'Joepatterson'),
+           (33165, 'Joschhambsch'),
+           (3124, 'Kansas'),
+           (2807, 'Karl Marx'),
+           (3811, 'Karma'),
            (25594, 'Kessler'),
+           (9563, 'Kitty'),
+           (216, 'Kleopatra'),
            (10221, 'Kubrick'),
            (15072, 'Landolt'),
            (218692, 'Leesnyder'),
+           (6735, 'Madhatter'),
+           (228029, 'MANIAC'),
+           (7447, 'Marcusaurelius'),
+           (2362, 'Mark Twain'),
            (1647, 'Menelaus'),
            (367732, 'Mikesimonsen'),
+           (3633, 'Mira'),
+           (21651, 'Mission Valley'),
+           (8889, 'Mockturtle'),
+           (4106, 'Nada'),
+           (11365, 'NASA'),
+           (23238, 'Ocasio-Cortez'),
            (1143, 'Odysseus'),
+           (679, 'Pax'),
+           (17222, 'Perlmutter'),
+           (6817, 'Pest'),
+           (100417, 'Phillipglass'),
+           (12927, 'Pinocchio'),
+           (13227, 'Poor'),
+           (88706, 'Potato'),
+           (7919, 'Prime'),
+           (4040, 'Purcell'),
+           (12426, 'Racquetball'),
+           (17518, 'Redqueen'),
            (120218, 'Richardberry'),
+           (16421, 'Roadrunner'),
+           (18932, 'Robinhood'),
+           (15907, 'Robot'),
+           (17058, 'Rocknroll'),
+           (1288, 'Santa'),
            (13092, 'Schrodinger'),
            (4856, 'Seaborg'),
+           (13070, 'Seanconnery'),
+           (6480, 'Scarlatti'),
+           (2608, 'Seneca'),
+           (2985, 'Shakespeare'),
+           (30444, 'Shemp'),
+           (129234, 'Silly'),
+           (5325, 'Silver'),
+           (24068, 'Simonsen'),
+           (7934, 'Sinatra'),
+           (214476, 'Stephencolbert'),
+           (9632, 'Sudo'),
            (19019, 'Sunflower'),
-           (18281, 'Tros'),
+           (14917, 'Taco'),
+           (5408, 'The'),
+           (1604, 'Tombaugh'),
+           (54439, 'Topeka'),
+           (249521, 'Truth'),
+           (530, 'Turandot'),
            (22791, 'Twarog'),
+           (9951, 'Tyrranosaurus'),
            (13069, 'Umbertoeco'),
+           (22260, 'Ur'),
+           (1282, 'Utopia'),
            (340071, 'Vanmunster'),
-           (274301, 'Wikipedia')]
+           (25399, 'Vonnegut'),
+           (17942, 'Whiterabbit'),
+           (274301, 'Wikipedia'),
+           (100046, 'Worms'),
+           (54509, 'Yorp'),
+           (7707, 'Yes'),
+           (16745, 'Zappa'),
+           (3834, 'Zappafrank'),
+           (4321, 'Zero')]
 
 PET_KEYWORDS = ['farpoint', 'eskridge', 'hug', 'dose', 'sandlot']
 
@@ -190,7 +262,12 @@ def pets(date_utc=None):
     """ Make browser page for MPC ephemeres for all pet MPS.
     :param date_utc: UTC date string, e.g. '20200110'; if None, uses next night [string]
     """
-    html([mp for (mp, name) in PET_MPS], date_utc=date_utc)
+    n = len(PET_MPS)
+    n_pages = ceil(n/100)
+    for i_page in range(n_pages):
+        i_low = 100 * i_page
+        i_high = min(i_low + 100, n)
+        html([mp for (mp, name) in PET_MPS[i_low: i_high]], date_utc=date_utc)
 
 
 def go_pets(years=0.5):

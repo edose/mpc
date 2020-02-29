@@ -8,12 +8,15 @@ import pandas as pd
 from astroquery.mpc import MPC
 import requests
 from bs4 import BeautifulSoup
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import matplotlib.patches as patches
 
 from mpc.mp_astrometry import calc_exp_time, PAYLOAD_DICT_TEMPLATE, get_one_html_from_list
 from photrix.user import Astronight
 from photrix.util import degrees_as_hex, ra_as_hours, RaDec, datetime_utc_from_jd
 
-CURRENT_PHOT_MPS_FULLPATH = 'J:/Astro/Images/MP Photometry/$Planning/current_phot_mps.txt'
+CURRENT_PHOT_MPS_FULLPATH = 'C:/Astro/MP Photometry/$Planning/current_phot_mps.txt'
 MIN_MP_ALTITUDE = 30  # degrees
 MIN_MOON_DISTANCE = 45  # degrees
 DSW = ('254.34647d', '35.11861269964489d', '2220m')
@@ -30,20 +33,23 @@ EPH_REQUIRED_HEADER_START = 'Date         RA            Dec       Mag       E.D.
                             '      E    Alt   Az    PABL    PABB     M Ph    ME    GL    GB'
 
 
-def make_an_table(an, location=DSNM):
+def make_df_an_table(an_string, location=DSNM, do_coverage_plots=True):
     """  Make dataframe of one night's MP photometry planning data, one row per MP.
-         Uses: (1) Astronight object and (2) dict of MPfile objects.
-    :param an: Astronight, e.g. 20200201 [string or int]
+         USAGE: df = make_df_an_table('20200201')
+    :param an_string: Astronight, e.g. 20200201 [string or int]
     :param location: Astropy-style location tuple (long, lat, elev). [3-tuple of strings]
-    :return: table of planning data, one row per current MP. [pandas DataFrame]
+    :param do_coverage_plots: True iff user wants Coverage Plots. [boolean]
+    :return: table of planning data, one row per current MP, many columns including one for
+                           coverage list of dataframes. [list of DataFrames]
     """
-    an_string = str(an)
+    an_string = str(an_string)  # (precaution in case int passed in)
     an_object = Astronight(an_string, 'DSNM')
     dark_start, dark_end = an_object.ts_dark.start, an_object.ts_dark.end
     mid_dark = an_object.local_middark_utc
     dark_no_moon_start, dark_no_moon_end = an_object.ts_dark_no_moon.start, an_object.ts_dark_no_moon.end
     mpfile_dict = make_mpfile_dict()
 
+    # Nested function:
     def get_eph_for_utc(mpfile, datetime_utc):
         """ Interpolate data from mpfile object's ephemeris; return dict and status string.
         :param mpfile: MPfile filename of MP in question. [string]
@@ -110,16 +116,110 @@ def make_an_table(an, location=DSNM):
                                          ra_as_hours(an_dict['RA']) + ' ' + \
                                          degrees_as_hex(an_dict['Dec'])
             if an_dict['Period'] is not None:
-                df_coverage = make_df_coverage(an_dict['Period'], mpfile.obs_jds,
-                                               (an_dict['StartUTC'], an_dict['StartUTC']))
+                an_dict['Coverage'] = make_df_coverage(an_dict['Period'], mpfile.obs_jds,
+                                                       (an_dict['StartUTC'], an_dict['EndUTC']))
             else:
-                df_coverage = None
+                an_dict['Coverage'] = None
+            an_dict_list.append(an_dict)
+    df_an_table = pd.DataFrame(data=an_dict_list)
+    df_an_table.index = df_an_table['MPName'].values
+
+    if do_coverage_plots:
+        make_coverage_plots(an_object, df_an_table)
+    return df_an_table
 
 
+def make_coverage_plots(an_string, an_object, df):
+    """ Make N-vs-UTC plots, one per MP, of phase coverage by previous nights' observations.
+    :param an_string: astronight identifier (e.g., '20200201') for night being planned. [string]
+    :param an_object: Astronight object for the night being planned. [Astronight object]
+    :param df: df_an_table, the master planning table for one Astronight [pandas DataFrame].
+    :return: None [makes plots 3 x 3 per Figure (page)].
+    """
+    # Nested functions:
+    def make_labels_9_subplots(ax, title, xlabel, ylabel, text='', zero_line=True):
+        ax.set_title(title, loc='center', pad=-3)  # pad in points
+        ax.set_xlabel(xlabel, labelpad=-29)  # labelpad in points
+        ax.set_ylabel(ylabel, labelpad=-5)  # "
+        ax.text(x=0.5, y=0.95, s=text,
+                horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+        if zero_line is True:
+            ax.axhline(y=0, color='lightgray', linewidth=1, zorder=-100)
 
+    def draw_y_line(ax, y_value, color='lightgray'):
+        ax.axhline(y=y_value, color=color, linewidth=1, zorder=-100)
 
+    def draw_x_line(ax, x_value, color='lightgray'):
+        ax.axvline(x=x_value, color=color, linewidth=1, zorder=-100)
 
+    max_nobs_to_plot = 5
+    mps_to_plot = [name for (name, cov) in zip(df['MPName'], df['Coverage']) if cov is not None]
+    n_plots = len(mps_to_plot)
+    n_cols, n_rows = 3, 3
+    n_plots_per_figure = n_cols * n_rows
+    n_figures = ceil(n_plots / n_plots_per_figure)
+    dark_start, dark_end = an_object.ts_dark.start, an_object.ts_dark.end
 
+    for i_figure in range(n_figures):
+        n_plots_remaining = n_plots - (i_figure * n_plots_per_figure)
+        n_plots_this_figure = min(n_plots_remaining, n_plots_per_figure)
+        if n_plots_this_figure >= 1:
+            # Start new Figure:
+            fig, axes = plt.subplots(ncols=n_cols, nrows=n_rows, figsize=(15, 9))
+            fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
+            fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
+            fig.suptitle('MP planning for AN ' + an_string + '     ::      Page ' +
+                         str(i_figure + 1) + ' of ' + str(n_figures),
+                         color='darkblue', fontsize=20)
+            fig.canvas.set_window_title('MP planning for AN ' + an_string)
+            subplot_text = 'rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
+            fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12,
+                     color='dimgray')
+            for i_plot in range(n_plots_this_figure):
+                this_mp = mps_to_plot[i_plot]
+                i_col = i_plot % n_cols
+                i_row = int(floor(i_plot / n_cols))
+                ax = axes[i_row, i_col]
+                make_labels_9_subplots(ax, 'MP_' + this_mp + '  AN ' + an_string,
+                                       'UTC', 'mMag', '(text here)', zero_line=False)
+                # Make left box if any unavailable timespan before available timespan:
+                left_box_utc_start = dark_start
+                left_box_utc_end = df.loc[this_mp, 'StartUTC']
+                if left_box_utc_end > left_box_utc_start:
+                    ax.add_patch(patches.Rectangle((left_box_utc_start, max_nobs_to_plot),
+                                                   left_box_utc_end - left_box_utc_start,
+                                                   max_nobs_to_plot,
+                                                   linewidth=1, alpha=0.4, zorder=+100,
+                                                   edgecolor='gray', facecolor='lightgray'))
+                # Make right box if any unavailable timespan after available timespan:
+                right_box_utc_start = df.loc[this_mp, 'EndUTC']
+                right_box_utc_end = dark_end
+                if right_box_utc_end > right_box_utc_start:
+                    ax.add_patch(patches.Rectangle((right_box_utc_start, max_nobs_to_plot),
+                                                   right_box_utc_end - right_box_utc_start,
+                                                   max_nobs_to_plot,
+                                                   linewidth=1, alpha=0.4, zorder=+100,
+                                                   edgecolor='gray', facecolor='lightgray'))
+                datetime_values = (df.loc[this_mp, 'Coverage'])['DateTimeUTC']
+                dt0 = datetime_values.iloc[0]
+                utc_zero = datetime(year=dt0.year, month=dt0.month, day=dt0.day)
+                x = [(dt - utc_zero).total_seconds() / 3600.0 for dt in datetime_values]
+                y = (df.loc[this_mp, 'Coverage'])['Nobs']
+                ax.plot(x, y, linewidth=5, alpha=1, color='blue', zorder=+50)
+                ax.fill_between(x, 0, y, facecolor='lightblue')
+                x_transit = ((df.loc[this_mp, 'Coverage'])['DateTimeUTC'] - utc_zero) / 3600.0
+                draw_x_line(ax, x_transit)
+                ax.set_xlim(dark_start, dark_end)
+                ax.set_ylim(0, max_nobs_to_plot)
+                ax.xaxis.set_major_locator(ticker.MultipleLocator(1.0))
+                ax.xaxis.set_minor_locator(ticker.MultipleLocator(1.0 / 6.0))
+                # Remove any empty subplots from this (last) Figure:
+                for i_plot in range(n_plots_this_figure, n_plots_per_figure):
+                    i_col = i_plot % n_cols
+                    i_row = int(floor(i_plot / n_cols))
+                    ax = axes[i_row, i_col]
+                    ax.remove()
+        plt.show()
 
 
 def photometry_exp_time_from_v_mag(v_mag):

@@ -48,7 +48,7 @@ ADU_SATURATED = 56000  # Max ADU allowable in original (Ur) images.
 VIGNETTING = (1846, 0.62)  # (px from center, max fract of ADU_SATURATED allowed) both at corner.
 
 # For this package:
-MP_TOP_DIRECTORY = 'J:/Astro/Images/MP Photometry/'
+MP_TOP_DIRECTORY = 'C:/Astro/MP Photometry/'
 LOG_FILENAME = 'mp_photometry.log'
 CONTROL_FILENAME = 'control.txt'
 DF_OBS_ALL_FILENAME = 'df_obs_all.csv'
@@ -74,11 +74,26 @@ MAX_SLOAN_RI_COLOR = 0.8
 
 _____ATLAS_BASED_WORKFLOW________________________________________________ = 0
 
+"""  ***************************************************************************
+     WORKFLOW STEPS (example lines):
+     * Ensure at least 5 MP photometry files IN Clear filter.
+     >>> start(MP_TOP_DIRECTORY + '/Test', 1074, 20191109)
+     >>> assess()
+     * Edit control.txt: add 2 MP positions (x_pixel, y_pixel), at early and late times.
+     >>> make_dfs()
+     * Edit control.txt: (1) comp-selection limits, (2) model options [both optional].
+     >>> do_mp_phot()
+     ********************************************
+     (at any time:)
+     >>> resume(MP_TOP_DIRECTORY + '/Test', 1074, 20191109), esp. after Console restart.
+     ***************************************************************************
+"""
+
 
 def start(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     """  Preliminaries to begin MP photometry workflow.
     :param mp_top_directory: path of lowest directory common to all MP photometry FITS, e.g.,
-               'J:/Astro/Images/MP Photometry' [string]
+               'C:/Astro/MP Photometry' [string]
     :param mp_number: number of target MP, e.g., 1602 for Indiana. [integer or string].
     :param an_string: Astronight string representation, e.g., '20191106' [string].
     :return: [None]
@@ -288,8 +303,8 @@ def assess(min_mp_photometry_files=MIN_MP_PHOTOMETRY_FILES):
              ';',
              ';===== Enter before do_mp_phot() ====================================',
              ';      Selection criteria for comp stars:',
-             ';#SERIAL 123,7776 2254   16   ; to omit observations by Serial number (many per line OK)',
              ';#COMP  2245 144,   781       ; to omit comp by comp ID (many per line OK)',
+             ';#SERIAL 123,7776 2254   16   ; to omit observations by Serial number (many per line OK)',
              ';#IMAGE  Obj-0000-V           ; to omit FITS image Obj-0000-V.fts specifically',
              (';#MIN_R_MAG ' + str(MIN_R_MAG)).ljust(30) + '; default=' + str(MIN_R_MAG),
              (';#MAX_R_MAG ' + str(MAX_R_MAG)).ljust(30) + '; default=' + str(MAX_R_MAG),
@@ -501,7 +516,7 @@ def make_dfs():
     df_obs['Type'] = ['MP' if id.startswith('MP_') else 'Comp' for id in df_obs['SourceID']]
     df_obs.sort_values(by=['JD_mid', 'Type', 'SourceID'], inplace=True)
     df_obs.drop(['JD_mid'], axis=1, inplace=True)
-    df_obs.insert(0, 'Serial', range(1, 1 + len(df_obs)))
+    df_obs.insert(0, 'Serial', [str(s) for s in range(1, 1 + len(df_obs))])
     df_obs.index = list(df_obs['Serial'])  # list to prevent naming the index
     df_obs = reorder_df_columns(df_obs, ['Serial', 'FITSfile', 'SourceID', 'Type',
                                          'InstMag', 'InstMagSigma'])
@@ -591,7 +606,7 @@ def do_mp_phot():
 
     # Make df_model: rows only for (1) MP obs and (2) obs with comps present in every selected image:
     is_comp = (df_full['Type'] == 'Comp')
-    df_image_count = df_full.loc[is_comp, :].groupby('SourceID')['FITSfile', 'SourceID'].count()
+    df_image_count = df_full.loc[is_comp, :].groupby('SourceID')[['FITSfile', 'SourceID']].count()
     is_in_every_image = (df_image_count['FITSfile'] == len(qualified_image_list))
     comp_ids_in_every_image = list(df_image_count.index[is_in_every_image])
     rows_with_qualified_comp_ids = df_full['SourceID'].isin(comp_ids_in_every_image)
@@ -653,7 +668,7 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
         ax.axvline(x=x_value, color=color, linewidth=1, zorder=-100)
 
     def make_qq_plot_fullpage(window_title, page_title, plot_annotation,
-                              y_values, y_labels, figsize=(12, 9)):
+                              y_values, y_labels, filename, figsize=(12, 9)):
         fig, axes = plt.subplots(ncols=1, nrows=1, figsize=figsize)  # (width, height) in "inches"
         ax = axes  # not subscripted if just one subplot in Figure
         ax.set_title(page_title, color='darkblue', fontsize=20, pad=30)
@@ -682,9 +697,17 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
                  verticalalignment='top', horizontalalignment='center', fontsize=12)
         fig.canvas.set_window_title(window_title)
         plt.show()
+        fig.savefig(filename)
+
+    this_directory, mp_string, an_string = get_context()
+
+    # Delete any previous image files from current directory:
+    image_filenames = [f for f in os.listdir('.')
+                       if f.startswith('Image') and f.endswith('.png')]
+    for f in image_filenames:
+        os.remove(f)
 
     # Wrangle needed data into convenient forms:
-    this_directory, mp_string, an_string = get_context()
     df_plot = pd.merge(left=df_model.loc[df_model['UseInModel'], :].copy(),
                        right=model.mm_fit.df_observations,
                        how='left', left_index=True, right_index=True, sort=False)  # add col 'Residuals'.
@@ -718,30 +741,34 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
     obs_jd_fract = df_plot['JD_mid'] - jd_floor
     xlabel_jd = 'JD(mid)-' + str(jd_floor)
 
-    # ################ FIGURE 1: Q-Q plot of comp residuals (one point per comp obs),
+    # ################ FIGURE 1: Q-Q plot of mean comp effects (one point per comp star used in model),
     #    code heavily adapted from photrix.process.SkyModel.plots():
-    window_title = 'Q-Q Plot (comp residuals):  MP ' + mp_string + '   AN ' + an_string
-    page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q plot of comp residuals'
-    plot_annotation = str(len(df_plot_comp_obs)) + ' observations of ' + \
-        str(n_comps) + ' comps used in model.' + \
-        '\n (annotations are Serial number of indiv observations)'
-    y_values = df_plot_comp_obs['Residual'] * 1000.0  # for millimags
-    y_labels = df_plot_comp_obs.index
-    make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_values, y_labels)
-
-    # ################ FIGURE 2: Q-Q plot of mean comp effects (one point per comp star used in model),
-    #    code heavily adapted from photrix.process.SkyModel.plots():
-    window_title = 'Q-Q Plot (mean comp residuals):  MP ' + mp_string + '   AN ' + an_string
-    page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q plot of mean comp residuals'
+    window_title = 'Q-Q Plot (by comp):  MP ' + mp_string + '   AN ' + an_string
+    page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q plot by comp (mean residual)'
     plot_annotation = str(n_comps) + ' comps used in model.' + \
-        '\n(annotations are SourceIDs of comp stars)'
+        '\n(tags: comp SourceID)'
     df_y = df_plot_comp_obs.loc[:, ['SourceID', 'Residual']].groupby(['SourceID']).mean()
     df_y = df_y.sort_values(by='Residual')
     y_values = df_y['Residual'] * 1000.0  # for millimags
     y_labels = df_y.index.values
-    make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_values, y_labels)
+    make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_values, y_labels,
+                          'Image1_QQ_comps.png')
 
-    # ################ FIGURE 3: Time plots:
+    # ################ FIGURE 2: Q-Q plot of comp residuals (one point per comp obs),
+    #    code heavily adapted from photrix.process.SkyModel.plots():
+    window_title = 'Q-Q Plot (by comp observation):  MP ' + mp_string + '   AN ' + an_string
+    page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q plot by comp observation'
+    plot_annotation = str(len(df_plot_comp_obs)) + ' observations of ' + \
+        str(n_comps) + ' comps used in model.' + \
+        '\n (tags: observation Serial numbers)'
+    df_y = df_plot_comp_obs.loc[:, ['Serial', 'Residual']]
+    df_y = df_y.sort_values(by='Residual')
+    y_values = df_y['Residual'] * 1000.0  # for millimags
+    y_labels = df_y['Serial'].values
+    make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_values, y_labels,
+                          'Image2_QQ_obs.png')
+
+    # ################ FIGURE 3: Catalog and Time plots:
     fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(15, 9))  # (width, height) in "inches"
     fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
     fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
@@ -827,6 +854,7 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
     ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
 
     plt.show()
+    fig.savefig('Image3_Catalog_and_Time.png')
 
     # ################ FIGURE 4: Residual plots:
     fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(15, 9))  # (width, height) in "inches"
@@ -931,6 +959,9 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
                y=1000.0 * df_plot_comp_obs['Residual'],
                s=14, alpha=0.3, color='black')
 
+    plt.show()
+    fig.savefig('Image4_Residuals.png')
+
     # ################ FIGURE(S) 5: Variability plots:
     # Several comps on a subplot, vs JD, normalized by (minus) the mean of all other comps' responses.
     # Make df_offsets (one row per obs, at first with only raw offsets):
@@ -959,7 +990,7 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
     df_comp_offsets['LatestNormalizedOffset'] = None
     for comp_id in comp_ids:
         is_comp_id = (df_comp_offsets['SourceID'] == comp_id)
-        latest_jd_fract = all_jd_fracts.iloc[0]
+        valid_jd_fracts = []
         for jd_fract in all_jd_fracts:
             is_this_jd_fract = (df_comp_offsets['JD_fract'] == jd_fract)
             mean_other_offsets = df_comp_offsets.loc[(~is_comp_id) & is_this_jd_fract, 'RawOffset'].mean()
@@ -967,11 +998,12 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
             this_raw_offset = df_comp_offsets.loc[is_this_obs, 'RawOffset'].mean()
             normalized_offset = this_raw_offset - mean_other_offsets
             df_comp_offsets.loc[is_this_obs, 'NormalizedOffset'] = normalized_offset
-            if normalized_offset is not None:
-                latest_jd_fract = jd_fract
-        is_latest_jd_fract = df_comp_offsets['JD_fract'] == latest_jd_fract
+            if not np.isnan(normalized_offset):
+                valid_jd_fracts.append(jd_fract)
+        is_latest_jd_fract = df_comp_offsets['JD_fract'] == valid_jd_fracts[-1]
         latest_normalized_offset = df_comp_offsets.loc[is_comp_id & is_latest_jd_fract, 'NormalizedOffset']
         df_comp_offsets.loc[is_comp_id, 'LatestNormalizedOffset'] = latest_normalized_offset.iloc[0]
+
     df_comp_offsets = df_comp_offsets.sort_values(by=['LatestNormalizedOffset', 'SourceID', 'JD_fract'],
                                                   ascending=[False, True, True])
     df_plot_index = df_comp_offsets[['SourceID']].drop_duplicates()
@@ -1050,9 +1082,10 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
                 ax = axes[i_row, i_col]
                 ax.remove()
         plt.show()
+        fig.savefig('Image5_Comp Variability_' + '{:02d}'.format(i_figure + 1) + '.png')
     # Verify that all comps were plotted exactly once (debug):
     all_comps_plotted_once = (sorted(comp_ids) == sorted(plotted_comp_ids))
-    print('all comp ids were plotted exactly once = ', str(all_comps_plotted_once))
+    # print('all comp ids were plotted exactly once = ', str(all_comps_plotted_once))
     if not all_comps_plotted_once:
         print('comp ids plotted more than once',
               [item for item, count in Counter(plotted_comp_ids).items() if count > 1])
@@ -1301,6 +1334,9 @@ def read_df_obs_all():
     this_directory, _, _ = get_context()
     fullpath = os.path.join(this_directory, DF_OBS_ALL_FILENAME)
     df_obs = pd.read_csv(fullpath, sep=';', index_col=0)
+    serials = [str(s) for s in df_obs['Serial']]  # ensure strings.
+    df_obs.loc[:, 'Serial'] = serials
+    df_obs.index = serials  # list, to ensure index not named.
     return df_obs
 
 
@@ -1321,9 +1357,9 @@ def read_df_comps_all():
     this_directory, _, _ = get_context()
     fullpath = os.path.join(this_directory, DF_COMPS_ALL_FILENAME)
     df_comps = pd.read_csv(fullpath, sep=';', index_col=0)
-    comp_ids = [str(id) for id in df_comps['CompID']]
+    comp_ids = [str(id) for id in df_comps['CompID']]  # ensure strings.
     df_comps.loc[:, 'CompID'] = comp_ids
-    df_comps.index = comp_ids
+    df_comps.index = comp_ids  # list, to ensure index not named.
     return df_comps
 
 
@@ -1497,10 +1533,10 @@ def read_user_selections():
         content_upper = content.upper()
         if content_upper.startswith('#SERIAL'):
             values = content[len('#SERIAL'):].strip().replace(',', ' ').split()
-            serial_list.extend([int(v) for v in values])
+            serial_list.extend(values)
         if content_upper.startswith('#COMP'):
             values = content[len('#COMP'):].strip().replace(',', ' ').split()
-            comp_list.extend([int(v) for v in values])
+            comp_list.extend(values)
         if content_upper.startswith('#IMAGE'):
             image_filename = content[len('#IMAGE'):].strip()
             image_list.append(image_filename)

@@ -18,7 +18,7 @@ from photrix.image import Image, FITS
 # from photrix.fov import FOV_DIRECTORY, Fov
 
 # APASS_10_URL = 'https://www.aavso.org/cgi-bin/apass_dr10_download.pl'
-ATLAS_REFCAT2_DIRECTORY = 'J:/Astro/Catalogs/ATLAS-refcat2/mag-0-16/'
+ATLAS_REFCAT2_DIRECTORY = 'D:/Astro/Catalogs/ATLAS-refcat2/mag-0-16/'
 RP1_LIMIT = 9  # arcseconds; closeness limit for flux = 0.1 * star flux
 R1_LIMIT = 14   # arcseconds; closeness limit for flux = 1 * star flux
 R10_LIMIT = 20  # arcseconds; closeness limit for flux = 10 * star flux

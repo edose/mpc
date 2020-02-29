@@ -38,12 +38,12 @@ COMPS_MAX_COLOR_VI = 1.0
 VALID_FITS_FILE_EXTENSIONS = ['.fits', '.fit', '.fts']
 DEGREES_PER_RADIAN = 180.0 / pi
 
-PHOTRIX_TOP_DIRECTORIES = ['C:/Astro/Borea Photrix/', 'J:/Astro/Images/Borea Photrix Archives/']
+PHOTRIX_TOP_DIRECTORIES = ['C:/Astro/Borea Photrix/', 'C:/Astro/Borea Photrix Archives/']
 FILE_RENAMING_FILENAME = 'File-renaming.txt'
 UR_FILE_RENAMING_PATH = 'Photometry/File-renaming.txt'
 DF_MASTER_FILENAME = 'df_master.csv'
 
-MP_TOP_DIRECTORY = 'J:/Astro/Images/MP Photometry/'
+MP_TOP_DIRECTORY = 'C:/Astro/MP Photometry/'
 LOG_FILENAME = 'mp_photometry.log'
 DF_MP_MASTER_FILENAME = 'df_mp_master.csv'
 DF_COMPS_AND_MPS_FILENAME = 'df_comps_and_mps.csv'
@@ -79,7 +79,7 @@ NEW_WORKFLOW________________________________________________ = 0
 # def start(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
 #     """  Preliminaries to begin MP photometry workflow.
 #     :param mp_top_directory: path of lowest directory common to all MP photometry FITS, e.g.,
-#                'J:/Astro/Images/MP Photometry' [string]
+#                'C:/Astro/MP Photometry' [string]
 #     :param mp_number: number of target MP, e.g., 1602 for Indiana. [integer or string].
 #     :param an_string: Astronight string representation, e.g., '20191106' [string].
 #     :return: [None]
