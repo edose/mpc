@@ -2,10 +2,10 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
 import os
 from datetime import datetime, timezone, timedelta
-from math import ceil, floor
+from math import ceil, floor, sqrt
 
 import pandas as pd
-from astroquery.mpc import MPC
+# from astroquery.mpc import MPC
 import requests
 from bs4 import BeautifulSoup
 import matplotlib.pyplot as plt
@@ -14,44 +14,78 @@ import matplotlib.patches as patches
 
 from mpc.mp_astrometry import calc_exp_time, PAYLOAD_DICT_TEMPLATE, get_one_html_from_list
 from photrix.user import Astronight
-from photrix.util import degrees_as_hex, ra_as_hours, RaDec, datetime_utc_from_jd
+from photrix.util import degrees_as_hex, ra_as_hours, RaDec, datetime_utc_from_jd, jd_from_datetime_utc,\
+    hhmm_from_datetime_utc
 
-CURRENT_PHOT_MPS_FULLPATH = 'C:/Astro/MP Photometry/$Planning/current_phot_mps.txt'
+# MP_ASTROMETRY_PLANNING:
 MIN_MP_ALTITUDE = 30  # degrees
 MIN_MOON_DISTANCE = 45  # degrees
 DSW = ('254.34647d', '35.11861269964489d', '2220m')
 DSNM = ('251.10288d', '31.748657576406853d', '1372m')
-EXP_TIME_TABLE_PHOTOMETRY = [(13, 40), (14, 60), (15, 120), (16, 240)]  # (v_mag, exp_time sec), phot only.
+EXP_TIME_TABLE_PHOTOMETRY = [(13, 60), (14, 80), (15, 160), (16, 300)]  # (v_mag, exp_time sec), phot only.
 EXP_OVERHEAD = 20  # Nominal exposure overhead, in seconds.
 MIN_OBSERVABLE_MINUTES = 40  # in minutes
 
 MPFILE_DIRECTORY = 'C:/Dev/Photometry/MPfile'
+MP_PHOTOMETRY_PLANNING_DIRECTORY = 'C:/Astro/MP Photometry/$Planning'
 CURRENT_MPFILE_VERSION = '1.0'
-MPEC_REQUIRED_HEADER_START = 'Date (UTC)   RA              Dec         delta   r     elong  ' +\
-                             'ph_ang   ph_ang_bisector   mag  \'/hr    PA'
-EPH_REQUIRED_HEADER_START = 'Date         RA            Dec       Mag       E.D.     S.D.    Ph'\
-                            '      E    Alt   Az    PABL    PABB     M Ph    ME    GL    GB'
+# MPEC_REQUIRED_HEADER_START = 'Date (UTC)   RA              Dec         delta   r     elong  ' +\
+#                              'ph_ang   ph_ang_bisector   mag  \'/hr    PA'
+# EPH_REQUIRED_HEADER_START = 'Date         RA            Dec       Mag       E.D.     S.D.    Ph'\
+#                             '      E    Alt   Az    PABL    PABB     M Ph    ME    GL    GB'
+
+MAIN_WORKFLOW_____________________________________________________________ = 0
 
 
-def make_df_an_table(an_string, location=DSNM, do_coverage_plots=True):
+def plan(an_string, site_name='DSW'):
+    """ Main planning workflow for MP photometry.
+    :param an_string: Astronight, e.g. 20200201 [string or int]
+    :param site_name: name of site for Site object. [string]
+    :return: [None]
+    """
+    # Make and print table of values, 1 line/MP, sorted by earliest observable UTC:
+    df_an_table = make_df_an_table(an_string, site_name='DSW')
+    df = df_an_table.copy()
+    lines = ['MP Photometry planning for AN ' + an_string + ':',
+             ''.rjust(19) + 'Start Tran  End    V   Exp/s  Duty    P/hr']
+    for i in df.index:
+        line_elements = [df.loc[i, 'MPnumber'].rjust(6),
+                         df.loc[i, 'MPname'].ljust(12),
+                         hhmm_from_datetime_utc(df.loc[i, 'StartUTC']),
+                         hhmm_from_datetime_utc(df.loc[i, 'TransitUTC']),
+                         hhmm_from_datetime_utc(df.loc[i, 'EndUTC']),
+                         '{0:5.1f}'.format(df.loc[i, 'V_mag']),
+                         str(int(round(df.loc[i, 'ExpTime']))).rjust(5),
+                         str(round(df.loc[i, 'DutyCyclePct'])).rjust(5) + '%',
+                         '{0:7.2f}'.format(df.loc[i, 'Period']),
+                         '  ' + df.loc[i, 'PhotrixPlanning']]
+        lines.append(' '.join(line_elements))
+    print('\n'.join(lines))
+    # TODO: also write to CSV file (where?).
+
+    # Display plots; also write to PNG files:
+    make_coverage_plots(an_string, site_name, df_an_table)
+
+
+def make_df_an_table(an_string, site_name='DSW'):
     """  Make dataframe of one night's MP photometry planning data, one row per MP.
          USAGE: df = make_df_an_table('20200201')
     :param an_string: Astronight, e.g. 20200201 [string or int]
-    :param location: Astropy-style location tuple (long, lat, elev). [3-tuple of strings]
-    :param do_coverage_plots: True iff user wants Coverage Plots. [boolean]
+    :param site_name: name of site for Site object. [string]
     :return: table of planning data, one row per current MP, many columns including one for
                            coverage list of dataframes. [list of DataFrames]
     """
     an_string = str(an_string)  # (precaution in case int passed in)
-    an_object = Astronight(an_string, 'DSNM')
-    dark_start, dark_end = an_object.ts_dark.start, an_object.ts_dark.end
+    an_object = Astronight(an_string, site_name)
+    # dark_start, dark_end = an_object.ts_dark.start, an_object.ts_dark.end
     mid_dark = an_object.local_middark_utc
-    dark_no_moon_start, dark_no_moon_end = an_object.ts_dark_no_moon.start, an_object.ts_dark_no_moon.end
+    # dark_no_moon_start, dark_no_moon_end = an_object.ts_dark_no_moon.start, an_object.ts_dark_no_moon.end
     mpfile_dict = make_mpfile_dict()
 
     # Nested function:
     def get_eph_for_utc(mpfile, datetime_utc):
         """ Interpolate data from mpfile object's ephemeris; return dict and status string.
+            Current code requires that ephemeris line spacing spacing = 1 day.
         :param mpfile: MPfile filename of MP in question. [string]
         :param datetime_utc: target utc date and time. [python datetime object]
         :return: dict of results specific to this MP and datetime, status string 'OK' or other
@@ -59,18 +93,21 @@ def make_df_an_table(an_string, location=DSNM, do_coverage_plots=True):
         """
         #
         mpfile_first_date_utc = mpfile.eph_dict_list[0]['DatetimeUTC']
-        index = (datetime_utc - mpfile_first_date_utc).days
+        index = (datetime_utc - mpfile_first_date_utc).total_seconds() / 24 / 3600
         if index < 0:
             return None, ' >>>>> Error: Requested datetime before mpfile ephemeris.'
-        if index > len(mpfile.eph_dict_list):
+        if index >= len(mpfile.eph_dict_list):
             return None, ' >>>>> Error: Requested datetime after mpfile ephemeris.'
         return_dict = dict()
-        i_low = int(floor(index))
-        i_high = int(ceil(index))
-        fract = int(index - i_low)
+        i_low = int(floor(index))  # line in ephemeris just previous to target datetime.
+        # i_high = int(ceil(index))
+        fract = index - i_low  # fraction of timespan after previous line.
         for k in mpfile.eph_dict_list[0].keys():
-            return_dict[k] = (1.0 - fract) * mpfile.eph_dict_list[i_low] +\
-                             fract * mpfile.eph_dict_list[i_low]
+            value_before, value_after = mpfile.eph_dict_list[i_low][k], mpfile.eph_dict_list[i_low + 1][k]
+            # Add interpolated value if not a string;
+            #    (use this calc form, because you can subtract but not add datetime objects):
+            if isinstance(value_before, datetime) or isinstance(value_before, float):
+                return_dict[k] = value_before + fract * (value_after - value_before)  # interpolated value.
         return return_dict, 'OK'
 
     an_dict_list = []  # results to be deposited here, to make a dataframe later.
@@ -80,9 +117,9 @@ def make_df_an_table(an_string, location=DSNM, do_coverage_plots=True):
         #    because making the dataframe should put in NANs for missing keys anyway (check this later):
         an_dict = {'MPnumber': mpfile.number, 'MPname': mpfile.name, 'Motive': mpfile.motive,
                    'Priority': mpfile.priority, 'Period': mpfile.period}
-        # Two iterations only:
+        # Interpolate within ephemeris (because MP is moving in sky); 2 iterations s/be enough:
         data, status, ts_observable, mp_radec = None, None, None, None  # keep stupid IDE happy.
-        best_utc = mid_dark
+        best_utc = mid_dark  # best_utc will = mid-observable time at converged RA,Dec.
         for i in range(2):
             data, status = get_eph_for_utc(mpfile, best_utc)
             an_dict['Status'] = status
@@ -94,7 +131,8 @@ def make_df_an_table(an_string, location=DSNM, do_coverage_plots=True):
                                                     min_alt=MIN_MP_ALTITUDE,
                                                     min_moon_dist=MIN_MOON_DISTANCE)  # Timespan object
             mid_observable = ts_observable.midpoint  # for loop exit
-            best_utc = mid_observable  # for loop continuation
+            best_utc = mid_observable  # update for loop continuation.
+        data, status = get_eph_for_utc(mpfile, best_utc)  # the data we will use.
         if ts_observable.seconds / 60.0 < MIN_OBSERVABLE_MINUTES:
             status = '(observable for only ' + str(int(ts_observable.seconds / 60.0)) + ' minutes)'
         if status.upper() == 'OK':
@@ -104,7 +142,8 @@ def make_df_an_table(an_string, location=DSNM, do_coverage_plots=True):
             an_dict['EndUTC'] = ts_observable.end
             an_dict['TransitUTC'] = an_object.transit(mp_radec)
             an_dict['V_mag'] = data['V_mag']
-            an_dict['ExpTime'] = int(calc_exp_time(an_dict['V_mag'], EXP_TIME_TABLE_PHOTOMETRY))
+            an_dict['ExpTime'] = float(round(float(calc_exp_time(an_dict['V_mag'],
+                                                                 EXP_TIME_TABLE_PHOTOMETRY))))
             if an_dict['Period'] is not None:
                 # Duty cycle is % of time spent observing this MP if one exposure per 1/60 of period.
                 an_dict['DutyCyclePct'] = 100.0 * ((an_dict['ExpTime'] + EXP_OVERHEAD) / 60.0) / \
@@ -116,25 +155,25 @@ def make_df_an_table(an_string, location=DSNM, do_coverage_plots=True):
                                          ra_as_hours(an_dict['RA']) + ' ' + \
                                          degrees_as_hex(an_dict['Dec'])
             if an_dict['Period'] is not None:
-                an_dict['Coverage'] = make_df_coverage(an_dict['Period'], mpfile.obs_jds,
-                                                       (an_dict['StartUTC'], an_dict['EndUTC']))
+                an_dict['Coverage'] = make_df_coverage(an_dict['Period'],
+                                                       mpfile.obs_jd_ranges,
+                                                       (jd_from_datetime_utc(an_dict['StartUTC']),
+                                                        jd_from_datetime_utc(an_dict['EndUTC'])))
             else:
                 an_dict['Coverage'] = None
             an_dict_list.append(an_dict)
     df_an_table = pd.DataFrame(data=an_dict_list)
-    df_an_table.index = df_an_table['MPName'].values
-
-    if do_coverage_plots:
-        make_coverage_plots(an_object, df_an_table)
+    df_an_table.index = df_an_table['MPnumber'].values
+    df_an_table = df_an_table.sort_values(by='StartUTC')
     return df_an_table
 
 
-def make_coverage_plots(an_string, an_object, df):
-    """ Make N-vs-UTC plots, one per MP, of phase coverage by previous nights' observations.
-    :param an_string: astronight identifier (e.g., '20200201') for night being planned. [string]
-    :param an_object: Astronight object for the night being planned. [Astronight object]
-    :param df: df_an_table, the master planning table for one Astronight [pandas DataFrame].
-    :return: None [makes plots 3 x 3 per Figure (page)].
+def make_coverage_plots(an_string, site_name, df_an_table):
+    """ Make Nobs-vs-UTC plots, one per MP, i.e., plots of phase coverage by previous nights' observations.
+    :param an_string: Astronight, e.g. 20200201 [string or int]
+    :param site_name: name of site for Site object. [string]
+    :param df_an_table: the master planning table for one Astronight [pandas DataFrame].
+    :return: [None] (makes plots 3 x 3 per Figure/page).
     """
     # Nested functions:
     def make_labels_9_subplots(ax, title, xlabel, ylabel, text='', zero_line=True):
@@ -146,19 +185,26 @@ def make_coverage_plots(an_string, an_object, df):
         if zero_line is True:
             ax.axhline(y=0, color='lightgray', linewidth=1, zorder=-100)
 
-    def draw_y_line(ax, y_value, color='lightgray'):
-        ax.axhline(y=y_value, color=color, linewidth=1, zorder=-100)
+    # def draw_y_line(ax, y_value, color='lightgray'):
+    #     ax.axhline(y=y_value, color=color, linewidth=1, zorder=-100)  # thin horizontal line at y_value.
 
     def draw_x_line(ax, x_value, color='lightgray'):
-        ax.axvline(x=x_value, color=color, linewidth=1, zorder=-100)
+        ax.axvline(x=x_value, color=color, linewidth=1, zorder=-100)  # thin vertical line at x_value.
 
-    max_nobs_to_plot = 5
-    mps_to_plot = [name for (name, cov) in zip(df['MPName'], df['Coverage']) if cov is not None]
-    n_plots = len(mps_to_plot)
+    # Collect some data, define plot structure:
+    df = df_an_table.copy()
+    an_object = Astronight(an_string, site_name)
+    dark_start, dark_end = an_object.ts_dark.start, an_object.ts_dark.end
+    utc_zero = datetime(year=dark_start.year, month=dark_start.month,
+                        day=dark_start.day).replace(tzinfo=timezone.utc)
+    hours_dark_start = (dark_start - utc_zero).total_seconds() / 3600.0
+    hours_dark_end = (dark_end - utc_zero).total_seconds() / 3600.0
+    max_nobs_to_plot = 5  # max number of previous coverages (y-axis) to plot.
+    mps_to_plot = [name for (name, cov) in zip(df['MPnumber'], df['Coverage']) if cov is not None]
+    n_plots = len(mps_to_plot)  # count of individual MP plots.
     n_cols, n_rows = 3, 3
     n_plots_per_figure = n_cols * n_rows
-    n_figures = ceil(n_plots / n_plots_per_figure)
-    dark_start, dark_end = an_object.ts_dark.start, an_object.ts_dark.end
+    n_figures = ceil(n_plots / n_plots_per_figure)  # count of pages of plots.
 
     for i_figure in range(n_figures):
         n_plots_remaining = n_plots - (i_figure * n_plots_per_figure)
@@ -168,58 +214,69 @@ def make_coverage_plots(an_string, an_object, df):
             fig, axes = plt.subplots(ncols=n_cols, nrows=n_rows, figsize=(15, 9))
             fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
             fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
-            fig.suptitle('MP planning for AN ' + an_string + '     ::      Page ' +
+            fig.suptitle('MP Coverage Plots ' + an_string + '     ::      Page ' +
                          str(i_figure + 1) + ' of ' + str(n_figures),
                          color='darkblue', fontsize=20)
             fig.canvas.set_window_title('MP planning for AN ' + an_string)
             subplot_text = 'rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
             fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12,
                      color='dimgray')
-            for i_plot in range(n_plots_this_figure):
-                this_mp = mps_to_plot[i_plot]
+            for i_plot, this_mp in enumerate(mps_to_plot):
                 i_col = i_plot % n_cols
                 i_row = int(floor(i_plot / n_cols))
                 ax = axes[i_row, i_col]
-                make_labels_9_subplots(ax, 'MP_' + this_mp + '  AN ' + an_string,
-                                       'UTC', 'mMag', '(text here)', zero_line=False)
-                # Make left box if any unavailable timespan before available timespan:
-                left_box_utc_start = dark_start
-                left_box_utc_end = df.loc[this_mp, 'StartUTC']
-                if left_box_utc_end > left_box_utc_start:
-                    ax.add_patch(patches.Rectangle((left_box_utc_start, max_nobs_to_plot),
-                                                   left_box_utc_end - left_box_utc_start,
-                                                   max_nobs_to_plot,
-                                                   linewidth=1, alpha=0.4, zorder=+100,
-                                                   edgecolor='gray', facecolor='lightgray'))
-                # Make right box if any unavailable timespan after available timespan:
-                right_box_utc_start = df.loc[this_mp, 'EndUTC']
-                right_box_utc_end = dark_end
-                if right_box_utc_end > right_box_utc_start:
-                    ax.add_patch(patches.Rectangle((right_box_utc_start, max_nobs_to_plot),
-                                                   right_box_utc_end - right_box_utc_start,
-                                                   max_nobs_to_plot,
-                                                   linewidth=1, alpha=0.4, zorder=+100,
-                                                   edgecolor='gray', facecolor='lightgray'))
+                make_labels_9_subplots(ax, 'MP ' + this_mp + '     AN ' + an_string +
+                                       '{0:10d}'.format(int(round(df.loc[this_mp, 'DutyCyclePct']))) + '%',
+                                       '', '', '', zero_line=False)
+
+                # Plot coverage curve:
                 datetime_values = (df.loc[this_mp, 'Coverage'])['DateTimeUTC']
-                dt0 = datetime_values.iloc[0]
-                utc_zero = datetime(year=dt0.year, month=dt0.month, day=dt0.day)
-                x = [(dt - utc_zero).total_seconds() / 3600.0 for dt in datetime_values]
-                y = (df.loc[this_mp, 'Coverage'])['Nobs']
+                x = [(dt - utc_zero).total_seconds() / 3600.0 for dt in datetime_values]  # UTC hour.
+                y = (df.loc[this_mp, 'Coverage'])['Coverage']  # count of prev obs (this apparition).
                 ax.plot(x, y, linewidth=5, alpha=1, color='blue', zorder=+50)
                 ax.fill_between(x, 0, y, facecolor='lightblue')
-                x_transit = ((df.loc[this_mp, 'Coverage'])['DateTimeUTC'] - utc_zero) / 3600.0
+
+                # Make left box if any unavailable timespan before available timespan:
+                left_box_start = hours_dark_start
+                left_box_end = (df.loc[this_mp, 'StartUTC'] - utc_zero).total_seconds() / 3600.0
+                if left_box_end > left_box_start:
+                    ax.add_patch(patches.Rectangle((left_box_start, 0),  # (x,y)bottom left, width, height
+                                                   left_box_end - left_box_start,
+                                                   max_nobs_to_plot,
+                                                   linewidth=1, alpha=1, zorder=+100,
+                                                   edgecolor='black', facecolor='darkgray'))
+
+                # Make right box if any unavailable timespan after available timespan:
+                right_box_start = (df.loc[this_mp, 'EndUTC'] - utc_zero).total_seconds() / 3600.0
+                right_box_end = hours_dark_end
+                if right_box_end > right_box_start:
+                    ax.add_patch(patches.Rectangle((right_box_start, 0),  # (x,y)bottom left, width, height
+                                                   right_box_end - right_box_start,
+                                                   max_nobs_to_plot,
+                                                   linewidth=1, alpha=1, zorder=+100,
+                                                   edgecolor='black', facecolor='darkgray'))
+
+                # Complete the plot:
+                x_transit = ((df.loc[this_mp, 'TransitUTC']) - utc_zero).total_seconds() / 3600.0
                 draw_x_line(ax, x_transit)
-                ax.set_xlim(dark_start, dark_end)
+                ax.set_xlim(hours_dark_start, hours_dark_end)
                 ax.set_ylim(0, max_nobs_to_plot)
                 ax.xaxis.set_major_locator(ticker.MultipleLocator(1.0))
                 ax.xaxis.set_minor_locator(ticker.MultipleLocator(1.0 / 6.0))
-                # Remove any empty subplots from this (last) Figure:
-                for i_plot in range(n_plots_this_figure, n_plots_per_figure):
-                    i_col = i_plot % n_cols
-                    i_row = int(floor(i_plot / n_cols))
-                    ax = axes[i_row, i_col]
-                    ax.remove()
-        plt.show()
+
+            # Remove any empty subplots (if this is the last Figure):
+            for i_plot_to_remove in range(n_plots_this_figure, n_plots_per_figure):
+                i_col = i_plot_to_remove % n_cols
+                i_row = int(floor(i_plot_to_remove / n_cols))
+                ax = axes[i_row, i_col]
+                ax.remove()
+            plt.show()
+            filename = 'Coverage_plot_' + an_string + '{0:02d}'.format(i_figure + 1) + '.png'
+            fullpath = os.path.join(MP_PHOTOMETRY_PLANNING_DIRECTORY, filename)
+            fig.savefig(fullpath)
+
+
+SUPPORT_____________________________________________________________ = 0
 
 
 def photometry_exp_time_from_v_mag(v_mag):
@@ -230,41 +287,53 @@ def photometry_exp_time_from_v_mag(v_mag):
     return calc_exp_time(v_mag, EXP_TIME_TABLE_PHOTOMETRY)
 
 
-def make_df_coverage(period, obs_jds, target_jds, resolution_minutes=10):
+def make_df_coverage(period, obs_jd_ranges, target_jd_ranges, resolution_minutes=10):
     """ Construct high-resolution array describing how well tonight's phases have previously been observed.
-    :param period: MP lightcurve period, in hours. [float]
-    :param obs_jds: start,end pairs of Julian Dates for previous obs, this MP. [list of 2-tuples of floats]
-    :param target_jds: start,end pair of JDs of proposed new observations. [2-tuple or list of floats]
+    :param period: MP lightcurve period, in hours. Required, else this function can't work. [float]
+    :param obs_jd_ranges: start,end pairs of Julian Dates for previous obs, this MP.
+        Typically obtained from an updated MPfile for that MP. [list of 2-tuples of floats]
+    :param target_jd_ranges: start,end pair of JDs of proposed new observations.
+        Presumably tonight's available observation timespan. [2-tuple or list of floats]
     :param resolution_minutes: approximate time resolution of output dataframe, in minutes. [float]
     :return: 1 row / timepoint in new obs window, columns = JD, DateTimeUTC, Phase, Nobs. [pandas DataFrame]
     """
-    # First, accumulate coverage by MP phase only:
-    raw_n_phase_array = int(ceil(period * 60.0 / resolution_minutes))
-    n_phase_array = min(max(raw_n_phase_array, 100), 1000)
-    phase_array = n_phase_array * [0]
-    phase_zero_jd = min([float(obs_jd[0]) for obs_jd in obs_jds])  # earliest obs JD
-    for obs_jd in obs_jds:
-        raw_phase_start = (float(obs_jd[0]) - phase_zero_jd) * 24 / period  # jd in days, period in hours.
-        raw_phase_end = (float(obs_jd[1]) - phase_zero_jd) * 24 / period    # "
-        phase_floor = floor(raw_phase_start)
-        i_phase_start = int(round((raw_phase_start - phase_floor) * n_phase_array))
-        i_phase_end = int(round((raw_phase_end - phase_floor) * n_phase_array))
-        for i in range(i_phase_start, i_phase_end + 1):
-            i_to_increment = i % n_phase_array
-            phase_array[i_to_increment] += 1
+    # Construct array of JDs covering target time span, and coverage count array of same length:
+    if period is None:
+        return None
+    if period <= 0.0:
+        return None
+    # Set up target JD array and matching empty coverage array:
+    resolution_days = resolution_minutes / 24 / 60
+    n_target_jds = ceil((target_jd_ranges[1] - target_jd_ranges[0]) / resolution_days) + 1
+    actual_resolution_days = (target_jd_ranges[1] - target_jd_ranges[0]) / (n_target_jds - 1)
+    # Target JDs will form x of coverage plot:
+    target_jds = [target_jd_ranges[0] + i * actual_resolution_days for i in range(n_target_jds)]
+    # coverage is an accumulator array that will form y of plot:
+    coverage = len(target_jds) * [0]
 
-    # Now, propagate the phase-coverage array to a time-coverage array:
-    n_time_array = ceil((target_jds[1] - target_jds[0]) * 24 * 60 / resolution_minutes) + 1
-    actual_resolution_days = (target_jds[1] - target_jds[0]) / (n_time_array - 1)
-    jd_array = [target_jds[0] + i * actual_resolution_days for i in range(n_time_array)]
-    target_phase_array = [((jd - phase_zero_jd) * 24 / period) % 1 for jd in jd_array]
-    phase_index_array = [int((phase * n_phase_array) % n_phase_array) for phase in target_phase_array]
-    time_array = [phase_array[i] for i in phase_index_array]
+    # Build coverage array:
+    period_days = period / 24.0
+    # Phase zero defined at JD of earliest (previous) observation (same as in Canopus);
+    # if there is no previous obs, use the target start JD:
+    if len(obs_jd_ranges) >= 1:
+        jd_at_phase_zero = min([float(obs_jd[0]) for obs_jd in obs_jd_ranges])
+    else:
+        jd_at_phase_zero = target_jd_ranges[0]
+    for i, jd in enumerate(target_jds):
+        for obs_jd_range in obs_jd_ranges:
+            obs_jd_start, obs_jd_end = obs_jd_range
+            diff_cycles_first_obs = int(ceil((jd - obs_jd_start) / period_days))  # larger
+            diff_cycles_last_obs = int(floor((jd - obs_jd_end) / period_days))  # smaller
+            for n in range(diff_cycles_last_obs, diff_cycles_first_obs + 1):
+                obs_jd_candidate = jd - n * period_days
+                if obs_jd_start <= obs_jd_candidate <= obs_jd_end:
+                    coverage[i] += 1
 
     # Make dataframe:
-    dt_array = [datetime_utc_from_jd(jd) for jd in jd_array]
-    df_coverage = pd.DataFrame({'JD': jd_array, 'DateTimeUTC': dt_array, 'Phase': target_phase_array,
-                                'Nobs': time_array})
+    target_phase_array = [((jd - jd_at_phase_zero) / period_days) % 1 for jd in target_jds]
+    dt_array = [datetime_utc_from_jd(jd) for jd in target_jds]
+    df_coverage = pd.DataFrame({'JD': target_jds, 'DateTimeUTC': dt_array, 'Phase': target_phase_array,
+                                'Coverage': coverage})
     return df_coverage
 
 
@@ -281,8 +350,8 @@ def make_mpfile(mp_number, utc_date_start=None, days=90, mpfile_directory=MPFILE
     """
     mp_number = str(mp_number)
     s = str(utc_date_start).replace('-', '')
-    # utc_start = '-'.join([s[0:4], s[5:6], s[7:8]])
-    datetime_start = datetime(year=int(s[0:4]), month=int(s[5:6]), day=int(s[7:8]))
+    datetime_start = datetime(year=int(s[0:4]), month=int(s[4:6]),
+                              day=int(s[6:8])).replace(tzinfo=timezone.utc)
     days = max(days, 7)
 
     # Get strings from MPC (minorplanetcenter.com):
@@ -406,6 +475,42 @@ def all_mpfile_names(mpfile_directory=MPFILE_DIRECTORY):
 
 
 class MPfile:
+    """ One object contains all current-apparition data for one MP.
+    Fields:
+        .format_version [str, currently '1.0']
+        .number: MP number [str representing an integer]
+        .name: text name of MP, e.g., 'Dido' or '1952 TX'. [str]
+        .apparition: identifier (usually year) of this apparition, e.g., '2020'. [str]
+        .motive: special reason to do photometry, or 'Pet' if simply a favorite. [str]
+        .period: expected rotational period, in hours. [float]
+        .period_certainty: LCDB certainty code, e.g., '1' or '2-'. [str]
+        .amplitude: expected amplitude, in magnitudes. [float]
+        .priority: priority code, 0=no priority, 10=top priority, 6=normal. [int]
+        .utc_range: first & last date within the ephemeris (not observations). [2-tuple of str]
+        .obs_jd_ranges: list of previous observation UTC ranges. [list of lists of floats]
+        .eph_dict_list: One dict per MPC ephemeris time (which are all at 00:00 UTC). [list of dicts]
+            dict elements:
+                'DateString': UTC date string for this MPC ephemeris line. [str as yyyy-mm-dd]
+                'DatetimeUTC': UTC date. [py datetime object]
+                'RA': right ascension, in degrees (0-360). [float]
+                'Dec': declination, in degrees (-90-+90). [float]
+                'Delta': distance Earth (observatory) to MP, in AU. [float]
+                'R': distance Sun to MP, in AU. [float]
+                'Elong': MP elongation from Sun, in degrees (0-180). [float]
+                'Phase': Phase angle Sun-MP-Earth, in degrees. [float]
+                'V_mag': Nominal V magnitude. [float]
+                'MotionRate': MP speed across sky, in arcsec/minute. [float]
+                'MotionDirection': MP direction across sky, in degrees, from North=0 toward East. [float]
+                'PAB_longitude': phase angle bisector longitude, in degrees. [float]
+                'PAB_latitude': phase angle bisector latitude, in degrees. [float]
+                'MoonPhase': -1 to 1, where neg=waxing, 0=full, pos=waning. [float]
+                'MoonDistance': Moon-MP distance in sky, in degrees. [float]
+                'Galactic_longitude': in degrees. [float]
+                'Galactic_latitude': in degrees. [float]
+        .df_eph: the same data as in eph_dict_list, with dict keys becoming column names,
+                    row index=DateUTC string. [pandas Dataframe]
+        .is_valid: True iff all data looks OK. [boolean]
+    """
     def __init__(self, mpfile_name, mpfile_directory=MPFILE_DIRECTORY):
         mpfile_fullpath = os.path.join(mpfile_directory, mpfile_name)
         if os.path.exists(mpfile_fullpath) and os.path.isfile(mpfile_fullpath):
@@ -459,11 +564,21 @@ class MPfile:
         except ValueError:
             print(' >>>>> Error: Priority present but incorrect. (MP=' + self.number + ')')
             self.priority = None
-        self.utc_range = self._directive_words(lines, '#UTC_RANGE')[:2]
+        utc_range_strs = self._directive_words(lines, '#UTC_RANGE')[:2]
+        # self.utc_range = [float(range) for range in utc_range_strs]
+        self.utc_range =self._directive_words(lines, '#UTC_RANGE')[:2]
+        self.utc_range = []
+        for utc_str in utc_range_strs:
+            year_str, month_str, day_str = tuple(utc_str.split('-'))
+            utc_dt = datetime(int(year_str), int(month_str), int(day_str)).replace(tzinfo=timezone.utc)
+            self.utc_range.append(utc_dt)
 
         # ---------- Observations (already made) section:
         obs_strings = [line[len('#OBS'):].strip() for line in lines if line.upper().startswith('#OBS')]
-        self.obs_jds = [value.split() for value in obs_strings]  # nested list of strings (not floats)
+        obs_jd_range_strs = [value.split() for value in obs_strings]  # nested list of strings (not floats)
+        self.obs_jd_ranges = []
+        for range in obs_jd_range_strs:
+            self.obs_jd_ranges.append([float(range[0]), float(range[1])])
 
         # ---------- Ephemeris section:
         eph_dict_list = []
@@ -483,11 +598,11 @@ class MPfile:
         for line in eph_lines:
             eph_dict = dict()
             words = line.split()
-            eph_dict['DateUTC'] = words[0]
+            eph_dict['DateString'] = words[0]
             date_parts = words[0].split('-')
-            eph_dict['Datetime'] = datetime(year=int(date_parts[0]),
-                                            month=int(date_parts[1]),
-                                            day=int(date_parts[2]))
+            eph_dict['DatetimeUTC'] = datetime(year=int(date_parts[0]),
+                                               month=int(date_parts[1]),
+                                               day=int(date_parts[2])).replace(tzinfo=timezone.utc)
             eph_dict['RA'] = 15.0 * (float(words[1]) + float(words[2]) / 60.0 + float(words[3]) / 3600.0)
             dec_sign = -1 if words[4].startswith('-') else 1.0
             dec_abs_value = abs(float(words[4])) + float(words[5]) / 60.0 + float(words[6]) / 3600.0
@@ -508,7 +623,7 @@ class MPfile:
             eph_dict_list.append(eph_dict)
         self.eph_dict_list = eph_dict_list
         self.df_eph = pd.DataFrame(data=eph_dict_list)
-        self.df_eph.index = self.df_eph['DateUTC'].values
+        self.df_eph.index = self.df_eph['DatetimeUTC'].values
         self.is_valid = True
 
     @staticmethod
@@ -525,7 +640,47 @@ class MPfile:
         return value.split()
 
 
-# def get_eph(mp, an, locan dftion='V28'):
+ANCILLARY_only________________________________________________________ = 0
+
+
+class KeplerObject:
+    def __init__(self, epoch_ma, ap, long, incl, ecc, a):
+        """
+        :param epoch_ma: epoch of mean anomaly, in Terrestrial Time JD. [float]
+        :param ap: argument of perihelion, in degrees. [float]
+        :param long: longitude of ascending node, in degrees. [float]
+        :param incl: inclination, in degrees. [float]
+        :param ecc: eccentricity, dimensionless. [float]
+        :param a: semi-major axis length, in AU. [float]
+        """
+        self.epoch_ma = epoch_ma
+        self.ap = ap
+        self.long = long
+        self.incl = incl
+        self.ecc = ecc
+        self.a = a
+        self.h = None  # H-G model reduced magnitude (placeholder value).
+        self.g = 0.15  # H-G model phase factor (default value).
+        self.name = ''
+
+
+def laguerre_delta(func, funcp, funcpp):
+    """ Returns Laguerre's method estimate the nearest root of a function that is nearly quadratic.
+    Reputed to be more robust to starting estimates than simply solving quadratic formula.
+    :param func: value of function at some x.
+    :param funcp: first derivative of function at the same x.
+    :param funcpp: second derivative of function at the same x.
+    :return: Best estimate of x shift needed to get near y=0. Will probably require iteration.
+    """
+    g = funcp / func
+    h = g * g - funcpp / func
+    numerator1 = g + sqrt(2 * h - g * g)
+    numerator2 = g - sqrt(2 * h - g * g)
+    numerator = numerator1 if abs(numerator1) > abs(numerator2) else numerator2
+    return - 2.0 / numerator
+
+
+# def get_eph(mp, an, location='V28'):
 #     """ Get one night's ephemeris for one minor planet.
 #     :param mp: minor planet id [string or int]
 #     :param an: Astronight ID, e.g. 20200110 [string or int]

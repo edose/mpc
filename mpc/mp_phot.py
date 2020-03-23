@@ -717,7 +717,7 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
     df_image_effect = model.mm_fit.df_random_effects
     df_image_effect.rename(columns={"GroupName": "FITSfile", "Group": "ImageEffect"}, inplace=True)
     intercept = model.mm_fit.df_fixed_effects.loc['Intercept', 'Value']
-    jd_slope = model.mm_fit.df_fixed_effects.loc['JD_fract', 'Value']
+    # jd_slope = model.mm_fit.df_fixed_effects.loc['JD_fract', 'Value']  # undefined if FIT_JD is False.
     sigma = model.mm_fit.sigma
     if 'Airmass' in model.mm_fit.df_fixed_effects.index:
         extinction = model.mm_fit.df_fixed_effects.loc['Airmass', 'Value']  # if fit in model
@@ -842,7 +842,7 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
     ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
     ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
 
-    # MP Magnitude plot (comps only, one point per obs; x=JD_fract, y=Airmass):
+    # Session Lightcurve plot (comps only, one point per obs; x=JD_fract, y=MP best magnitude):
     ax = axes[2, 2]
     make_labels_9_subplots(ax, 'MP Lightcurve for this session', xlabel_jd, 'Mag (r)', '', zero_line=False)
     ax.errorbar(x=model.df_mp_mags['JD_mid'] - jd_floor, y=model.df_mp_mags['MP_Mags'],
@@ -852,6 +852,7 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
                s=14, alpha=1, color='black')
     ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
     ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
+    ax.invert_yaxis()  # per custom of plotting magnitudes brighter=upward
 
     plt.show()
     fig.savefig('Image3_Catalog_and_Time.png')
@@ -1100,7 +1101,7 @@ def write_canopus_file(model):
     this_directory, mp_string, an_string = get_context()
     fullpath = os.path.join(this_directory, 'canopus_MP_' + mp_string + '_' + an_string + '.txt')
     df = model.df_mp_mags
-    fulltext = '\n'.join(['{0:.5f}'.format(jd) + ',' + '{0:.3f}'.format(mag) + ',' + '{0:.3f}'.format(s)
+    fulltext = '\n'.join(['{0:.6f}'.format(jd) + ',' + '{0:.4f}'.format(mag) + ',' + '{0:.4f}'.format(s)
                           for (jd, mag, s) in zip(df['JD_mid'], df['MP_Mags'], df['InstMagSigma'])])
     with open(fullpath, 'w') as f:
         f.write(fulltext)
@@ -1374,7 +1375,7 @@ def get_mp_color_index(df_obs_all, df_images_all, df_comps_all):
     :param df_comps_all:
     :return: tuple (color index (Sloan r-i), source of value) [2-tuple of float, string]
     """
-    # Case: R & I images are available in this directory:
+    # Case 1: R & I images are available in this directory:
     is_r_image = (df_images_all['Filter'] == 'R')
     is_i_image = (df_images_all['Filter'] == 'I')
     ri_both_available = any(is_r_image) and any(is_i_image)
@@ -1467,12 +1468,13 @@ def get_mp_color_index(df_obs_all, df_images_all, df_comps_all):
         mp_color = result.predict(df_prediction)
         return mp_color[0], 'R & I images'
 
-    # Case: return MP_COLOR_INDEX from control.txt:
+    # Case 2: return MP_COLOR_INDEX from control.txt:
     with open(CONTROL_FILENAME, 'r') as cf:
         lines = cf.readlines()
         lines = [line.split(";")[0] for line in lines]  # remove all comments
         lines = [line.strip() for line in lines]  # remove lead/trail blanks
         lines = [line for line in lines if line != '']  # remove empty lines
+        ri_color = None
         for line in lines:
             if line.upper().startswith('#MP_RI_COLOR '):
                 ri_string = line[len('#MP_RI_COLOR '):].split()[0]
@@ -1581,15 +1583,16 @@ def apply_user_selections(df_model, user_selections):
     :return df_obs: [None] (both dataframes are modified in-place.)
     """
     # Apply user selections to observations:
-    deselect_for_serial = df_model['Serial'].isin(user_selections['serials'])
-    deselect_for_comp_id = df_model['SourceID'].isin(user_selections['comps'])
-    deselect_for_image = df_model['FITSfile'].isin(user_selections['images'])
-    deselect_for_low_r_mag = (df_model['r'] < user_selections['min_r_mag'])
-    deselect_for_high_r_mag = (df_model['r'] > user_selections['max_r_mag'])
-    deselect_for_high_catalog_dr_mmag = (df_model['dr'] > user_selections['max_catalog_dr_mmag'])
+    is_comp = (df_model['Type'] == 'Comp')
+    deselect_for_serial = df_model['Serial'].isin(user_selections['serials']) & is_comp
+    deselect_for_comp_id = df_model['SourceID'].isin(user_selections['comps']) & is_comp
+    deselect_for_image = df_model['FITSfile'].isin(user_selections['images'])  # remove MPs as well, here.
+    deselect_for_low_r_mag = (df_model['r'] < user_selections['min_r_mag']) & is_comp
+    deselect_for_high_r_mag = (df_model['r'] > user_selections['max_r_mag']) & is_comp
+    deselect_for_high_catalog_dr_mmag = (df_model['dr'] > user_selections['max_catalog_dr_mmag']) & is_comp
     sloan_ri_color = df_model['r'] - df_model['i']
-    deselect_for_low_sloan_ri_color = (sloan_ri_color < user_selections['min_sloan_ri_color'])
-    deselect_for_high_sloan_ri_color = (sloan_ri_color > user_selections['max_sloan_ri_color'])
+    deselect_for_low_sloan_ri_color = (sloan_ri_color < user_selections['min_sloan_ri_color']) & is_comp
+    deselect_for_high_sloan_ri_color = (sloan_ri_color > user_selections['max_sloan_ri_color']) & is_comp
     obs_to_deselect = list(deselect_for_serial | deselect_for_comp_id | deselect_for_image
                            | deselect_for_low_r_mag | deselect_for_high_r_mag
                            | deselect_for_high_catalog_dr_mmag
@@ -1623,7 +1626,7 @@ def read_model_options():
         lines = [line.split(";")[0] for line in lines]  # remove all comments
         lines = [line.strip() for line in lines]  # remove lead/trail blanks
         lines = [line for line in lines if line != '']  # remove empty lines
-    option_dict = DEFAULT_MODEL_OPTIONS
+    option_dict = DEFAULT_MODEL_OPTIONS.copy()
     for line in lines:
         content = line.upper().strip().split(';')[0].strip()  # upper case, comments removed.
         for key in option_dict.keys():
