@@ -1586,7 +1586,11 @@ def apply_user_selections(df_model, user_selections):
     is_comp = (df_model['Type'] == 'Comp')
     deselect_for_serial = df_model['Serial'].isin(user_selections['serials']) & is_comp
     deselect_for_comp_id = df_model['SourceID'].isin(user_selections['comps']) & is_comp
-    deselect_for_image = df_model['FITSfile'].isin(user_selections['images'])  # remove MPs as well, here.
+
+    images_to_omit = [i + '.fts' for i in user_selections['images']]
+    deselect_for_image = df_model['FITSfile'].isin(images_to_omit)  # remove MPs as well, here.
+    # deselect_for_image = df_model['FITSfile'].isin(user_selections['images'])  # remove MPs as well, here.
+
     deselect_for_low_r_mag = (df_model['r'] < user_selections['min_r_mag']) & is_comp
     deselect_for_high_r_mag = (df_model['r'] > user_selections['max_r_mag']) & is_comp
     deselect_for_high_catalog_dr_mmag = (df_model['dr'] > user_selections['max_catalog_dr_mmag']) & is_comp
