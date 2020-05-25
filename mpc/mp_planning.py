@@ -27,7 +27,7 @@ EXP_OVERHEAD = 20  # Nominal exposure overhead, in seconds.
 MIN_OBSERVABLE_MINUTES = 40  # in minutes
 
 MPFILE_DIRECTORY = 'C:/Dev/Photometry/MPfile'
-ACP_PLANNING_TOP_DIRECTORY = 'C:/Astro/MP Photometry/$Planning'
+ACP_PLANNING_TOP_DIRECTORY = 'C:/Astro/ACP'
 MP_PHOTOMETRY_PLANNING_DIRECTORY = 'C:/Astro/MP Photometry/$Planning'
 CURRENT_MPFILE_VERSION = '1.0'
 
@@ -66,7 +66,14 @@ def plan(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE):
                          '  ' + df.loc[i, 'PhotrixPlanning']]
         lines.append(' '.join(line_elements))
     print('\n'.join(lines))
-    # TODO: also write to CSV file (where?).
+
+    # Make ACP AN directory if doesn't exist, write text file to it:
+    text_file_directory = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string)
+    os.makedirs(text_file_directory, exist_ok=True)
+    text_filename = 'MP_table_' + an_string + '.txt'
+    text_file_fullpath = os.path.join(text_file_directory, text_filename)
+    with open(text_file_fullpath, 'w') as this_file:
+        this_file.write('\n'.join(lines))
 
     # Display plots; also write to PNG files:
     make_coverage_plots(an_string, site_name, df_an_table)
@@ -166,6 +173,8 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
                                                        mpfile.obs_jd_ranges,
                                                        (jd_from_datetime_utc(an_dict['StartUTC']),
                                                         jd_from_datetime_utc(an_dict['EndUTC'])))
+                an_dict['PhaseCoverage'] = make_df_phase_coverage(an_dict['Period'],
+                                                                  mpfile.obs_jd_ranges)
             else:
                 an_dict['Coverage'] = None
             an_dict_list.append(an_dict)
@@ -194,7 +203,7 @@ def make_coverage_plots(an_string, site_name, df_an_table):
         if zero_line is True:
             ax.axhline(y=0, color='lightgray', linewidth=1, zorder=-100)
 
-    # Collect some data, define plot structure:
+    # Prepare some data:
     df = df_an_table.copy()
     an_object = Astronight(an_string, site_name)
     dark_start, dark_end = an_object.ts_dark.start, an_object.ts_dark.end
@@ -202,6 +211,8 @@ def make_coverage_plots(an_string, site_name, df_an_table):
                         day=dark_start.day).replace(tzinfo=timezone.utc)
     hours_dark_start = (dark_start - utc_zero).total_seconds() / 3600.0
     hours_dark_end = (dark_end - utc_zero).total_seconds() / 3600.0
+
+    # Define plot structure (for both hourly coverage and phase coverage):
     max_nobs_to_plot = 5  # max number of previous coverages (y-axis) to plot.
     mps_to_plot = [name for (name, cov) in zip(df['MPnumber'], df['Coverage']) if cov is not None]
     n_plots = len(mps_to_plot)  # count of individual MP plots.
@@ -212,35 +223,58 @@ def make_coverage_plots(an_string, site_name, df_an_table):
     for i_figure in range(n_figures):
         n_plots_remaining = n_plots - (i_figure * n_plots_per_figure)
         n_plots_this_figure = min(n_plots_remaining, n_plots_per_figure)
+
         if n_plots_this_figure >= 1:
-            # Start new Figure:
-            # fig, axes = plt.subplots(ncols=n_cols, nrows=n_rows, figsize=(15, 9))
+            # Start new Figure for HOURLY coverage:
             fig, axes = plt.subplots(ncols=n_cols, nrows=n_rows, figsize=(11, 8))
             fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
             fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
-            fig.suptitle('MP Coverage Plots for ' + an_string + '     ::      Page ' +
+            fig.suptitle('MP Hourly Coverage for ' + an_string + '     ::      Page ' +
                          str(i_figure + 1) + ' of ' + str(n_figures),
                          color='darkblue', fontsize=16)
-            fig.canvas.set_window_title('MP planning for AN ' + an_string)
+            fig.canvas.set_window_title('MP hourly coverage for AN ' + an_string)
             subplot_text = 'rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
             fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=11,
                      color='dimgray')
+
+            # Start new Figure for PHASE coverage:
+            fig_p, axes_p = plt.subplots(ncols=n_cols, nrows=n_rows, figsize=(11, 8))
+            fig_p.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
+            fig_p.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
+            fig_p.suptitle('MP Phase Coverage for ' + an_string + '     ::      Page ' +
+                           str(i_figure + 1) + ' of ' + str(n_figures),
+                           color='darkblue', fontsize=16)
+            fig_p.canvas.set_window_title('MP phase coverage for AN ' + an_string)
+            fig_p.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=11,
+                       color='dimgray')
+
+            # Loop through subplots for BOTH Figure pages (HOURLY & PHASE covereage):
             for i_plot, this_mp in enumerate(mps_to_plot):
                 i_col = i_plot % n_cols
                 i_row = int(floor(i_plot / n_cols))
                 ax = axes[i_row, i_col]
-                make_labels_9_subplots(ax, 'MP ' + this_mp + '   ' + an_string +
-                                       '     {0:.1f}'.format(df.loc[this_mp, 'Period']) + ' h' +
-                                       '   {0:d}%'.format(int(round(df.loc[this_mp, 'DutyCyclePct']))),
-                                       '', '', '', zero_line=False)
-                # Plot coverage curve:
+                ax_p = axes_p[i_row, i_col]
+                subplot_title = 'MP ' + this_mp +\
+                                '    {0:.1f} h'.format(df.loc[this_mp, 'Period']) +\
+                                '    {0:d} s'.format(int(round(df.loc[this_mp, 'ExpTime']))) +\
+                                '    {0:d}%'.format(int(round(df.loc[this_mp, 'DutyCyclePct'])))
+                make_labels_9_subplots(ax, subplot_title, '', '', '', zero_line=False)
+                make_labels_9_subplots(ax_p, subplot_title, '', '', '', zero_line=False)
+
+                # Plot HOURLY coverage curve:
                 datetime_values = (df.loc[this_mp, 'Coverage'])['DateTimeUTC']
                 x = [(dt - utc_zero).total_seconds() / 3600.0 for dt in datetime_values]  # UTC hour.
                 y = (df.loc[this_mp, 'Coverage'])['Coverage']  # count of prev obs (this apparition).
-                ax.plot(x, y, linewidth=3, alpha=1, color='blue', zorder=+50)
-                ax.fill_between(x, 0, y, facecolor='lightblue', zorder=+49)
+                ax.plot(x, y, linewidth=3, alpha=1, color='darkblue', zorder=+50)
+                ax.fill_between(x, 0, y, facecolor=(0.80, 0.83, 0.88), zorder=+49)
 
-                # Make left box if any unavailable timespan before available timespan:
+                # Plot PHASE coverage curve:
+                x = (df.loc[this_mp, 'PhaseCoverage'])['Phase']
+                y = (df.loc[this_mp, 'PhaseCoverage'])['PhaseCoverage']
+                ax_p.plot(x, y, linewidth=3, alpha=1, color='darkgreen', zorder=+50)
+                ax_p.fill_between(x, 0, y, facecolor=(0.83, 0.87, 0.83), zorder=+49)
+
+                # HOURLY coverage: Make left box if any unavailable timespan before available timespan:
                 left_box_start = hours_dark_start
                 left_box_end = (df.loc[this_mp, 'StartUTC'] - utc_zero).total_seconds() / 3600.0
                 if left_box_end > left_box_start:
@@ -250,7 +284,7 @@ def make_coverage_plots(an_string, site_name, df_an_table):
                                                    linewidth=1, alpha=1, zorder=+100,
                                                    edgecolor='black', facecolor='darkgray'))
 
-                # Make right box if any unavailable timespan after available timespan:
+                # HOURLY coverage: Make right box if any unavailable timespan after available timespan:
                 right_box_start = (df.loc[this_mp, 'EndUTC'] - utc_zero).total_seconds() / 3600.0
                 right_box_end = hours_dark_end
                 if right_box_end > right_box_start:
@@ -260,7 +294,7 @@ def make_coverage_plots(an_string, site_name, df_an_table):
                                                    linewidth=1, alpha=1, zorder=+100,
                                                    edgecolor='black', facecolor='darkgray'))
 
-                # Complete the plot:
+                # Complete HOURLY coverage plot:
                 ax.grid(b=True, which='major', axis='x', color='lightgray',
                         linestyle='dotted', zorder=-1000)
                 ax.set_xlim(hours_dark_start, hours_dark_end)
@@ -270,17 +304,41 @@ def make_coverage_plots(an_string, site_name, df_an_table):
                 x_transit = ((df.loc[this_mp, 'TransitUTC']) - utc_zero).total_seconds() / 3600.0
                 ax.axvline(x=x_transit, color='lightblue', zorder=+40)
 
+                # Complete PHASE coverage plot:
+                ax_p.grid(b=True, which='major', axis='x', color='lightgray',
+                          linestyle='dotted', zorder=-1000)
+                ax_p.set_xlim(0.0, 1.0)
+                ax_p.set_ylim(0, max_nobs_to_plot)
+                ax_p.xaxis.set_major_locator(ticker.MultipleLocator(0.1))
+                # ax_p.xaxis.set_minor_locator(ticker.MultipleLocator(0.05))
+
             # Remove any empty subplots (if this is the last Figure):
             for i_plot_to_remove in range(n_plots_this_figure, n_plots_per_figure):
                 i_col = i_plot_to_remove % n_cols
                 i_row = int(floor(i_plot_to_remove / n_cols))
                 ax = axes[i_row, i_col]
                 ax.remove()
+                ax_p = axes_p[i_row, i_col]
+                ax_p.remove()
             plt.show()
-            filename = 'Coverage_plot_' + an_string + '{0:02d}'.format(i_figure + 1) + '.png'
-            fullpath = os.path.join(MP_PHOTOMETRY_PLANNING_DIRECTORY, filename)
-            fig.savefig(fullpath)
 
+            # Save HOURLY coverage plots:
+            filename = 'MP_hourly_coverage_' + an_string + '_{0:02d}'.format(i_figure + 1) + '.png'
+            mp_photometry_planning_fullpath = os.path.join(MP_PHOTOMETRY_PLANNING_DIRECTORY, filename)
+            print('Saving hourly coverage to', mp_photometry_planning_fullpath)
+            fig.savefig(mp_photometry_planning_fullpath)
+            acp_planning_fullpath = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string, filename)
+            print('Saving hourly coverage to', acp_planning_fullpath)
+            fig.savefig(acp_planning_fullpath)
+
+            # Save PHASE coverage plots:
+            filename = 'MP_phase_coverage_' + an_string + '_{0:02d}'.format(i_figure + 1) + '.png'
+            mp_photometry_planning_fullpath = os.path.join(MP_PHOTOMETRY_PLANNING_DIRECTORY, filename)
+            print('Saving phase coverage to', mp_photometry_planning_fullpath)
+            fig_p.savefig(mp_photometry_planning_fullpath)
+            acp_planning_fullpath = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string, filename)
+            print('Saving phase coverage to', acp_planning_fullpath)
+            fig_p.savefig(acp_planning_fullpath)
 
 SUPPORT_____________________________________________________________ = 0
 
@@ -341,6 +399,48 @@ def make_df_coverage(period, obs_jd_ranges, target_jd_ranges, resolution_minutes
     df_coverage = pd.DataFrame({'JD': target_jds, 'DateTimeUTC': dt_array, 'Phase': target_phase_array,
                                 'Coverage': coverage})
     return df_coverage
+
+
+def make_df_phase_coverage(period, obs_jd_ranges, phase_entries=100):
+    """ Construct high-res array for 1 MP describing how well all phases have previously been observed.
+    :param period: MP lightcurve period, in hours. Required, else this function can't work. [float]
+    :param obs_jd_ranges: start,end pairs of Julian Dates for previous obs, this MP.
+        Typically obtained from an updated MPfile for that MP. [list of 2-tuples of floats]
+    :param target_jd_ranges: start,end pair of JDs of proposed new observations.
+        Presumably tonight's available observation timespan. [2-tuple or list of floats]
+    :param phase_entries: how many equally-spaced entries in phase to be computed. [int]
+    :return: 1 row / timepoint in new obs window, columns = JD, DateTimeUTC, Phase, Nobs. [pandas DataFrame]
+    """
+    if period is None:
+        return None
+    if period <= 0.0:
+        return None
+    phase_coverage = (phase_entries + 1) * [0]  # accumulator array.
+
+    # Build coverage array:
+    period_days = period / 24.0
+    # Phase zero defined at JD of earliest (previous) observation (same as in Canopus);
+    # If there is no previous obs, then phase coverages are automatically zero anyway.
+    if len(obs_jd_ranges) >= 1:
+        jd_at_phase_zero = min([float(obs_jd[0]) for obs_jd in obs_jd_ranges])
+        for obs_jd_range in obs_jd_ranges:
+            obs_jd_start, obs_jd_end = obs_jd_range
+            diff_cycles_first_obs = (obs_jd_start - jd_at_phase_zero) / period_days
+            duration_cycles = (obs_jd_end - obs_jd_start) / period_days
+            first_entry = int(round((diff_cycles_first_obs * float(phase_entries)) % float(phase_entries)))
+            if first_entry >= phase_entries:
+                first_entry -= phase_entries
+            n_entries = round(duration_cycles * float(phase_entries))
+            for i in range(first_entry, first_entry + n_entries):
+                phase_coverage[i % phase_entries] += 1
+
+    # Make dataframe:
+    edge_phase_coverage = max(phase_coverage[0], phase_coverage[phase_entries])
+    phase_coverage[0] = edge_phase_coverage
+    phase_coverage[phase_entries] = edge_phase_coverage
+    phase_values = [float(i) / phase_entries for i in range(len(phase_coverage))]
+    df_phase_coverage = pd.DataFrame({'Phase': phase_values, 'PhaseCoverage': phase_coverage})
+    return df_phase_coverage
 
 
 MPFILE_STUFF____________________________________________________ = 0
@@ -548,7 +648,8 @@ class MPfile:
             try:
                 self.period = float(words[0])
             except ValueError:
-                # print(' >>>>> Warning: Period present but non-numeric, [None] stored. (MP=' + self.number + ')')
+                # print(' >>>>> Warning: Period present but non-numeric,'
+                # '[None] stored. (MP=' + self.number + ')')
                 self.period = None
             if len(words) >= 2:
                 self.period_certainty = words[1]
@@ -562,7 +663,8 @@ class MPfile:
             try:
                 self.amplitude = float(amplitude_string)
             except ValueError:
-                # print(' >>>>> Warning: Amplitude present but non-numeric, [None] stored. (MP=' + self.number + ')')
+                # print(' >>>>> Warning: Amplitude present but non-numeric,'
+                # '[None] stored. (MP=' + self.number + ')')
                 self.amplitude = None
         priority_string = self._directive_value(lines, '#PRIORITY')
         try:
@@ -572,7 +674,7 @@ class MPfile:
             self.priority = None
         utc_range_strs = self._directive_words(lines, '#UTC_RANGE')[:2]
         # self.utc_range = [float(range) for range in utc_range_strs]
-        self.utc_range =self._directive_words(lines, '#UTC_RANGE')[:2]
+        self.utc_range = self._directive_words(lines, '#UTC_RANGE')[:2]
         self.utc_range = []
         for utc_str in utc_range_strs:
             year_str, month_str, day_str = tuple(utc_str.split('-'))
