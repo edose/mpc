@@ -17,10 +17,12 @@ from scipy.stats import norm
 
 # From this (mpc) package:
 from mpc.catalogs import Refcat2, get_bounding_ra_dec
+from mpc.mp_planning import all_mpfile_names, MPfile
 
 # From external (EVD) package photrix:
 from photrix.image import Image, FITS
-from photrix.util import RaDec, jd_from_datetime_utc, MixedModelFit
+from photrix.util import RaDec, jd_from_datetime_utc, datetime_utc_from_jd, \
+    MixedModelFit, ra_as_hours, dec_as_hex
 
 __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
@@ -42,7 +44,7 @@ FILTERS_FOR_MP_COLOR_INDEX = ('R', 'I')
 DEFAULT_MP_RI_COLOR = 0.2  # close to known Sloan mean (r-i) for MPs.
 
 # To screen observations:
-MAX_MAG_UNCERT = 0.03  # min signal/noise for comp obs (as InstMagSigma).
+MAX_MAG_UNCERT = 0.03  # min signal/noise for COMP obs (as InstMagSigma).
 # The next two probably should go in Instrument class, but ok for now.
 ADU_SATURATED = 56000  # Max ADU allowable in original (Ur) images.
 VIGNETTING = (1846, 0.62)  # (px from center, max fract of ADU_SATURATED allowed) both at corner.
@@ -59,17 +61,31 @@ DEFAULT_MODEL_OPTIONS = {'fit_transform': False, 'fit_extinction': False,
                          'fit_vignette': True, 'fit_xy': False,
                          'fit_jd': True}  # defaults if not found in file control.txt.
 
-
 # For selecting comps within Refcat2 object (intentionally wide; can narrow with control.txt later):
 MIN_R_MAG = 10
 MAX_R_MAG = 16
 MAX_G_UNCERT = 20  # millimagnitudes
 MAX_R_UNCERT = 20  # "
 MAX_I_UNCERT = 20  # "
-# MIN_BV_COLOR = 0.20  # mags (difference)
-# MAX_BV_COLOR = 1.10  # "
 MIN_SLOAN_RI_COLOR = -0.4
 MAX_SLOAN_RI_COLOR = 0.8
+
+# Defaults (user-changeable) for selecting comps and obs in do_mp_phot():
+PHOT_MIN_R_MAG = MIN_R_MAG
+PHOT_MAX_R_MAG = MAX_R_MAG
+PHOT_MAX_CATALOG_DR_MMAG = 15
+PHOT_MIN_SLOAN_RI_COLOR = 0.0
+PHOT_MAX_SLOAN_RI_COLOR = 0.4
+
+# For ALCDEF File generation:
+DSW_SITE_DATA = {'longitude': -105.6536, 'latitude': +35.3311,
+                 'facility': 'Deep Sky West Observatory',
+                 'mpccode': 'V28'}
+ALCDEF_DATA = {'contactname': 'Eric V. Dose',
+               'contactinfo': 'MP@ericdose.com',
+               'observers': 'Dose, E.V.',
+               'filter': 'C',
+               'magband': 'SR'}
 
 
 _____ATLAS_BASED_WORKFLOW________________________________________________ = 0
@@ -305,14 +321,15 @@ def assess(min_mp_photometry_files=MIN_MP_PHOTOMETRY_FILES):
              ';      Selection criteria for comp stars:',
              ';#COMP  2245 144,   781       ; to omit comp by comp ID (many per line OK)',
              ';#SERIAL 123,7776 2254   16   ; to omit observations by Serial number (many per line OK)',
-             ';#IMAGE  Obj-0000-V           ; to omit FITS image Obj-0000-V.fts specifically',
-             (';#MIN_R_MAG ' + str(MIN_R_MAG)).ljust(30) + '; default=' + str(MIN_R_MAG),
-             (';#MAX_R_MAG ' + str(MAX_R_MAG)).ljust(30) + '; default=' + str(MAX_R_MAG),
-             (';#MAX_CATALOG_DR_MMAG ' + str(MAX_R_UNCERT)).ljust(30) + '; default=' + str(MAX_R_UNCERT),
-             (';#MIN_SLOAN_RI_COLOR ' + str(MIN_SLOAN_RI_COLOR)).ljust(30) +
-             '; default=' + str(MIN_SLOAN_RI_COLOR),
-             (';#MAX_SLOAN_RI_COLOR ' + str(MAX_SLOAN_RI_COLOR)).ljust(30) +
-             '; default=' + str(MAX_SLOAN_RI_COLOR),
+             ';#IMAGE  MP_mmmm-00nn-Clear   ; to omit FITS image (.fts at end optional)',
+             (';#MIN_R_MAG ' + str(PHOT_MIN_R_MAG)).ljust(30) + '; default=' + str(PHOT_MIN_R_MAG),
+             (';#MAX_R_MAG ' + str(PHOT_MAX_R_MAG)).ljust(30) + '; default=' + str(PHOT_MAX_R_MAG),
+             (';#MAX_CATALOG_DR_MMAG ' + str(PHOT_MAX_CATALOG_DR_MMAG)).ljust(30) +
+             '; default=' + str(PHOT_MAX_CATALOG_DR_MMAG),
+             (';#MIN_SLOAN_RI_COLOR ' + str(PHOT_MIN_SLOAN_RI_COLOR)).ljust(30) +
+             '; default=' + str(PHOT_MIN_SLOAN_RI_COLOR),
+             (';#MAX_SLOAN_RI_COLOR ' + str(PHOT_MAX_SLOAN_RI_COLOR)).ljust(30) +
+             '; default=' + str(PHOT_MAX_SLOAN_RI_COLOR),
              ';',
              ';===== Enter before do_mp_phot(): ===================================',
              ';----- OPTIONS for regression model:',
@@ -488,9 +505,11 @@ def make_dfs():
         df_apertures['InstMagSigma'] = (2.5 / log(10)) * \
                                        (df_apertures['net_flux_sigma'] / df_apertures['net_flux'])
 
-        # Remove apertures with low signal-to-noise ratio:
-        snr_ok = [sig < MAX_MAG_UNCERT for sig in df_apertures['InstMagSigma']]
-        df_apertures = df_apertures.loc[snr_ok, :]
+        # Remove COMP apertures with low signal-to-noise ratio (keep all MP apertures whatever their SNRs):
+        aperture_snr_ok = [sig < MAX_MAG_UNCERT for sig in df_apertures['InstMagSigma']]
+        is_mp_aperture = [name.upper().startswith('MP_') for name in df_apertures.index]
+        apertures_to_keep = [ok | mp for (ok, mp) in zip(aperture_snr_ok, is_mp_aperture)]
+        df_apertures = df_apertures.loc[apertures_to_keep, :]
         df_apertures.drop(['n_disc_pixels', 'n_annulus_pixels', 'max_adu', 'net_flux', 'net_flux_sigma'],
                           axis=1, inplace=True)  # delete unneeded columns.
         df_image_obs = df_apertures.copy()
@@ -587,9 +606,9 @@ def do_mp_phot():
     state = get_session_state()  # for extinction and transform values.
 
     # Get MP color index, if images present for filter pair (R, I).
-    mp_color_ri, source_string = get_mp_color_index(df_obs_all, df_images_all, df_comps_all)
-    print('MP color index (r-i) =', '{0:.3f}'.format(mp_color_ri), 'from', source_string)
-    log_file.write('MP color index (r-i) = ' + '{0:.3f}'.format(mp_color_ri) + ' from ' + source_string)
+    mp_color_ri, source_string_ri = get_mp_color_index(df_obs_all, df_images_all, df_comps_all)
+    print('MP color index (r-i) =', '{0:.3f}'.format(mp_color_ri), 'from', source_string_ri)
+    log_file.write('MP color index (r-i) = ' + '{0:.3f}'.format(mp_color_ri) + ' from ' + source_string_ri)
 
     # Make df_full: all data (obs, comp, image) only from images that...
     #     (1) are taken in main photometric filter AND (2) have a valid MP obs:
@@ -637,8 +656,10 @@ def do_mp_phot():
     do_plots(model, df_model, mp_color_ri, state, user_selections)
 
     write_canopus_file(model)
+    write_alcdef_file(model, mp_color_ri, source_string_ri)
 
     # Write log file lines:
+    print('MP color index (r-i) =', '{0:.3f}'.format(mp_color_ri), 'from', source_string_ri)
     pass
 
 
@@ -668,7 +689,7 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
         ax.axvline(x=x_value, color=color, linewidth=1, zorder=-100)
 
     def make_qq_plot_fullpage(window_title, page_title, plot_annotation,
-                              y_values, y_labels, filename, figsize=(12, 9)):
+                              y_values, y_labels, filename, figsize=(11, 8.5)):  # was 12, 9
         fig, axes = plt.subplots(ncols=1, nrows=1, figsize=figsize)  # (width, height) in "inches"
         ax = axes  # not subscripted if just one subplot in Figure
         ax.set_title(page_title, color='darkblue', fontsize=20, pad=30)
@@ -769,7 +790,7 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
                           'Image2_QQ_obs.png')
 
     # ################ FIGURE 3: Catalog and Time plots:
-    fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(15, 9))  # (width, height) in "inches"
+    fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(11, 8.5))  # (width, height) in "inches", was 15,9
     fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
     fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
     fig.suptitle('MP ' + mp_string + '   AN ' + an_string + '     ::     catalog and time plots',
@@ -858,7 +879,7 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
     fig.savefig('Image3_Catalog_and_Time.png')
 
     # ################ FIGURE 4: Residual plots:
-    fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(15, 9))  # (width, height) in "inches"
+    fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(11, 8.5))  # (width, height) in "inches", was 15, 9
     fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
     fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
     fig.suptitle('MP ' + mp_string + '   AN ' + an_string + '     ::     residual plots',
@@ -1032,7 +1053,7 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
         n_plots_this_figure = min(n_plots_remaining, n_plots_per_figure)
         if n_plots_this_figure >= 1:
             # Start new Figure:
-            fig, axes = plt.subplots(ncols=n_cols, nrows=n_rows, figsize=(15, 9))
+            fig, axes = plt.subplots(ncols=n_cols, nrows=n_rows, figsize=(11, 8.5))  # was 15, 9
             fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
             fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
             fig.suptitle('MP ' + mp_string + '   AN ' + an_string + '     ::     Comp Variability Page ' +
@@ -1093,16 +1114,96 @@ def do_plots(model, df_model, mp_color_ri, state, user_selections):
 
 
 def write_canopus_file(model):
-    """  Write file that can be imported into Canopus, to construct a Canopus session, combined with
-         other sessions to create a viable lightcurve.
+    """  Write file that can be imported into Canopus, to populate observation data of one Canopus session.
     :param model: mixed model summary object. [photrix.MixedModelFit object]
     :return: [None]
     """
     this_directory, mp_string, an_string = get_context()
-    fullpath = os.path.join(this_directory, 'canopus_MP_' + mp_string + '_' + an_string + '.txt')
     df = model.df_mp_mags
-    fulltext = '\n'.join(['{0:.6f}'.format(jd) + ',' + '{0:.4f}'.format(mag) + ',' + '{0:.4f}'.format(s)
-                          for (jd, mag, s) in zip(df['JD_mid'], df['MP_Mags'], df['InstMagSigma'])])
+    fulltext = '\n'.join(['{0:.6f}'.format(jd) + ',' + '{0:.4f}'.format(mag) + ',' + '{0:.4f}'.format(s) +
+                          ',' + f
+                          for (jd, mag, s, f) in zip(df['JD_mid'], df['MP_Mags'], df['InstMagSigma'],
+                                                     df['FITSfile'])])
+    fullpath = os.path.join(this_directory, 'canopus_MP_' + mp_string + '_' + an_string + '.txt')
+    with open(fullpath, 'w') as f:
+        f.write(fulltext)
+
+
+def write_alcdef_file(model, mp_color_ri, source_string_ri):
+    """  Write file that can be uploaded to ALCDEF, to make one session's observation available to public.
+    :param model: mixed model summary object. [photrix.MixedModelFit object]
+    :param mp_color_ri: MP color in Sloan r-i. [float]
+    :param source_string_ri: tells where mp_color_ri value came from. [string]
+    :return: [None]
+    """
+    this_directory, mp_string, an_string = get_context()
+    mpfile_names = all_mpfile_names()
+    name_list = [name for name in mpfile_names if name.startswith('MP_' + mp_string)]
+    if len(name_list) <= 0:
+        print(' >>>>> ERROR: No MPfile can be found for MP', mp_string)
+        return
+    if len(name_list) >= 2:
+        print(' >>>>> ERROR: Multiple MPfiles were found for MP', mp_string,
+              '... please ensure that only one is available.')
+        return
+    mpfile = MPfile(name_list[0])
+    site_data = DSW_SITE_DATA
+    df = model.df_mp_mags
+
+    # Build data that will go into file:
+    lines = list()
+    lines.append('# ALCDEF file for MP' + mp_string + '  AN ' + an_string)
+    lines.append('STARTMETADATA')
+    lines.append('REVISEDDATA=FALSE')
+    lines.append('OBJECTNUMBER=' + mp_string)
+    lines.append('OBJECTNAME=' + mpfile.name)
+    lines.append('ALLOWSHARING=TRUE')
+    # lines.append('MPCDESIG=')
+    lines.append('CONTACTNAME=' + ALCDEF_DATA['contactname'])
+    lines.append('CONTACTINFO=' + ALCDEF_DATA['contactinfo'])
+    lines.append('OBSERVERS=' + ALCDEF_DATA['observers'])
+    lines.append('OBSLONGITUDE=' + '{0:.4f}'.format(site_data['longitude']))
+    lines.append('OBSLATITUDE=' + '{0:.4f}'.format(site_data['latitude']))
+    lines.append('FACILITY=' + site_data['facility'])
+    lines.append('MPCCODE=' + site_data['mpccode'])
+    # lines.append('PUBLICATION=')
+    jd_session_start = min(df['JD_mid'])
+    jd_session_end = max(df['JD_mid'])
+    jd_session_mid = (jd_session_start + jd_session_end) / 2.0
+    utc_session_mid = datetime_utc_from_jd(jd_session_mid)  # (needed below)
+    dt_split = utc_session_mid.isoformat().split('T')
+    lines.append('SESSIONDATE=' + dt_split[0])
+    lines.append('SESSIONTIME=' + dt_split[1].split('+')[0].split('.')[0])
+    lines.append('FILTER=' + ALCDEF_DATA['filter'])
+    lines.append('MAGBAND=' + ALCDEF_DATA['magband'])
+    lines.append('LTCTYPE=NONE')
+    # lines.append('LTCDAYS=0')
+    # lines.append('LTCAPP=NONE')
+    lines.append('REDUCEDMAGS=NONE')
+    session_dict = mpfile.eph_from_utc(utc_session_mid)
+    earth_mp_au = session_dict['Delta']
+    sun_mp_au = session_dict['R']
+    reduced_mag_correction = -5.0 * log10(earth_mp_au * sun_mp_au)
+    lines.append('UCORMAG=' + '{0:.4f}'.format(reduced_mag_correction))
+    lines.append('OBJECTRA=' + ra_as_hours(session_dict['RA']).rsplit(':', 1)[0])
+    lines.append('OBJECTDEC=' + dec_as_hex(round(session_dict['Dec'])).split(':')[0])
+    lines.append('PHASE=+' + '{0:.1f}'.format(abs(session_dict['Phase'])))
+    lines.append('PABL=' + '{0:.1f}'.format(abs(session_dict['PAB_longitude'])))
+    lines.append('PABB=' + '{0:.1f}'.format(abs(session_dict['PAB_latitude'])))
+    lines.append('# Comp stars omitted: our ATLAS workflow uses many more than ALCDEF\'s max of 10.')
+    lines.append('CICORRECTION=TRUE')
+    lines.append('CIBAND=SRI')
+    lines.append('CITARGET=' + '{0:.2f}'.format(mp_color_ri) + '  # originating from ' + source_string_ri)
+    lines.append('DELIMITER=PIPE')
+    lines.append('ENDMETADATA')
+    data_lines = ['DATA=' + '|'.join(['{0:.6f}'.format(jd), '{0:.3f}'.format(mag), '{0:.3f}'.format(sigma)])
+                  for (jd, mag, sigma) in zip(df['JD_mid'], df['MP_Mags'], df['InstMagSigma'])]
+    lines.extend(data_lines)
+    lines.append('ENDDATA')
+
+    # Write the file and exit:
+    fulltext = '\n'.join(lines) + '\n'
+    fullpath = os.path.join(this_directory, 'alcdef_MP_' + mp_string + '_' + an_string + '.txt')
     with open(fullpath, 'w') as f:
         f.write(fulltext)
 
@@ -1218,7 +1319,8 @@ class SessionModel:
             - dep_var_offsets - raw_predictions + bogus_cat_mag  # correct for use of bogus cat mag.
         df_mp_mags = pd.DataFrame({'MP_Mags': mp_mags}, index=list(mp_mags.index))
         df_mp_mags = pd.merge(left=df_mp_mags,
-                              right=self.df_used_mps_only.loc[:, ['JD_mid', 'InstMag', 'InstMagSigma']],
+                              right=self.df_used_mps_only.loc[:, ['JD_mid', 'FITSfile',
+                                                                  'InstMag', 'InstMagSigma']],
                               how='left', left_index=True, right_index=True, sort=False)
         return df_mp_mags
 
@@ -1527,9 +1629,9 @@ def read_user_selections():
         lines = [line for line in lines if line != '']  # remove empty lines
 
     serial_list, comp_list, image_list = [], [], []
-    min_r_mag, max_r_mag = MIN_R_MAG, MAX_R_MAG
-    max_catalog_dr_mmag = MAX_R_UNCERT
-    min_sloan_ri_color, max_sloan_ri_color = MIN_SLOAN_RI_COLOR, MAX_SLOAN_RI_COLOR
+    min_r_mag, max_r_mag = PHOT_MIN_R_MAG, PHOT_MAX_R_MAG
+    max_catalog_dr_mmag = PHOT_MAX_CATALOG_DR_MMAG
+    min_sloan_ri_color, max_sloan_ri_color = PHOT_MIN_SLOAN_RI_COLOR, PHOT_MAX_SLOAN_RI_COLOR
     for line in lines:
         content = line.strip().split(';')[0].strip()  # upper case, comments removed.
         content_upper = content.upper()
@@ -1587,9 +1689,9 @@ def apply_user_selections(df_model, user_selections):
     deselect_for_serial = df_model['Serial'].isin(user_selections['serials']) & is_comp
     deselect_for_comp_id = df_model['SourceID'].isin(user_selections['comps']) & is_comp
 
-    images_to_omit = [i + '.fts' for i in user_selections['images']]
+    images_to_omit = [i for i in user_selections['images']] +\
+                     [i + '.fts' for i in user_selections['images']]  # allow entry w/ or w/ '.fts' at end.
     deselect_for_image = df_model['FITSfile'].isin(images_to_omit)  # remove MPs as well, here.
-    # deselect_for_image = df_model['FITSfile'].isin(user_selections['images'])  # remove MPs as well, here.
 
     deselect_for_low_r_mag = (df_model['r'] < user_selections['min_r_mag']) & is_comp
     deselect_for_high_r_mag = (df_model['r'] > user_selections['max_r_mag']) & is_comp

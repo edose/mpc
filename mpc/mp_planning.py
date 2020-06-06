@@ -14,10 +14,9 @@ import matplotlib.patches as patches
 
 from mpc.mp_astrometry import calc_exp_time, PAYLOAD_DICT_TEMPLATE, get_one_html_from_list
 from photrix.user import Astronight
-from photrix.util import degrees_as_hex, ra_as_hours, RaDec, datetime_utc_from_jd, jd_from_datetime_utc,\
-    hhmm_from_datetime_utc
+from photrix.util import RaDec, datetime_utc_from_jd, jd_from_datetime_utc, hhmm_from_datetime_utc
 
-# MP_ASTROMETRY_PLANNING:
+# MP_PHOTOMETRY_PLANNING:
 MIN_MP_ALTITUDE = 30  # degrees
 MIN_MOON_DISTANCE = 45  # degrees
 DSW = ('254.34647d', '35.11861269964489d', '2220m')
@@ -25,6 +24,7 @@ DSNM = ('251.10288d', '31.748657576406853d', '1372m')
 EXP_TIME_TABLE_PHOTOMETRY = [(13, 60), (14, 80), (15, 160), (16, 300)]  # (v_mag, exp_time sec), phot only.
 EXP_OVERHEAD = 20  # Nominal exposure overhead, in seconds.
 MIN_OBSERVABLE_MINUTES = 40  # in minutes
+COV_RESOLUTION_MINUTES = 5  # min. coverage plot resolution, in minutes.
 
 MPFILE_DIRECTORY = 'C:/Dev/Photometry/MPfile'
 ACP_PLANNING_TOP_DIRECTORY = 'C:/Astro/ACP'
@@ -96,33 +96,33 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
     mpfile_dict = make_mpfile_dict()
 
     # Nested function:
-    def get_eph_for_utc(mpfile, datetime_utc, min_moon_dist=MIN_MOON_DISTANCE):
-        """ Interpolate data from mpfile object's ephemeris; return dict and status string.
-            Current code requires that ephemeris line spacing spacing = 1 day.
-        :param mpfile: MPfile filename of MP in question. [string]
-        :param datetime_utc: target utc date and time. [python datetime object]
-        :param min_moon_dist: min dist from min (degrees) to consider MP observable [float].
-        :return: dict of results specific to this MP and datetime, status string 'OK' or other
-                 (2-tuple of dict and string)
-        """
-        #
-        mpfile_first_date_utc = mpfile.eph_dict_list[0]['DatetimeUTC']
-        index = (datetime_utc - mpfile_first_date_utc).total_seconds() / 24 / 3600
-        if index < 0:
-            return None, ' >>>>> Error: Requested datetime before mpfile ephemeris.'
-        if index >= len(mpfile.eph_dict_list):
-            return None, ' >>>>> Error: Requested datetime after mpfile ephemeris.'
-        return_dict = dict()
-        i_low = int(floor(index))  # line in ephemeris just previous to target datetime.
-        # i_high = int(ceil(index))
-        fract = index - i_low  # fraction of timespan after previous line.
-        for k in mpfile.eph_dict_list[0].keys():
-            value_before, value_after = mpfile.eph_dict_list[i_low][k], mpfile.eph_dict_list[i_low + 1][k]
-            # Add interpolated value if not a string;
-            #    (use this calc form, because you can subtract but not add datetime objects):
-            if isinstance(value_before, datetime) or isinstance(value_before, float):
-                return_dict[k] = value_before + fract * (value_after - value_before)  # interpolated value.
-        return return_dict, 'OK'
+    # def get_eph_for_utc(mpfile, datetime_utc, min_moon_dist=MIN_MOON_DISTANCE):
+    #     """ Interpolate data from mpfile object's ephemeris; return dict and status string.
+    #         Current code requires that ephemeris line spacing spacing = 1 day.
+    #     :param mpfile: MPfile filename of MP in question. [string]
+    #     :param datetime_utc: target utc date and time. [python datetime object]
+    #     :param min_moon_dist: min dist from min (degrees) to consider MP observable [float].
+    #     :return: dict of results specific to this MP and datetime, status string 'OK' or other
+    #              (2-tuple of dict and string)
+    #     """
+    #     #
+    #     mpfile_first_date_utc = mpfile.eph_dict_list[0]['DatetimeUTC']
+    #     index = (datetime_utc - mpfile_first_date_utc).total_seconds() / 24 / 3600
+    #     if index < 0:
+    #         return None, ' >>>>> Error: Requested datetime before mpfile ephemeris.'
+    #     if index >= len(mpfile.eph_dict_list) - 1:
+    #         return None, ' >>>>> Error: Requested datetime after mpfile ephemeris.'
+    #     return_dict = dict()
+    #     i_low = int(floor(index))  # line in ephemeris just previous to target datetime.
+    #     # i_high = int(ceil(index))
+    #     fract = index - i_low  # fraction of timespan after previous line.
+    #     for k in mpfile.eph_dict_list[0].keys():
+    #         value_before, value_after = mpfile.eph_dict_list[i_low][k], mpfile.eph_dict_list[i_low + 1][k]
+    #         # Add interpolated value if not a string;
+    #         #    (use this calc form, because you can subtract but not add datetime objects):
+    #         if isinstance(value_before, datetime) or isinstance(value_before, float):
+    #             return_dict[k] = value_before + fract * (value_after - value_before)  # interpolated value.
+    #     return return_dict, 'OK'
 
     an_dict_list = []  # results to be deposited here, to make a dataframe later.
     for mp in mpfile_dict.keys():
@@ -135,7 +135,8 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
         data, status, ts_observable, mp_radec = None, None, None, None  # keep stupid IDE happy.
         best_utc = mid_dark  # best_utc will = mid-observable time at converged RA,Dec.
         for i in range(2):
-            data, status = get_eph_for_utc(mpfile, best_utc, min_moon_dist=min_moon_dist)
+            data = mpfile.eph_from_utc(best_utc)
+            status = 'OK' if data is not None else 'Error'
             an_dict['Status'] = status
             if status.upper() != 'OK':
                 an_dict_list.append(an_dict)
@@ -146,7 +147,6 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
                                                     min_moon_dist=min_moon_dist)  # Timespan object
             mid_observable = ts_observable.midpoint  # for loop exit
             best_utc = mid_observable  # update for loop continuation.
-        data, status = get_eph_for_utc(mpfile, best_utc, min_moon_dist=min_moon_dist)  # data we will use.
         if ts_observable.seconds / 60.0 < MIN_OBSERVABLE_MINUTES:
             status = '(observable for only ' + str(int(ts_observable.seconds / 60.0)) + ' minutes)'
         if status.upper() == 'OK':
@@ -166,8 +166,8 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
                 an_dict['DutyCyclePct'] = None
             an_dict['PhotrixPlanning'] = 'IMAGE MP_' + mpfile.number + \
                                          '  Clear=' + str(an_dict['ExpTime']) + 'sec(***)  ' + \
-                                         ra_as_hours(an_dict['RA']) + ' ' + \
-                                         degrees_as_hex(an_dict['Dec'], seconds_decimal_places=0)
+                                         ra_as_hours(an_dict['RA'], seconds_decimal_places=1) + ' ' + \
+                                         degrees_as_hex(an_dict['Dec'], arcseconds_decimal_places=0)
             if an_dict['Period'] is not None:
                 an_dict['Coverage'] = make_df_coverage(an_dict['Period'],
                                                        mpfile.obs_jd_ranges,
@@ -213,7 +213,7 @@ def make_coverage_plots(an_string, site_name, df_an_table):
     hours_dark_end = (dark_end - utc_zero).total_seconds() / 3600.0
 
     # Define plot structure (for both hourly coverage and phase coverage):
-    max_nobs_to_plot = 5  # max number of previous coverages (y-axis) to plot.
+    max_nobs_to_plot = 5  # max number of previous coverages (y-axis value) to plot.
     mps_to_plot = [name for (name, cov) in zip(df['MPnumber'], df['Coverage']) if cov is not None]
     n_plots = len(mps_to_plot)  # count of individual MP plots.
     n_cols, n_rows = 3, 3
@@ -223,7 +223,6 @@ def make_coverage_plots(an_string, site_name, df_an_table):
     for i_figure in range(n_figures):
         n_plots_remaining = n_plots - (i_figure * n_plots_per_figure)
         n_plots_this_figure = min(n_plots_remaining, n_plots_per_figure)
-
         if n_plots_this_figure >= 1:
             # Start new Figure for HOURLY coverage:
             fig, axes = plt.subplots(ncols=n_cols, nrows=n_rows, figsize=(11, 8))
@@ -249,7 +248,9 @@ def make_coverage_plots(an_string, site_name, df_an_table):
                        color='dimgray')
 
             # Loop through subplots for BOTH Figure pages (HOURLY & PHASE covereage):
-            for i_plot, this_mp in enumerate(mps_to_plot):
+            i_first = i_figure * n_plots_per_figure
+            for i_plot in range(0, n_plots_this_figure):
+                this_mp = mps_to_plot[i_first + i_plot]
                 i_col = i_plot % n_cols
                 i_row = int(floor(i_plot / n_cols))
                 ax = axes[i_row, i_col]
@@ -304,6 +305,15 @@ def make_coverage_plots(an_string, site_name, df_an_table):
                 x_transit = ((df.loc[this_mp, 'TransitUTC']) - utc_zero).total_seconds() / 3600.0
                 ax.axvline(x=x_transit, color='lightblue', zorder=+40)
 
+                # PHASE coverage: add vertical line for phase at StartUTC for this MP on this AN:
+                JD_ref = ((df.loc[this_mp, 'Coverage'])['JD'])[0]
+                phase_ref = ((df.loc[this_mp, 'Coverage'])['Phase'])[0]
+                JD_start = jd_from_datetime_utc(df.loc[this_mp, 'StartUTC'])
+                period_days = df.loc[this_mp, 'Period'] / 24.0
+                phase_start = (phase_ref + (JD_start - JD_ref) / period_days) % 1.0
+                # print(' >>>>>', this_mp, str(phase_start))
+                ax_p.axvline(x=phase_start, color='darkgreen', linewidth=2, zorder=+40)
+
                 # Complete PHASE coverage plot:
                 ax_p.grid(b=True, which='major', axis='x', color='lightgray',
                           linestyle='dotted', zorder=-1000)
@@ -325,20 +335,21 @@ def make_coverage_plots(an_string, site_name, df_an_table):
             # Save HOURLY coverage plots:
             filename = 'MP_hourly_coverage_' + an_string + '_{0:02d}'.format(i_figure + 1) + '.png'
             mp_photometry_planning_fullpath = os.path.join(MP_PHOTOMETRY_PLANNING_DIRECTORY, filename)
-            print('Saving hourly coverage to', mp_photometry_planning_fullpath)
+            # print('Saving hourly coverage to', mp_photometry_planning_fullpath)
             fig.savefig(mp_photometry_planning_fullpath)
             acp_planning_fullpath = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string, filename)
-            print('Saving hourly coverage to', acp_planning_fullpath)
+            # print('Saving hourly coverage to', acp_planning_fullpath)
             fig.savefig(acp_planning_fullpath)
 
             # Save PHASE coverage plots:
             filename = 'MP_phase_coverage_' + an_string + '_{0:02d}'.format(i_figure + 1) + '.png'
             mp_photometry_planning_fullpath = os.path.join(MP_PHOTOMETRY_PLANNING_DIRECTORY, filename)
-            print('Saving phase coverage to', mp_photometry_planning_fullpath)
+            # print('Saving phase coverage to', mp_photometry_planning_fullpath)
             fig_p.savefig(mp_photometry_planning_fullpath)
             acp_planning_fullpath = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string, filename)
-            print('Saving phase coverage to', acp_planning_fullpath)
+            # print('Saving phase coverage to', acp_planning_fullpath)
             fig_p.savefig(acp_planning_fullpath)
+
 
 SUPPORT_____________________________________________________________ = 0
 
@@ -351,7 +362,7 @@ def photometry_exp_time_from_v_mag(v_mag):
     return calc_exp_time(v_mag, EXP_TIME_TABLE_PHOTOMETRY)
 
 
-def make_df_coverage(period, obs_jd_ranges, target_jd_ranges, resolution_minutes=10):
+def make_df_coverage(period, obs_jd_ranges, target_jd_ranges, resolution_minutes=COV_RESOLUTION_MINUTES):
     """ Construct high-resolution array describing how well tonight's phases have previously been observed.
     :param period: MP lightcurve period, in hours. Required, else this function can't work. [float]
     :param obs_jd_ranges: start,end pairs of Julian Dates for previous obs, this MP.
@@ -443,6 +454,68 @@ def make_df_phase_coverage(period, obs_jd_ranges, phase_entries=100):
     return df_phase_coverage
 
 
+def ra_as_hours(ra_degrees, seconds_decimal_places=3):
+    """
+    Adapted 20200525 from photrix.util module.
+    :param ra_degrees: Right Ascension in degrees. [float]
+    :param seconds_decimal_places: number of places to the right of the decimal point. [int]
+    :return: RA as hours, in hex. [string]
+    """
+    if (ra_degrees < 0) | (ra_degrees > 360):
+        return None
+    n_ra_milliseconds = round((ra_degrees * 3600 * 1000) / 15)
+    ra_hours, remainder = divmod(n_ra_milliseconds, 3600 * 1000)
+    ra_minutes, remainder = divmod(remainder, 60 * 1000)
+    ra_seconds = round(remainder / 1000, 3)
+    # format_string = "{0:02d}:{1:02d}:{2:06.3f}"
+    if seconds_decimal_places <= 0:
+        format_string = "{0:02d}:{1:02d}:{2:02.0f}"
+    else:
+        format_string = '{0:02d}:{1:02d}:{2:0' + str(3 + seconds_decimal_places) + \
+                        '.' + str(seconds_decimal_places) + 'f}'
+    ra_str = format_string.format(int(ra_hours), int(ra_minutes), ra_seconds)
+    if ra_str[:3] == "24:":
+        ra_str = format_string.format(0, 0, 0)
+    return ra_str
+
+
+def dec_as_hex(dec_degrees):
+    """
+    Copied 20200525 from photrix.util module.
+    :param dec_degrees: Declination in degrees.  [float]
+    :return: Declination in hex, or None if Dec value illegal. [string]
+    """
+    if (dec_degrees < -90) | (dec_degrees > +90):
+        return None
+    dec_string = degrees_as_hex(dec_degrees, seconds_decimal_places=2)
+    return dec_string
+
+
+def degrees_as_hex(angle_degrees, arcseconds_decimal_places=2):
+    """
+    Adapted 20200525 from photrix.util module.
+    :param angle_degrees: any angle as degrees.
+    :param arcseconds_decimal_places: number of places after the decimal point, arcseconds. [int]
+    :return: Angle in hex notation, unbounded. [float]
+    """
+    if angle_degrees < 0:
+        sign = "-"
+    else:
+        sign = "+"
+    abs_degrees = abs(angle_degrees)
+    milliseconds = round(abs_degrees * 3600 * 1000)
+    degrees, remainder = divmod(milliseconds, 3600 * 1000)
+    minutes, remainder = divmod(remainder, 60 * 1000)
+    seconds = round(remainder / 1000, 2)
+    if arcseconds_decimal_places <= 0:
+        format_string = "{0}{1:02d}:{2:02d}:{3:02.0f}"
+    else:
+        format_string = '{0}{1:02d}:{2:02d}:{3:0' + str(int(arcseconds_decimal_places)+3) + \
+                        '.' + str(int(arcseconds_decimal_places)) + 'f}'
+    hex_string = format_string.format(sign, int(degrees), int(minutes), seconds)
+    return hex_string
+
+
 MPFILE_STUFF____________________________________________________ = 0
 
 
@@ -453,6 +526,7 @@ def make_mpfile(mp_number, utc_date_start=None, days=90, mpfile_directory=MPFILE
     :param days: number of days to include in ephemeris. [int]
     :param mpfile_directory: where to write file (almost always use default). [string]
     :return: [None]
+    USAGE: make_mpfile(2653, 20200602)
     """
     mp_number = str(mp_number)
     s = str(utc_date_start).replace('-', '')
@@ -686,7 +760,10 @@ class MPfile:
         obs_jd_range_strs = [value.split() for value in obs_strings]  # nested list of strings (not floats)
         self.obs_jd_ranges = []
         for range in obs_jd_range_strs:
-            self.obs_jd_ranges.append([float(range[0]), float(range[1])])
+            if len(range) >= 2:
+                self.obs_jd_ranges.append([float(range[0]), float(range[1])])
+            else:
+                print(' >>>>> ERROR: missing #OBS field for MP', self.number, self.name)
 
         # ---------- Ephemeris section:
         eph_dict_list = []
@@ -746,6 +823,27 @@ class MPfile:
         if value is None:
             return None
         return value.split()
+
+    def eph_from_utc(self, datetime_utc):
+        """ Interpolate data from mpfile object's ephemeris; return dict, or None if bad datetime input.
+            Current code requires that ephemeris line spacing spacing = 1 day.
+        :param datetime_utc: target utc date and time. [python datetime object]
+        :return: dict of results specific to this MP and datetime, or None if bad datetime input. [dict]
+        """
+        mpfile_first_date_utc = self.eph_dict_list[0]['DatetimeUTC']
+        i = (datetime_utc - mpfile_first_date_utc).total_seconds() / 24 / 3600  # a float.
+        if not(0 <= i < len(self.eph_dict_list) - 1):  # i.e., if outside date range of eph table.
+            return None
+        return_dict = dict()
+        i_floor = int(floor(i))
+        i_fract = i - i_floor
+        for k in self.eph_dict_list[0].keys():
+            value_before, value_after = self.eph_dict_list[i_floor][k], self.eph_dict_list[i_floor + 1][k]
+            # Add interpolated value if not a string;
+            #    (use this calc form, because you can subtract but not add datetime objects):
+            if isinstance(value_before, datetime) or isinstance(value_before, float):
+                return_dict[k] = value_before + i_fract * (value_after - value_before)  # interpolated val.
+        return return_dict
 
 
 ANCILLARY_only________________________________________________________ = 0
