@@ -16,6 +16,14 @@ from mpc.mp_astrometry import calc_exp_time, PAYLOAD_DICT_TEMPLATE, get_one_html
 from photrix.user import Astronight
 from photrix.util import RaDec, datetime_utc_from_jd, jd_from_datetime_utc, hhmm_from_datetime_utc
 
+MOON_CHARACTER = '\u263D'
+# MOON_CHARACTER = '\U0001F319'  # Drat, matplotlib complains 'glyph missing from current font'.
+HTTP_OK_CODE = 200  # "OK. The request has succeeded."
+CALL_TARGET_COLUMNS = ['LCDB', 'Eph', 'CN', 'CS', 'Favorable', 'Num', 'Name',
+                       'OppDate', 'OppMag',
+                       'MinDistDate', 'MDist', 'BrtDate', 'BrtMag', 'BrtDec', 'PFlag', 'P',
+                       'AmplMin', 'AmplMax', 'U', 'Diam']
+
 # MP_PHOTOMETRY_PLANNING:
 MIN_MP_ALTITUDE = 30  # degrees
 MIN_MOON_DISTANCE = 45  # degrees
@@ -95,35 +103,6 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
     # dark_no_moon_start, dark_no_moon_end = an_object.ts_dark_no_moon.start, an_object.ts_dark_no_moon.end
     mpfile_dict = make_mpfile_dict()
 
-    # Nested function:
-    # def get_eph_for_utc(mpfile, datetime_utc, min_moon_dist=MIN_MOON_DISTANCE):
-    #     """ Interpolate data from mpfile object's ephemeris; return dict and status string.
-    #         Current code requires that ephemeris line spacing spacing = 1 day.
-    #     :param mpfile: MPfile filename of MP in question. [string]
-    #     :param datetime_utc: target utc date and time. [python datetime object]
-    #     :param min_moon_dist: min dist from min (degrees) to consider MP observable [float].
-    #     :return: dict of results specific to this MP and datetime, status string 'OK' or other
-    #              (2-tuple of dict and string)
-    #     """
-    #     #
-    #     mpfile_first_date_utc = mpfile.eph_dict_list[0]['DatetimeUTC']
-    #     index = (datetime_utc - mpfile_first_date_utc).total_seconds() / 24 / 3600
-    #     if index < 0:
-    #         return None, ' >>>>> Error: Requested datetime before mpfile ephemeris.'
-    #     if index >= len(mpfile.eph_dict_list) - 1:
-    #         return None, ' >>>>> Error: Requested datetime after mpfile ephemeris.'
-    #     return_dict = dict()
-    #     i_low = int(floor(index))  # line in ephemeris just previous to target datetime.
-    #     # i_high = int(ceil(index))
-    #     fract = index - i_low  # fraction of timespan after previous line.
-    #     for k in mpfile.eph_dict_list[0].keys():
-    #         value_before, value_after = mpfile.eph_dict_list[i_low][k], mpfile.eph_dict_list[i_low + 1][k]
-    #         # Add interpolated value if not a string;
-    #         #    (use this calc form, because you can subtract but not add datetime objects):
-    #         if isinstance(value_before, datetime) or isinstance(value_before, float):
-    #             return_dict[k] = value_before + fract * (value_after - value_before)  # interpolated value.
-    #     return return_dict, 'OK'
-
     an_dict_list = []  # results to be deposited here, to make a dataframe later.
     for mp in mpfile_dict.keys():
         mpfile = mpfile_dict[mp]
@@ -155,6 +134,8 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
             an_dict['StartUTC'] = ts_observable.start
             an_dict['EndUTC'] = ts_observable.end
             an_dict['TransitUTC'] = an_object.transit(mp_radec)
+            an_dict['MoonDist'] = mp_radec.degrees_from(an_object.moon_radec)
+            an_dict['PhaseAngle'] = data['Phase']
             an_dict['V_mag'] = data['V_mag']
             an_dict['ExpTime'] = float(round(float(calc_exp_time(an_dict['V_mag'],
                                                                  EXP_TIME_TABLE_PHOTOMETRY))))
@@ -182,7 +163,7 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
         return None
     df_an_table = pd.DataFrame(data=an_dict_list)
     df_an_table.index = df_an_table['MPnumber'].values
-    df_an_table = df_an_table.sort_values(by='StartUTC')
+    df_an_table = df_an_table.sort_values(by='TransitUTC')
     return df_an_table
 
 
@@ -294,6 +275,25 @@ def make_coverage_plots(an_string, site_name, df_an_table):
                                                    max_nobs_to_plot,
                                                    linewidth=1, alpha=1, zorder=+100,
                                                    edgecolor='black', facecolor='darkgray'))
+
+                # HOURLY coverage: add info box.
+                infobox_text = df.loc[this_mp, 'MPname'] + '   ' + MOON_CHARACTER + ' ' +\
+                    str(int(round(df.loc[this_mp, 'MoonDist']))) + u'\N{DEGREE SIGN}' +\
+                    '   ' + 'α=' + '{0:.1f}'.format(df.loc[this_mp, 'PhaseAngle']) + u'\N{DEGREE SIGN}' +\
+                    '   ' + df.loc[this_mp, 'Motive']
+                hours_dark = hours_dark_end - hours_dark_start
+                ax.add_patch(patches.Rectangle((hours_dark_start, 4.3), hours_dark, 0.8,
+                                               linewidth=1, alpha=0.75, zorder=+200,
+                                               fill=True, edgecolor='lightgray', facecolor='whitesmoke'))
+                ax.text(x=hours_dark_start + 0.02 * hours_dark, y=4.6, s=infobox_text,
+                        verticalalignment='center', fontsize=8, color='dimgray', zorder=+201)
+
+                # PHASE coverage: add info box.
+                ax_p.add_patch(patches.Rectangle((0, 4.3), 1.0, 0.8,
+                                                 linewidth=1, alpha=0.75, zorder=+200,
+                                                 fill=True, edgecolor='lightgray', facecolor='whitesmoke'))
+                ax_p.text(x=0.02, y=4.6, s=infobox_text,
+                          verticalalignment='center', fontsize=8, color='dimgray', zorder=+201)
 
                 # Complete HOURLY coverage plot:
                 ax.grid(b=True, which='major', axis='x', color='lightgray',
@@ -603,13 +603,13 @@ def make_mpfile(mp_number, utc_date_start=None, days=90, mpfile_directory=MPFILE
     mpfile_fullpath = os.path.join(mpfile_directory, mpfile_name)
     with open(mpfile_fullpath, 'w') as this_file:
         this_file.write('\n'.join(['; MPfile text file for MP photometry during one apparition.',
-                                   '; Generated by mpc.mp_planning.make_mpfile()',
+                                   '; Generated by mpc.mp_planning.make_mpfile() then edited by user',
                                    '#MP'.ljust(13) + str(mp_number).ljust(24) + '; minor planet number',
                                    '#NAME'.ljust(13) + 'XXX'.ljust(24) + '; minor planet name',
                                    '#APPARITION'.ljust(13) + str(apparition_year).ljust(24) + '; year',
-                                   '#MOTIVE'.ljust(13) + 'XXX',
-                                   '#PERIOD'.ljust(13) + 'nn.nnn  [n]'.ljust(24) +
-                                   '; hours or ? [certainty per LCDB (1-3[+-])',
+                                   '#MOTIVE'.ljust(13) + 'XXX  ;  [pet,shape,period[n,X,??],low-phase]',
+                                   '#PERIOD'.ljust(13) + 'nn.nnn  n'.ljust(24) +
+                                   '; hours or ? followed by certainty per LCDB (1-3[+-])',
                                    '#AMPLITUDE'.ljust(13) + '0.nn'.ljust(24) + '; magnitudes expected',
                                    '#PRIORITY'.ljust(13) + 'n'.ljust(24) + '; 0-10 (6=normal)',
                                    '#UTC_RANGE'.ljust(13) +
@@ -633,7 +633,8 @@ def make_mpfile(mp_number, utc_date_start=None, days=90, mpfile_directory=MPFILE
                         'Angle  Long.   Lat.   Phase  Dist.  Long. Lat.\n' +
                         (125 * '-'))
         this_file.write('\n' + '\n'.join(df_eph['Output']))
-        print(mpfile_fullpath, 'written. \n   >>>>> Now please edit with name, period, other data.')
+        print(mpfile_fullpath, 'written. \n   >>>>> Now please edit with '
+                               'name, motive, period & code, amplitude, other data.')
 
 
 def make_mpfile_dict(mpfile_directory=MPFILE_DIRECTORY):
@@ -650,7 +651,7 @@ def make_mpfile_dict(mpfile_directory=MPFILE_DIRECTORY):
 def all_mpfile_names(mpfile_directory=MPFILE_DIRECTORY):
     """ Returns list of all MPfile names (from filenames in mpfile_directory). """
     mpfile_names = [fname for fname in os.listdir(mpfile_directory)
-                    if (fname.endswith(".txt")) and (not fname.startswith("$"))]
+                    if (fname.endswith(".txt")) and (fname.startswith("MP_"))]
     return mpfile_names
 
 
@@ -844,6 +845,61 @@ class MPfile:
             if isinstance(value_before, datetime) or isinstance(value_before, float):
                 return_dict[k] = value_before + i_fract * (value_after - value_before)  # interpolated val.
         return return_dict
+
+
+def get_roster_one_class(month_string='202007', mp_family='MC'):
+    """ From CALL website, get targets for one month, one MP family (e.g., 'MC' for Mars Crosser).
+    :param month_string: month designator, as 'yyyymm'. [string]
+    :param mp_family: official MP family Code. [string]
+    :return: dataframe resembling CALL target HTML table, capable of being appended to other MP family
+        tables. [pandas DataFrame]
+    """
+    year_month = month_string.strip()
+    if len(year_month) == 6:
+        target_year, target_month = year_month[0:4], year_month[4:6]
+    else:
+        print(' >>>>> ERROR: month_string not valid.')
+        return
+
+    import requests
+    url = "http://www.minorplanet.info/PHP/call_OppLCDBQuery.php"
+    payload = {"OppData_NumberLow": "1",
+               "OppData_NumberHigh": "999999",
+               "OppDataNameOptions[]": "Any",
+               "OppData_NameSearch": "",
+               "OppDataYearOptions[]": target_year,
+               "OppDataMonthOptions[]": target_month,
+               "Family[]": mp_family,
+               "OppDataFavorableOptions[]": "All",
+               "OppDataCALLOptions[]": "All",
+               "OppDataLCDBOptions[]": "All",
+               "OppData_MinMag": "11",
+               "OppData_MaxMag": "16",
+               "OppData_MinDec": "-22",
+               "OppData_MaxDec": "90",
+               "OppData_MaxDia": "5000",
+               "submit": "Submit"}
+    r = requests.post(url, data=payload)
+
+    mp_list = []
+    if r.status_code == HTTP_OK_CODE:
+        soup = BeautifulSoup(r.text, 'html.parser')
+        tables = soup.find_all('table')
+        mp_table = tables[2]
+        mp_lines = mp_table.find_all('tr')
+        for line in mp_lines[1:]:
+            cells = line.find_all('td')
+            cell_strings = [cell.text if cell.text != '\xa0' else '' for cell in cells]  # clean weird HTML.
+            mp_list.append(cell_strings)
+    mp_dict_list = [dict(zip(CALL_TARGET_COLUMNS, mp)) for mp in mp_list]
+    df = pd.DataFrame(data=mp_dict_list).drop(columns=CALL_TARGET_COLUMNS[0:2])
+    opp_date_valid = [not s.startswith('99') for s in df['OppDate']]
+    df = df[opp_date_valid]
+    df['YearMonth'] = month_string
+    df['Family'] = mp_family
+    index_values = [number + '_' + family for (number, family) in zip(df['Num'], df['Family'])]
+    df.index = index_values
+    return df
 
 
 ANCILLARY_only________________________________________________________ = 0

@@ -154,7 +154,11 @@ def resume(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     os.chdir(this_directory)
 
     # Verify that proper log file already exists in the working directory:
-    log_this_directory, log_mp_string, log_an_string = get_context()
+    this_context = get_context()
+    if get_context() is None:
+        print(' >>>>> Can\'t resume in', this_directory, '(has start() been run?)')
+        return
+    log_this_directory, log_mp_string, log_an_string = this_context
     if log_mp_string.lower() == mp_string.lower() and log_an_string.lower() == an_string.lower():
         print('READY TO GO in', this_directory)
     else:
@@ -658,9 +662,12 @@ def do_mp_phot():
     write_canopus_file(model)
     write_alcdef_file(model, mp_color_ri, source_string_ri)
 
-    # Write log file lines:
+    # Write last info lines:
     print('MP color index (r-i) =', '{0:.3f}'.format(mp_color_ri), 'from', source_string_ri)
-    pass
+    model_jds = df_model['JD_mid']
+    print('Add this line to MPfile', mp_string + ':',
+          '    #OBS ', '{0:.5f}'.format(model_jds.min()), '  {0:.5f}'.format(model_jds.max()),
+          '  ; ', an_string)
 
 
 def do_plots(model, df_model, mp_color_ri, state, user_selections):
@@ -1334,7 +1341,7 @@ def get_context():
     """
     this_directory = os.getcwd()
     if not os.path.isfile(LOG_FILENAME):
-        print(' >>>>> ERROR: no log file found ==> You probably need to run resume().')
+        print(' >>>>> ERROR: no log file found ==> You probably need to run start() or resume().')
         return None
     log_file = open(LOG_FILENAME, mode='r')  # for read only
     lines = log_file.readlines()
