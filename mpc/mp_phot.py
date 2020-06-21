@@ -1,6 +1,6 @@
 # Python core packages:
 import os
-from math import cos, pi, log10, log, floor, ceil
+from math import cos, pi, log10, log, floor, ceil, sqrt
 from collections import Counter
 from datetime import datetime, timezone
 # from statistics import pstdev, mean
@@ -610,9 +610,20 @@ def do_mp_phot():
     state = get_session_state()  # for extinction and transform values.
 
     # Get MP color index, if images present for filter pair (R, I).
-    mp_color_ri, source_string_ri = get_mp_color_index(df_obs_all, df_images_all, df_comps_all)
-    print('MP color index (r-i) =', '{0:.3f}'.format(mp_color_ri), 'from', source_string_ri)
-    log_file.write('MP color index (r-i) = ' + '{0:.3f}'.format(mp_color_ri) + ' from ' + source_string_ri)
+    return_values = get_mp_color_index(df_obs_all, df_images_all, df_comps_all)  # returns a tuple.
+    mp_color_ri, mp_color_ri_sigma, mp_color_n_comps, source_string_ri = return_values  # unpack the tuple.
+    if mp_color_ri_sigma is not None:
+        print('MP color index (r-i) =', '{0:.3f}'.format(mp_color_ri),
+              u'\u00B1' + ' {0:.3f}'.format(mp_color_ri_sigma), 'from', source_string_ri,
+              '(' + str(mp_color_n_comps) + ' comps used)')
+        log_file.write('MP color index (r-i) = ' + '{0:.3f}'.format(mp_color_ri) +
+                       ' ' + u'\u00B1' + ' {0:.3f}'.format(mp_color_ri_sigma) +
+                       ' from ' + source_string_ri +
+                       ' (' + str(mp_color_n_comps) + ' comps used)')
+    else:
+        print('MP color index (r-i) =', '{0:.3f}'.format(mp_color_ri), 'from', source_string_ri)
+        log_file.write('MP color index (r-i) = ' + '{0:.3f}'.format(mp_color_ri) +
+                       ' from ' + source_string_ri)
 
     # Make df_full: all data (obs, comp, image) only from images that...
     #     (1) are taken in main photometric filter AND (2) have a valid MP obs:
@@ -663,7 +674,12 @@ def do_mp_phot():
     write_alcdef_file(model, mp_color_ri, source_string_ri)
 
     # Write last info lines:
-    print('MP color index (r-i) =', '{0:.3f}'.format(mp_color_ri), 'from', source_string_ri)
+    if mp_color_ri_sigma is not None:
+        print('MP color index (r-i) =', '{0:.3f}'.format(mp_color_ri),
+              u'\u00B1' + ' {0:.3f}'.format(mp_color_ri_sigma), 'from', source_string_ri,
+              '(' + str(mp_color_n_comps) + ' comps used)')
+    else:
+        print('MP color index (r-i) =', '{0:.3f}'.format(mp_color_ri), 'from', source_string_ri)
     model_jds = df_model['JD_mid']
     print('Add this line to MPfile', mp_string + ':',
           '    #OBS ', '{0:.5f}'.format(model_jds.min()), '  {0:.5f}'.format(model_jds.max()),
@@ -1147,11 +1163,10 @@ def write_alcdef_file(model, mp_color_ri, source_string_ri):
     mpfile_names = all_mpfile_names()
     name_list = [name for name in mpfile_names if name.startswith('MP_' + mp_string)]
     if len(name_list) <= 0:
-        print(' >>>>> ERROR: No MPfile can be found for MP', mp_string)
+        print(' >>>>> ERROR: No MPfile can be found for MP', mp_string, '--> NO ALCDEF file written')
         return
     if len(name_list) >= 2:
-        print(' >>>>> ERROR: Multiple MPfiles were found for MP', mp_string,
-              '... please ensure that only one is available.')
+        print(' >>>>> ERROR: Multiple MPfiles were found for MP', mp_string, '--> NO ALCDEF file written')
         return
     mpfile = MPfile(name_list[0])
     site_data = DSW_SITE_DATA
@@ -1474,15 +1489,18 @@ def read_df_comps_all():
 
 
 def get_mp_color_index(df_obs_all, df_images_all, df_comps_all):
-    """  Gets minor planet's Sloan r-i color index from regression on R & I instrument magnitudes.
-    Use first of these color index values that exists:
-        (1) value extracted from R & I images,
-        (2) value given in control.txt #MP_RI_COLOR, or
+    """  Gets minor planet's Sloan r-i color index from best source available.
+    Uses first (most preferred) of these color index value possibilities that actually exists:
+        (1) value extracted from (Johnson-Cousins) R & I images, that is, r-i color index from
+            regression on R & I instrument magnitudes; or
+        (2) value given in control.txt #MP_RI_COLOR; or
         (3) DEFAULT_RI_COLOR as constant atop this python file.
     :param df_obs_all:
     :param df_images_all:
     :param df_comps_all:
-    :return: tuple (color index (Sloan r-i), source of value) [2-tuple of float, string]
+    :return: tuple (color index (Sloan r-i), color sigma, n color comps,
+             source of value). Sigma and n are None if color not calculated in this run (i.e.,
+             if default or control.txt value is used. [4-tuple of float, string]
     """
     # Case 1: R & I images are available in this directory:
     is_r_image = (df_images_all['Filter'] == 'R')
@@ -1560,22 +1578,35 @@ def get_mp_color_index(df_obs_all, df_images_all, df_comps_all):
         # plt.show()
 
         # Build MP input data for color-index (Sloan r-i) prediction:
-        instmag_list_r, instmag_list_i = [], []
+        instmag_list_r, instmag_list_i, sigma_list_r, sigma_list_i = [], [], [], []
         mp_dict = dict()
         for filename in df_fit_obs['FITSfile'].drop_duplicates():
             mp_instmag = df_obs_all.loc[(df_obs_all['FITSfile'] == filename) &
                                         (df_obs_all['Type'] == 'MP'), 'InstMag'].iloc[0]
+            mp_sigma = df_obs_all.loc[(df_obs_all['FITSfile'] == filename) &
+                                      (df_obs_all['Type'] == 'MP'), 'InstMagSigma'].iloc[0]
             if df_images_all.loc[filename, 'Filter'] == 'R':
                 instmag_list_r.append(mp_instmag)
+                sigma_list_r.append(mp_sigma)
             if df_images_all.loc[filename, 'Filter'] == 'I':
                 instmag_list_i.append(mp_instmag)
+                sigma_list_i.append(mp_sigma)
         mp_dict['InstMagDiff'] = sum(instmag_list_r) / len(instmag_list_r)\
             - sum(instmag_list_i) / len(instmag_list_i)
         df_prediction = pd.DataFrame(data=mp_dict, index=range(len(mp_dict)))
 
-        # Predict & return MP color index:
+        # Predict MP color index and its uncertainty, then return them:
         mp_color = result.predict(df_prediction)
-        return mp_color[0], 'R & I images'
+        mag_diff = df_prediction['InstMagDiff'].iloc[0]
+        sigma_intercept = result.bse.Intercept
+        sigma_slope = result.bse.InstMagDiff
+        mean_diff = result.model.data.frame['InstMagDiff'].mean()
+        variance_color = sigma_intercept**2 + sigma_slope**2 * (mag_diff - mean_diff)**2 + \
+                         sum([sigma ** 2 for sigma in sigma_list_r]) / (len(sigma_list_r) ** 2) + \
+                         sum([sigma ** 2 for sigma in sigma_list_i]) / (len(sigma_list_i) ** 2)
+        sigma_color = sqrt(variance_color)
+        n_ci_comps = len(ci_comp_list)
+        return mp_color[0], sigma_color, n_ci_comps, 'R & I images'
 
     # Case 2: return MP_COLOR_INDEX from control.txt:
     with open(CONTROL_FILENAME, 'r') as cf:
@@ -1592,10 +1623,10 @@ def get_mp_color_index(df_obs_all, df_images_all, df_comps_all):
                 except ValueError:
                     ri_color = None
         if ri_color is not None:
-            return ri_color, 'control.txt'
+            return ri_color, None, None, 'control.txt'
 
     # Default case: return value hard-coded atop this python file:
-    return DEFAULT_MP_RI_COLOR, 'default'
+    return DEFAULT_MP_RI_COLOR, None, None, 'default'
 
 
 def screen_comps_for_photometry(refcat2):

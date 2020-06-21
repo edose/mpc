@@ -34,6 +34,7 @@ DSNM = ('251.10288d', '31.748657576406853d', '1372m')
 EXP_TIME_TABLE_PHOTOMETRY = [(13, 60), (14, 80), (15, 160), (16, 300), (17, 600)]
 EXP_OVERHEAD = 20  # Nominal exposure overhead, in seconds.
 COV_RESOLUTION_MINUTES = 5  # min. coverage plot resolution, in minutes.
+MAX_V_MAGNITUDE_DEFAULT = 18  # to ensure ridiculously faint MPs don't get into planning & plots.
 
 MPFILE_DIRECTORY = 'C:/Dev/Photometry/MPfile'
 ACP_PLANNING_TOP_DIRECTORY = 'C:/Astro/ACP'
@@ -44,23 +45,28 @@ CURRENT_MPFILE_VERSION = '1.1'
 FOR_PLANNING_____________________________________________________________ = 0
 
 
-def plan(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE, min_hours=MIN_HOURS_OBSERVABLE):
+def plan(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE, min_hours=MIN_HOURS_OBSERVABLE,
+         max_vmag=MAX_V_MAGNITUDE_DEFAULT):
     """ Main planning workflow for MP photometry. Requires a
     :param an_string: Astronight, e.g. 20200201 [string or int]
     :param site_name: name of site for Site object. [string]
     :param min_moon_dist: min dist from min (degrees) to consider MP observable. [float]
     :param min_hours: min hours of observing time to include an MP. [float]
+    :param max_vmag: maximum estimated V mag allowed for MP to be kept in table & plots. [float]
     :return: [None]
     """
     # Make and print table of values, 1 line/MP, sorted by earliest observable UTC:
     df_an_table = make_df_an_table(an_string, site_name='DSW',
                                    min_moon_dist=min_moon_dist, min_hours=min_hours)
+    bright_enough = [vmag <= max_vmag for vmag in df_an_table['V_mag']]
+    mps_to_keep = bright_enough
+    df_an_table = df_an_table.loc[mps_to_keep, :]
     if df_an_table is None:
         print('No MPs observable for AN', an_string + '.')
         return
     df = df_an_table.copy()
     table_lines = ['MP Photometry planning for AN ' + an_string + ':',
-                   ''.rjust(19) + 'Start Tran  End    V   Exp/s  Duty    P/hr']
+                   ''.rjust(22) + 'Start Tran  End    V   Exp/s  Duty    P/hr']
     gone_west_lines = []
 
     for i in df.index:
@@ -221,7 +227,7 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
             mid_observable = ts_observable.midpoint  # for loop exit
             best_utc = mid_observable  # update for loop continuation.
         if status == 'date out of range':
-            print(mpfile.number, status)
+            # print(mpfile.number, status)
             continue  # if no eph data for this MP on this night, do not make a table row for this MP.
 
         # Refine MP's status before continuing:
