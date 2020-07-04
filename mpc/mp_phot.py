@@ -46,7 +46,6 @@ COLOR_INDEX_PASSBANDS = ('r', 'i')
 DEFAULT_MP_RI_COLOR = 0.2  # close to known Sloan mean (r-i) for MPs.
 MAX_COLOR_COMP_UNCERT = 0.0125  # mag
 MAX_COLOR_MAG_UNCERT = 0.10  # mag
-COLOR_PLOT_FILENAME = 'Image_ColorIndex.png'
 
 # To screen observations:
 MAX_MAG_UNCERT = 0.03  # min signal/noise for COMP obs (as InstMagSigma).
@@ -63,10 +62,15 @@ COLOR_INDEX_CONTROL_FILENAME = 'control_color_index.txt'
 DF_OBS_ALL_FILENAME = 'df_obs_all.csv'
 DF_IMAGES_ALL_FILENAME = 'df_images_all.csv'
 DF_COMPS_ALL_FILENAME = 'df_comps_all.csv'
-TRANSFORM_CLEAR_SR_SR_SI = 0.025  # estimate from MP 1074 20191109 (37 images).
+# TRANSFORM_CLEAR_SR_SR_SI = 0.025  # estimate from MP 1074 20191109 (37 images).
+TRANSFORM_CLEAR_SR_SR_SI = -0.20  # estimate from MP 191 20200617 (18 Clear images).
 DEFAULT_MODEL_OPTIONS = {'fit_transform': False, 'fit_extinction': False,
                          'fit_vignette': True, 'fit_xy': False,
                          'fit_jd': True}  # defaults if not found in control file.
+TRANSFORM_IMAGE_PREFIX = 'Image_Transform_'
+COLOR_IMAGE_PREFIX = 'Image_Color_'
+SESSION_IMAGE_PREFIX = 'Image_Session_'
+
 
 # For selecting comps within Refcat2 object (intentionally wide; can narrow with a control file later):
 MIN_R_MAG = 10
@@ -100,11 +104,9 @@ COLOR_COMP_SELECTION_DEFAULTS = {
     'min_catalog_ri_color': -0.4,
     'max_catalog_ri_color': 0.8
 }
-
 # For ALCDEF File generation:
 DSW_SITE_DATA = {'longitude': -105.6536, 'latitude': +35.3311,
-                 'facility': 'Deep Sky West Observatory',
-                 'mpccode': 'V28'}
+                 'facility': 'Deep Sky West Observatory', 'mpccode': 'V28'}
 ALCDEF_DATA = {'contactname': 'Eric V. Dose',
                'contactinfo': 'MP@ericdose.com',
                'observers': 'Dose, E.V.',
@@ -566,257 +568,356 @@ def make_dfs():
           '\n      (2) run do_mp_phot()')
 
 
-_____TRANSFORM_MEASUREMENT_______________________________________________ = 0
-
-
-# def get_transform(filter='Clear', passband='r'):
-#     """ Get transform (filter=Clear, passband=SloanR, color=(SloanR-SloanI) from one directory's df_obs.
-#         Must have 2 or more images in chosen filter (usually moot, as we will have the whole night's set).
-#         First, user must ensure that current working directory is correct (prob. by running resume().
-#         Color index hard-coded as Sloan r - Sloan i.
-#     :param filter: filter in which images were taken (to select from df_obs). [string]
-#     :param passband: passband (e.g., Johnson-Cousins 'R' or Sloan 'i') to target. [string]
-#     :return: dataframe, each row one image, columns=T,
-#              dT (transform & its uncertainty). [pandas DataFrame]
-#     USAGE: fit = get_transform()
-#     """
-#     df_obs_all = read_df_obs_all()
-#     df_comps = read_df_comps_all()
-#     df_images = read_df_images_all()
-#     df_merged = pd.merge(left=df_obs_all, right=df_comps,
-#                          how='left', left_on='SourceID', right_on='CompID', sort=False)
-#     df_merged = pd.merge(left=df_merged, right=df_images,
-#                          how='left', on='FITSfile', sort=False).copy()
-#     is_comp = pd.Series([t.lower() == 'comp' for t in df_merged['Type']])
-#     is_filter = pd.Series([f.lower() == filter.lower() for f in df_merged['Filter']])
-#     to_keep = is_comp & is_filter
-#     df = df_merged[list(to_keep)].copy()
+# _____TRANSFORM_DETERMINATION_______________________________________________ = 0
 #
-#     df['CI'] = df['r'] - df['i']
-#     df['Difference'] = df['InstMag'] - df[passband]
-#     n_images = len(df['FITSfile'].drop_duplicates())
-#     if n_images < 2:
-#         print(' >>>>> ERROR: get_transform() must get more than one image in filter \'' + filter + '\'.')
-#         return None
+# def calc_transform(f='Clear', pbf='r', pb1='r', pb2='i'):
+#     """ From one image in filter f, get transform for filter f-->catalog passband pbf,
+#             subject to color index=cat_pb1 - cat_pb2.
+#         Must have already run start() or resume() to set working directory.
+#         Must have already run through make_dfs() for this directory.
+#         Will use all FITS file images taken in filter
+#     :param f: name of filter in which FITS file image was taken, and defining the transform. [string]
+#     :param pbf: name of catalog passband to which to transform magnitudes
+#         (associated with filter). [string]
+#     :param pb1: first catalog passband of color index. [string]
+#     :param pb2: second catalog passband of color index. [string]
+#     :return: None. Writes results to console and summary to log file.
+#     """
+#     context = get_context()
+#     if context is None:
+#         return
+#     this_directory, mp_string, an_string = context
+#     log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
+#     mp_int = int(mp_string)  # put this in try/catch block.
+#     mp_string = str(mp_int)
+#     state = get_session_state()  # for extinction and transform values.
+#
+#     # Set up required data:
+#     df_transform = make_df_all(filters_to_include=f, comps_only=True, require_mp_obs_each_image=False)
+#     user_selections = read_selection_criteria(TRANSFORM_CONTROL_FILENAME,
+#         TRANSFORM_COMP_SELECTION_DEFAULTS)
+#     apply_calc_transform_selections(df_transform, user_selections)  # adds boolean column 'UseInModel'.
+#     options_dict = read_regression_options(TRANSFORM_CONTROL_FILENAME)
+#
+#     # Perform mixed-model regression:
+#     model = TransformModel(df_transform, f, pbf, pb1, pb2, state, options_dict)
+#
+#     # Make diagnostic plots:
+#     make_transform_diagnostic_plots(model, df_transform, f, pbf, pb1, pb2, state, user_selections)
+#
+#     # Write results to log file and to console:
+#     print('Transform=', '{0:.4f}'.format(model.mm_fit.df_fixed_effects.loc['CI', 'Value']),
+#           '  tr_sigma=', '{0:.4f}'.format(model.mm_fit.df_fixed_effects.loc['CI', 'Stdev']),
+#           '    mag_sigma=', '{0:.1f}'.format(1000.0 * model.mm_fit.sigma), 'mMag.')
+#
+#
+# class TransformModel:
+#     def __init__(self, df_transform, f, pbf, pb1, pb2, state, options_dict):
+#         """  Makes and holds color-transform model via mixed-model regression.
+#              Requires data from at least 3 images in f.
+#         :param df_transform: table of data from which to draw data for regression. [pandas Dataframe]
+#         :param f: name of filter in which FITS file image was taken, and defining the transform. [string]
+#         :param pbf: name of catalog passband to which to transform mags (associated with filter). [string]
+#         :param pb1: first catalog passband of color index. [string]
+#         :param pb2: second catalog passband of color index. [string]
+#         :param state:
+#         :param options_dict: holds options for making comp fit. [pandas dict object]
+#         """
+#         self.df_used = df_transform.copy().loc[df_transform['UseInModel'], :]  # only obs used in model.
+#         n_images = len(self.df_used['FITSfile'].drop_duplicates())
+#         self.enough_images = (n_images >= 3)
+#         if not self.enough_images:
+#             return
+#         self.f = f
+#         self.pbf, self.pb1, self.pb2 = pbf, pb1, pb2
+#         self.state = state
+#         self.fit_extinction = options_dict.get('fit_extinction', False)
+#         self.fit_vignette = options_dict.get('fit_vignette', True)
+#         self.fit_xy = options_dict.get('fit_xy', False)
+#         self.fit_jd = options_dict.get('fit_jd', True)
+#
+#         self.dep_var_name = 'InstMag_with_offsets'
+#         self.mm_fit = None      # placeholder for the fit result [photrix MixedModelFit object].
+#         self.extinction = None  # "
+#         self.vignette = None    # "
+#         self.x = None           # "
+#         self.y = None           # "
+#         self.jd1 = None         # "
+#         self.transform = None
+#         self.transform_sigma = None
+#
+#         self._prep_and_do_regression()
+#
+#     def _prep_and_do_regression(self):
+#         """ Using photrix.util.MixedModelFit class (which wraps statsmodels.MixedLM.from_formula() etc).
+#             This function uses comp data only (no minor planet data).
+#         :return: [None] Puts model into self.mm_fit.
+#         """
+#         if not self.enough_images:
+#             return
+#         self.df_used['CI'] = self.df_used[self.pb1] - self.df_used[self.pb2]
+#
+#         # Initiate dependent-variable offset, which will aggregate all such offset terms:
+#         dep_var_offset = self.df_used[self.pbf].copy()  # *copy* CatMag, or it will be damaged
+#
+#         # Build fixed-effect (x) variable list and construct dep-var offset:
+#         fixed_effect_var_list = ['CI']
+#         if self.fit_extinction:
+#             fixed_effect_var_list.append('Airmass')
+#         else:
+#             extinction = self.state['extinction']['Clear']
+#             dep_var_offset += extinction * self.df_used['Airmass']
+#             print(' Extinction (Airmass) not fit: value fixed at',
+#                   '{0:.3f}'.format(extinction))
+#         if self.fit_vignette:
+#             fixed_effect_var_list.append('Vignette')
+#         if self.fit_xy:
+#             fixed_effect_var_list.extend(['X1024', 'Y1024'])
+#         if self.fit_jd:
+#             fixed_effect_var_list.append('JD_fract')
+#
+#         # Build 'random-effect' variable:
+#         random_effect_var_name = 'FITSfile'  # cirrus effect is per-image
+#
+#         # Build dependent (y) variable:
+#         self.df_used[self.dep_var_name] = self.df_used['InstMag'] - dep_var_offset
+#
+#         # Execute regression:
+#         import warnings
+#         from statsmodels.tools.sm_exceptions import ConvergenceWarning
+#         warnings.simplefilter('ignore', ConvergenceWarning)
+#         self.mm_fit = MixedModelFit(data=self.df_used,
+#                                     dep_var=self.dep_var_name,
+#                                     fixed_vars=fixed_effect_var_list,
+#                                     group_var=random_effect_var_name)
+#         if not self.mm_fit.converged:
+#             print(' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.')
+#             print(self.mm_fit.statsmodels_object.summary())
+#             print(' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.')
+#         else:
+#             # TODO: fix these
+#             self.transform = 9999.
+#             self.transform_sigma = 9999.
+#
+#
+# def make_transform_diagnostic_plots(model, df_model, f, pbf, pb1, pb2, state, user_selections):
+#     """  Display and write to file several diagnostic plots, to help decide which obs, comps, images
+#          might need removal by editing control file.
+#     :param model: mixed model summary object. [photrix.MixedModelFit object]
+#     :param df_model: dataframe of all data including UseInModel
+#         (user selection) column. [pandas DataFrame]
+#     :param f: name of filter in which observations were made. [string]
+#     :param pbf: name of target passband (associated with filter) in which mags to be reported. [string]
+#     :param pb1: name of first of two catalog passbands in color index. [string]
+#     :param pb2: name of second of two catalog passbands in color index. [string]
+#     :param state: session state for this observing session [dict]
+#     :param user_selections: comp selection criteria, used for drawing limits on plots [python dict]
+#     :return: [None] Writes image files e.g., Transform_Image1_QQ_comps.png
+#     """
+#     this_directory, mp_string, an_string = get_context()
+#
+#     # Delete any previous transform image files from current directory:
+#     image_filenames = [fn for fn in os.listdir('.')
+#                        if fn.startswith(TRANSFORM_IMAGE_PREFIX) and fn.endswith('.png')]
+#     for fn in image_filenames:
+#         os.remove(fn)
+#
+#     # Wrangle needed data into convenient forms:
+#     df_plot = pd.merge(left=df_model.loc[df_model['UseInModel'], :].copy(),
+#                        right=model.mm_fit.df_observations,
+#                        how='left', left_index=True, right_index=True, sort=False)  # add col 'Residuals'.
+#     is_comp_obs = (df_plot['Type'] == 'Comp')
+#     df_plot_comp_obs = df_plot.loc[is_comp_obs, :]
+#     df_plot_mp_obs = df_plot.loc[(~ is_comp_obs), :]
+#     df_image_effect = model.mm_fit.df_random_effects
+#     df_image_effect.rename(columns={"GroupName": "FITSfile", "Group": "ImageEffect"}, inplace=True)
+#     intercept = model.mm_fit.df_fixed_effects.loc['Intercept', 'Value']
+#     # jd_slope = model.mm_fit.df_fixed_effects.loc['JD_fract', 'Value']  # undefined if FIT_JD is False.
+#     sigma = model.mm_fit.sigma
+#     if 'Airmass' in model.mm_fit.df_fixed_effects.index:
+#         extinction = model.mm_fit.df_fixed_effects.loc['Airmass', 'Value']  # if fit in model
 #     else:
-#         print('MixedModel (' + str(n_images) + ' images):')
-#         # fit = MixedModelFit(data=df, dep_var='Difference',
-#         fixed_vars=['CI', 'CI2'], group_var='FITSfile')
-#         fit = MixedModelFit(data=df, dep_var='Difference', fixed_vars=['CI'], group_var='FITSfile')
-#         print('Transform(' + passband + '->' + filter + ') =',
-#               str(fit.df_fixed_effects.loc['CI', 'Value']),
-#               'stdev =', str(fit.df_fixed_effects.loc['CI', 'Stdev']))
-#     return fit
-
-def calc_transform(f='Clear', pbf='r', pb1='r', pb2='i'):
-    """ From one image in filter f, get transform for filter f-->catalog passband pbf,
-            subject to color index=cat_pb1 - cat_pb2.
-        Must have already run start() or resume() to set working directory.
-        Must have already run through make_dfs() for this directory.
-        Will use all FITS file images taken in filter
-    :param f: name of filter in which FITS file image was taken, and defining the transform. [string]
-    :param pbf: name of catalog passband to which to transform magnitudes (associated with filter). [string]
-    :param pb1: first catalog passband of color index. [string]
-    :param pb2: second catalog passband of color index. [string]
-    :return: None. Writes results to console and summary to log file.
-    """
-    context = get_context()
-    if context is None:
-        return
-    this_directory, mp_string, an_string = context
-    log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
-    mp_int = int(mp_string)  # put this in try/catch block.
-    mp_string = str(mp_int)
-    state = get_session_state()  # for extinction and transform values.
-
-    # Set up required data:
-    df_transform = make_df_all(filters_to_include=f, comps_only=True, require_mp_obs_each_image=False)
-    user_selections = read_selection_criteria(TRANSFORM_CONTROL_FILENAME, TRANSFORM_COMP_SELECTION_DEFAULTS)
-    apply_calc_transform_selections(df_transform, user_selections)  # adds boolean column 'UseInModel'.
-    options_dict = read_regression_options(TRANSFORM_CONTROL_FILENAME)
-
-    # Perform mixed-model regression:
-    model = TransformModel(df_transform, f, pbf, pb1, pb2, state, options_dict)
-
-    # Make diagnostic plots:
-    make_transform_diagnostic_plots(model, df_transform, f, pbf, pb1, pb2, state, user_selections)
-
-    # Write results to log file and to console:
-    print('Transform=', '{0:.4f}'.format(model.mm_fit.df_fixed_effects.loc['CI', 'Value']),
-          '  tr_sigma=', '{0:.4f}'.format(model.mm_fit.df_fixed_effects.loc['CI', 'Stdev']),
-          '    mag_sigma=', '{0:.1f}'.format(1000.0 * model.mm_fit.sigma), 'mMag.')
-
-
-class TransformModel:
-    def __init__(self, df_transform, f, pbf, pb1, pb2, state, options_dict):
-        """  Makes and holds color-transform model via mixed-model regression.
-             Requires data from at least 3 images in f.
-        :param df_transform: table of data from which to draw data for regression. [pandas Dataframe]
-        :param f: name of filter in which FITS file image was taken, and defining the transform. [string]
-        :param pbf: name of catalog passband to which to transform mags (associated with filter). [string]
-        :param pb1: first catalog passband of color index. [string]
-        :param pb2: second catalog passband of color index. [string]
-        :param state:
-        :param options_dict: holds options for making comp fit. [pandas dict object]
-        """
-        self.df_used = df_transform.copy().loc[df_transform['UseInModel'], :]  # only obs used in model.
-        n_images = len(self.df_used['FITSfile'].drop_duplicates())
-        self.enough_images = (n_images >= 3)
-        if not self.enough_images:
-            return
-        self.f = f
-        self.pbf, self.pb1, self.pb2 = pbf, pb1, pb2
-        self.state = state
-        self.fit_extinction = options_dict.get('fit_extinction', False)
-        self.fit_vignette = options_dict.get('fit_vignette', True)
-        self.fit_xy = options_dict.get('fit_xy', False)
-        self.fit_jd = options_dict.get('fit_jd', True)
-
-        self.dep_var_name = 'InstMag_with_offsets'
-        self.mm_fit = None      # placeholder for the fit result [photrix MixedModelFit object].
-        self.extinction = None  # "
-        self.vignette = None    # "
-        self.x = None           # "
-        self.y = None           # "
-        self.jd1 = None         # "
-        self.transform = None
-        self.transform_sigma = None
-
-        self._prep_and_do_regression()
-
-    def _prep_and_do_regression(self):
-        """ Using photrix.util.MixedModelFit class (which wraps statsmodels.MixedLM.from_formula() etc).
-            This function uses comp data only (no minor planet data).
-        :return: [None] Puts model into self.mm_fit.
-        """
-        if not self.enough_images:
-            return
-        self.df_used['CI'] = self.df_used[self.pb1] - self.df_used[self.pb2]
-
-        # Initiate dependent-variable offset, which will aggregate all such offset terms:
-        dep_var_offset = self.df_used[self.pbf].copy()  # *copy* CatMag, or it will be damaged
-
-        # Build fixed-effect (x) variable list and construct dep-var offset:
-        fixed_effect_var_list = ['CI']
-        if self.fit_extinction:
-            fixed_effect_var_list.append('Airmass')
-        else:
-            extinction = self.state['extinction']['Clear']
-            dep_var_offset += extinction * self.df_used['Airmass']
-            print(' Extinction (Airmass) not fit: value fixed at',
-                  '{0:.3f}'.format(extinction))
-        if self.fit_vignette:
-            fixed_effect_var_list.append('Vignette')
-        if self.fit_xy:
-            fixed_effect_var_list.extend(['X1024', 'Y1024'])
-        if self.fit_jd:
-            fixed_effect_var_list.append('JD_fract')
-
-        # Build 'random-effect' variable:
-        random_effect_var_name = 'FITSfile'  # cirrus effect is per-image
-
-        # Build dependent (y) variable:
-        self.df_used[self.dep_var_name] = self.df_used['InstMag'] - dep_var_offset
-
-        # Execute regression:
-        import warnings
-        from statsmodels.tools.sm_exceptions import ConvergenceWarning
-        warnings.simplefilter('ignore', ConvergenceWarning)
-        self.mm_fit = MixedModelFit(data=self.df_used,
-                                    dep_var=self.dep_var_name,
-                                    fixed_vars=fixed_effect_var_list,
-                                    group_var=random_effect_var_name)
-        if not self.mm_fit.converged:
-            print(' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.')
-            print(self.mm_fit.statsmodels_object.summary())
-            print(' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.')
-        else:
-            # TODO: fix these
-            self.transform = 9999.
-            self.transform_sigma = 9999.
-
-
-def make_transform_diagnostic_plots(model, df_model, f, pbf, pb1, pb2, state, user_selections):
-    """  Display and write to file several diagnostic plots, to help decide which obs, comps, images
-         might need removal by editing control file.
-    :param model: mixed model summary object. [photrix.MixedModelFit object]
-    :param df_model: dataframe of all data including UseInModel (user selection) column. [pandas DataFrame]
-    :param f: name of filter in which observations were made. [string]
-    :param pbf: name of target passband (associated with filter) in which mags to be reported. [string]
-    :param pb1: name of first of two catalog passbands in color index. [string]
-    :param pb2: name of second of two catalog passbands in color index. [string]
-    :param state: session state for this observing session [dict]
-    :param user_selections: comp selection criteria, used for drawing limits on plots [python dict]
-    :return: [None] Writes image files e.g., Transform_Image1_QQ_comps.png
-    """
-    this_directory, mp_string, an_string = get_context()
-
-    # Delete any previous transform image files from current directory:
-    image_filenames = [fn for fn in os.listdir('.')
-                       if fn.startswith('Transform_Image') and fn.endswith('.png')]
-    for fn in image_filenames:
-        os.remove(fn)
-
-    # Wrangle needed data into convenient forms:
-    df_plot = pd.merge(left=df_model.loc[df_model['UseInModel'], :].copy(),
-                       right=model.mm_fit.df_observations,
-                       how='left', left_index=True, right_index=True, sort=False)  # add col 'Residuals'.
-    is_comp_obs = (df_plot['Type'] == 'Comp')
-    df_plot_comp_obs = df_plot.loc[is_comp_obs, :]
-    df_plot_mp_obs = df_plot.loc[(~ is_comp_obs), :]
-    df_image_effect = model.mm_fit.df_random_effects
-    df_image_effect.rename(columns={"GroupName": "FITSfile", "Group": "ImageEffect"}, inplace=True)
-    intercept = model.mm_fit.df_fixed_effects.loc['Intercept', 'Value']
-    # jd_slope = model.mm_fit.df_fixed_effects.loc['JD_fract', 'Value']  # undefined if FIT_JD is False.
-    sigma = model.mm_fit.sigma
-    if 'Airmass' in model.mm_fit.df_fixed_effects.index:
-        extinction = model.mm_fit.df_fixed_effects.loc['Airmass', 'Value']  # if fit in model
-    else:
-        extinction = state['extinction']['Clear']  # default if not fit in model (normal case)
-    # if 'CI' in model.mm_fit.df_fixed_effects.index:
-    #     transform = model.mm_fit.df_fixed_effects.loc['CI', 'Value']  # if fit in model
-    # else:
-    #     transform = TRANSFORM_CLEAR_SR_SR_SI  # default if not fit in model (normal case)
-    if model.fit_jd:
-        jd_coefficient = model.mm_fit.df_fixed_effects.loc['JD_fract', 'Value']
-    else:
-        jd_coefficient = 0.0
-    comp_ids = df_plot_comp_obs['SourceID'].drop_duplicates()
-    n_comps = len(comp_ids)
-    comp_color, mp_color = 'dimgray', 'orangered'
-    obs_colors = [comp_color if i is True else mp_color for i in is_comp_obs]
-    jd_floor = floor(min(df_model['JD_mid']))
-    obs_jd_fract = df_plot['JD_mid'] - jd_floor
-    xlabel_jd = 'JD(mid)-' + str(jd_floor)
-    transform_string = f + ARROW_CHARACTER + pbf + ' (' + pb1 + '-' + pb2 + ')'
-    print(transform_string)
-
-    # ################ FIGURE 1: Q-Q plot of mean comp effects (one point per comp star used in model),
-    #    code heavily adapted from photrix.process.SkyModel.plots():
-    window_title = 'Transform Q-Q Plot (by comp):  MP ' + mp_string + '   AN ' + an_string
-    page_title = 'MP ' + mp_string + '   AN ' + an_string + \
-                 '   ::   Transform Q-Q plot by comp ' + transform_string
-    plot_annotation = str(n_comps) + ' comps used in model.\n(tags: comp SourceID)'
-    df_y = df_plot_comp_obs.loc[:, ['SourceID', 'Residual']].groupby(['SourceID']).mean()
-    df_y = df_y.sort_values(by='Residual')
-    y_data = df_y['Residual'] * 1000.0  # for millimags
-    y_labels = df_y.index.values
-    make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_data, y_labels,
-                          'Transform_Image1_QQ_comps.png')
-
-    # ################ FIGURE 2: Q-Q plot of comp residuals (one point per comp obs),
-    #    code heavily adapted from photrix.process.SkyModel.plots():
-    window_title = 'Transform Q-Q Plot (by comp observation):  MP ' + mp_string + '   AN ' + an_string
-    page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Transform Q-Q plot by obs ' +\
-                 transform_string
-    plot_annotation = str(len(df_plot_comp_obs)) + ' observations of ' + \
-        str(n_comps) + ' comps used in model.\n (tags: observation Serial numbers)'
-    df_y = df_plot_comp_obs.loc[:, ['Serial', 'Residual']]
-    df_y = df_y.sort_values(by='Residual')
-    y_data = df_y['Residual'] * 1000.0  # for millimags
-    y_labels = df_y['Serial'].values
-    make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_data, y_labels,
-                          'Transform_Image2_QQ_obs.png')
+#         extinction = state['extinction']['Clear']  # default if not fit in model (normal case)
+#     # if 'CI' in model.mm_fit.df_fixed_effects.index:
+#     #     transform = model.mm_fit.df_fixed_effects.loc['CI', 'Value']  # if fit in model
+#     # else:
+#     #     transform = TRANSFORM_CLEAR_SR_SR_SI  # default if not fit in model (normal case)
+#     if model.fit_jd:
+#         jd_coefficient = model.mm_fit.df_fixed_effects.loc['JD_fract', 'Value']
+#     else:
+#         jd_coefficient = 0.0
+#     comp_ids = df_plot_comp_obs['SourceID'].drop_duplicates()
+#     n_comps = len(comp_ids)
+#     comp_color, mp_color = 'dimgray', 'orangered'
+#     obs_colors = [comp_color if i is True else mp_color for i in is_comp_obs]
+#     jd_floor = floor(min(df_model['JD_mid']))
+#     obs_jd_fract = df_plot['JD_mid'] - jd_floor
+#     xlabel_jd = 'JD(mid)-' + str(jd_floor)
+#     transform_string = f + ARROW_CHARACTER + pbf + ' (' + pb1 + '-' + pb2 + ')'
+#
+#     # ################ TRANSFORM FIGURE 1: Q-Q plot of mean comp effects
+#     #    (1 pt per comp star used in model), code heavily adapted from photrix.process.SkyModel.plots():
+#     window_title = 'Transform Q-Q by comp :: ' + transform_string +\
+#         ' :: ' + '\\'.join(this_directory.split('\\')[-2:])
+#     page_title = window_title
+#     plot_annotation = str(n_comps) + ' comps used in model.\n(tags: comp SourceID)'
+#     df_y = df_plot_comp_obs.loc[:, ['SourceID', 'Residual']].groupby(['SourceID']).mean()
+#     df_y = df_y.sort_values(by='Residual')
+#     y_data = df_y['Residual'] * 1000.0  # for millimags
+#     y_labels = df_y.index.values
+#     make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_data, y_labels,
+#                           TRANSFORM_IMAGE_PREFIX + '1_QQ_comps.png')
+#
+#     # ################ TRANSFORM FIGURE 2: Q-Q plot of comp residuals
+#     #    (1 pt per comp obs used in model), code heavily adapted from photrix.process.SkyModel.plots():
+#     window_title = 'Transform Q-Q by obs :: ' + transform_string +\
+#         ' :: ' + '\\'.join(this_directory.split('\\')[-2:])
+#     page_title = window_title
+#     plot_annotation = str(len(df_plot_comp_obs)) + ' observations of ' + \
+#         str(n_comps) + ' comps used in model.\n (tags: observation Serial numbers)'
+#     df_y = df_plot_comp_obs.loc[:, ['Serial', 'Residual']]
+#     df_y = df_y.sort_values(by='Residual')
+#     y_data = df_y['Residual'] * 1000.0  # for millimags
+#     y_labels = df_y['Serial'].values
+#     make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_data, y_labels,
+#                           TRANSFORM_IMAGE_PREFIX + '2_QQ_obs.png')
+#
+#     # ################ TRANSFORM FIGURE 3: Catalog and Time plots:
+#     fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(11, 8.5))  # (width, height) in "inches", was 15,9
+#     fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
+#     fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
+#     main_title = 'Transform Catalog+Time :: ' + transform_string +\
+#         ' :: ' + '\\'.join(this_directory.split('\\')[-2:])
+#     window_title = main_title
+#     fig.suptitle(main_title, color='darkblue', fontsize=20)
+#     fig.canvas.set_window_title(window_title)
+#     subplot_text = 'rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
+#     fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12, color='dimgray')
+#
+#     # Catalog mag uncertainty plot (comps only, one point per comp, x=cat r mag, y=cat r uncertainty):
+#     ax = axes[0, 0]
+#     make_9_subplot(ax, 'Catalog Mag Uncertainty (dr)', 'Catalog Mag (r)', 'mMag', '', False,
+#                    x_data=df_plot_comp_obs['r'], y_data=df_plot_comp_obs['dr'])
+#     # Catalog color plot (comps only, one point per comp, x=cat r mag, y=cat color (r-i)):
+#     ax = axes[0, 1]
+#     make_9_subplot(ax, 'Catalog Color Index', 'Catalog Mag (r)', 'CI Mag', '', zero_line=False,
+#                    x_data=df_plot_comp_obs['r'], y_data=(df_plot_comp_obs['r'] - df_plot_comp_obs['i']))
+#     # Inst Mag plot (comps only, one point per obs, x=cat r mag, y=InstMagSigma):
+#     ax = axes[0, 2]
+#     make_9_subplot(ax, 'Instrument Magnitude Uncertainty', 'Catalog Mag (r)', 'mMag', '', True,
+#                    x_data=df_plot_comp_obs['r'], y_data=df_plot_comp_obs['InstMagSigma'])
+#     # Cirrus plot (comps only, one point per image, x=JD_fract, y=Image Effect):
+#     ax = axes[1, 0]
+#     df_this_plot = pd.merge(df_image_effect, df_plot_comp_obs.loc[:, ['FITSfile', 'JD_fract']],
+#                             how='left', on='FITSfile', sort=False).drop_duplicates()
+#     make_9_subplot(ax, 'Image effect (cirrus plot)', xlabel_jd, 'mMag', '', False,
+#                    x_data=df_this_plot['JD_fract'], y_data=1000.0 * df_this_plot['ImageEffect'],
+#                    alpha=1.0, jd_locators=True)
+#     # SkyADU plot (comps only, one point per obs: x=JD_fract, y=SkyADU):
+#     ax = axes[1, 1]
+#     make_9_subplot(ax, 'SkyADU vs time', xlabel_jd, 'ADU', '', False,
+#                    x_data=df_plot_comp_obs['JD_fract'], y_data=df_plot_comp_obs['SkyADU'],
+#                    jd_locators=True)
+#     # FWHM plot (comps only, one point per obs: x=JD_fract, y=FWHM):
+#     ax = axes[1, 2]
+#     make_9_subplot(ax, 'FWHM vs time', xlabel_jd, 'FWHM (pixels)', '', False,
+#                    x_data=df_plot_comp_obs['JD_fract'], y_data=df_plot_comp_obs['FWHM'],
+#                    jd_locators=True)
+#     # InstMagSigma plot (comps only, one point per obs; x=JD_fract, y=InstMagSigma):
+#     ax = axes[2, 0]
+#     make_9_subplot(ax, 'Inst Mag Sigma vs time', xlabel_jd, 'mMag', '', False,
+#                    x_data=df_plot_comp_obs['JD_fract'], y_data=1000.0 * df_plot_comp_obs['InstMagSigma'],
+#                    jd_locators=True)
+#     # Airmass plot (comps only, one point per obs; x=JD_fract, y=Airmass):
+#     ax = axes[2, 1]
+#     make_9_subplot(ax, 'Airmass vs time', xlabel_jd, 'Airmass', '', False,
+#                    x_data=df_plot_comp_obs['JD_fract'], y_data=df_plot_comp_obs['Airmass'],
+#                    jd_locators=True)
+#     axes[2, 2].remove()  # clear this space (no lightcurve subplot for transform).
+#     plt.show()
+#     fig.savefig(TRANSFORM_IMAGE_PREFIX + '3_Catalog_and_Time.png')
+#
+#     # ################ TRANSFORM FIGURE 4: Residual plots:
+#     fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(11, 8.5))
+#         (width, height) in "inches", was 15, 9
+#     fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
+#     fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
+#     main_title = 'Transform Residuals :: ' + transform_string +\
+#         ' :: ' + '\\'.join(this_directory.split('\\')[-2:])
+#     window_title = main_title
+#     fig.suptitle(main_title, color='darkblue', fontsize=20)
+#     fig.canvas.set_window_title(window_title)
+#     subplot_text = str(len(df_plot_comp_obs)) + ' obs   ' +\
+#         str(n_comps) + ' comps    ' +\
+#         'sigma=' + '{0:.0f}'.format(1000.0 * sigma) + ' mMag' +\
+#         (12 * ' ') + ' rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
+#     fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12, color='dimgray')
+#
+#     # Comp residual plot (comps only, one point per obs: x=catalog r mag, y=model residual):
+#     ax = axes[0, 0]
+#     make_9_subplot(ax, 'Model residual vs r (catalog)', 'Catalog Mag (r)', 'mMag', '', True,
+#                    x_data=df_plot_comp_obs['r'], y_data=1000.0 * df_plot_comp_obs['Residual'])
+#     draw_x_line(ax, user_selections['min_r_mag'])
+#     draw_x_line(ax, user_selections['max_r_mag'])
+#
+#     # Comp residual plot (comps only, one point per obs: x=raw Instrument Mag, y=model residual):
+#     ax = axes[0, 1]
+#     make_9_subplot(ax, 'Model residual vs raw Instrument Mag', 'Raw instrument mag', 'mMag', '', True,
+#                    x_data=df_plot_comp_obs['InstMag'], y_data=1000.0 * df_plot_comp_obs['Residual'])
+#
+#     # Comp residual plot (comps only, one point per obs: x=catalog r-i color, y=model residual):
+#     ax = axes[0, 2]
+#     make_9_subplot(ax, 'Model residual vs Color Index (cat)', 'Catalog Color (r-i)', 'mMag', '', True,
+#                    x_data=df_plot_comp_obs['r'] - df_plot_comp_obs['i'],
+#                    y_data=1000.0 * df_plot_comp_obs['Residual'])
+#
+#     # Comp residual plot (comps only, one point per obs: x=Julian Date fraction, y=model residual):
+#     ax = axes[1, 0]
+#     make_9_subplot(ax, 'Model residual vs JD', xlabel_jd, 'mMag', '', True,
+#                    x_data=df_plot_comp_obs['JD_fract'], y_data=1000.0 * df_plot_comp_obs['Residual'],
+#                    jd_locators=True)
+#
+#     # Comp residual plot (comps only, one point per obs: x=Airmass, y=model residual):
+#     ax = axes[1, 1]
+#     make_9_subplot(ax, 'Model residual vs Airmass', 'Airmass', 'mMag', '', True,
+#                    x_data=df_plot_comp_obs['Airmass'], y_data=1000.0 * df_plot_comp_obs['Residual'])
+#
+#     # Comp residual plot (comps only, one point per obs: x=Sky Flux (ADUs), y=model residual):
+#     ax = axes[1, 2]
+#     make_9_subplot(ax, 'Model residual vs Sky Flux', 'Sky Flux (ADU)', 'mMag', '', True,
+#                    x_data=df_plot_comp_obs['SkyADU'], y_data=1000.0 * df_plot_comp_obs['Residual'])
+#
+#     # Comp residual plot (comps only, one point per obs: x=X in images, y=model residual):
+#     ax = axes[2, 0]
+#     make_9_subplot(ax, 'Model residual vs X in image', 'X from center (pixels)', 'mMag', '', True,
+#                    x_data=df_plot_comp_obs['X1024'] * 1024.0,
+#                    y_data=1000.0 * df_plot_comp_obs['Residual'])
+#     draw_x_line(ax, 0.0)
+#
+#     # Comp residual plot (comps only, one point per obs: x=Y in images, y=model residual):
+#     ax = axes[2, 1]
+#     make_9_subplot(ax, 'Model residual vs Y in image', 'Y from center (pixels)', 'mMag', '', True,
+#                    x_data=df_plot_comp_obs['Y1024'] * 1024.0,
+#                    y_data=1000.0 * df_plot_comp_obs['Residual'])
+#     draw_x_line(ax, 0.0)
+#
+#     # Comp residual plot (comps only, one point per obs: x=vignette (dist from center), y=model residual):
+#     ax = axes[2, 2]
+#     make_9_subplot(ax, 'Model residual vs distance from center', 'dist from center (pixels)', 'mMag',
+#                    '', True,
+#                    x_data=1024*np.sqrt(df_plot_comp_obs['Vignette']),
+#                    y_data= 1000.0 * df_plot_comp_obs['Residual'])
+#
+#     plt.show()
+#     fig.savefig(TRANSFORM_IMAGE_PREFIX + '4_Residuals.png')
+#
+#     # ################ TRANSFORM FIGURE(S) 5: Variability plots:
+#     # Several comps on a subplot, vs JD, normalized by (minus) the mean of all other comps' responses.
+#     # Make df_offsets (one row per obs, at first with only raw offsets):
+#     trial_transform = model.mm_fit.df_fixed_effects.loc['CI', 'Value']
+#     transform = trial_transform if abs(trial_transform < 0.2) else 0.0  # no crazy values.
+#     make_comp_variability_plots(df_plot_comp_obs, xlabel_jd, transform, sigma,
+#                                 image_prefix=TRANSFORM_IMAGE_PREFIX)
 
 
 _____COLOR_INDEX_PHOTOMETRY________________________________________________ = 0
@@ -1009,7 +1110,7 @@ def do_color(filters=FILTERS_FOR_MP_COLOR_INDEX, passbands=COLOR_INDEX_PASSBANDS
                 ax.annotate(label, xy=(x, y), xytext=(4, -4),
                             textcoords='offset points', ha='left', va='top', rotation=-40)
     plt.show()
-    fig.savefig(COLOR_PLOT_FILENAME)
+    # fig.savefig(COLOR_PLOT_FILENAME)
 
     # Write final results to screen and to log:
     output = 'MP color index (' + passband_string + ') = ' + '{0:.3f}'.format(mp_color) +\
@@ -1021,7 +1122,7 @@ def do_color(filters=FILTERS_FOR_MP_COLOR_INDEX, passbands=COLOR_INDEX_PASSBANDS
     log_file.close()
 
 
-_____LIGHTCURVE_PHOTOMETRY________________________________________________ = 0
+_____SESSION_LIGHTCURVE_PHOTOMETRY________________________________________________ = 0
 
 
 def do_mp_phot():
@@ -1226,7 +1327,7 @@ def make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_sele
 
     # Delete any previous image files from current directory:
     image_filenames = [f for f in os.listdir('.')
-                       if f.startswith('Image') and f.endswith('.png')]
+                       if f.startswith(SESSION_IMAGE_PREFIX) and f.endswith('.png')]
     for f in image_filenames:
         os.remove(f)
 
@@ -1262,7 +1363,7 @@ def make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_sele
     obs_jd_fract = df_plot['JD_mid'] - jd_floor
     xlabel_jd = 'JD(mid)-' + str(jd_floor)
 
-    # ################ FIGURE 1: Q-Q plot of mean comp effects (one point per comp star used in model),
+    # ################ SESSION FIGURE 1: Q-Q plot of mean comp effects (1 pt per comp star used in model),
     #    code heavily adapted from photrix.process.SkyModel.plots():
     window_title = 'Q-Q Plot (by comp):  MP ' + mp_string + '   AN ' + an_string
     page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q plot by comp (mean residual)'
@@ -1273,9 +1374,9 @@ def make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_sele
     y_data = df_y['Residual'] * 1000.0  # for millimags
     y_labels = df_y.index.values
     make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_data, y_labels,
-                          'Image1_QQ_comps.png')
+                          SESSION_IMAGE_PREFIX + '1_QQ_comps.png')
 
-    # ################ FIGURE 2: Q-Q plot of comp residuals (one point per comp obs),
+    # ################ SESSION FIGURE 2: Q-Q plot of comp residuals (one point per comp obs),
     #    code heavily adapted from photrix.process.SkyModel.plots():
     window_title = 'Q-Q Plot (by comp observation):  MP ' + mp_string + '   AN ' + an_string
     page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q plot by comp observation'
@@ -1287,9 +1388,9 @@ def make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_sele
     y_data = df_y['Residual'] * 1000.0  # for millimags
     y_labels = df_y['Serial'].values
     make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_data, y_labels,
-                          'Image2_QQ_obs.png')
+                          SESSION_IMAGE_PREFIX + '2_QQ_obs.png')
 
-    # ################ FIGURE 3: Catalog and Time plots:
+    # ################ SESSION FIGURE 3: Catalog and Time plots:
     fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(11, 8.5))  # (width, height) in "inches", was 15,9
     fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
     fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
@@ -1361,9 +1462,9 @@ def make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_sele
     ax.invert_yaxis()  # per custom of plotting magnitudes brighter=upward
 
     plt.show()
-    fig.savefig('Image3_Catalog_and_Time.png')
+    fig.savefig(SESSION_IMAGE_PREFIX + '3_Catalog_and_Time.png')
 
-    # ################ FIGURE 4: Residual plots:
+    # ################ SESSION FIGURE 4: Residual plots:
     fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(11, 8.5))  # (width, height) in "inches", was 15, 9
     fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
     fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
@@ -1436,12 +1537,13 @@ def make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_sele
                    y_data= 1000.0 * df_plot_comp_obs['Residual'])
 
     plt.show()
-    fig.savefig('Image4_Residuals.png')
+    fig.savefig(SESSION_IMAGE_PREFIX + '4_Residuals.png')
 
     # ################ FIGURE(S) 5: Variability plots:
     # Several comps on a subplot, vs JD, normalized by (minus) the mean of all other comps' responses.
     # Make df_offsets (one row per obs, at first with only raw offsets):
-    make_comp_variability_plots(df_plot_comp_obs, xlabel_jd, transform, sigma)
+    make_comp_variability_plots(df_plot_comp_obs, xlabel_jd, transform, sigma,
+                                image_prefix=SESSION_IMAGE_PREFIX)
 
 
 def write_canopus_file(model):
@@ -1917,7 +2019,15 @@ def make_9_subplot(ax, title, x_label, y_label, text, zero_line, x_data, y_data,
         ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
 
 
-def make_comp_variability_plots(df_plot_comp_obs, xlabel_jd, transform, sigma):
+def make_comp_variability_plots(df_plot_comp_obs, xlabel_jd, transform, sigma, image_prefix):
+    """ Make pages of 9 subplots, 4 comps per subplot, showing jackknife comp residuals.
+    :param df_plot_comp_obs: table of data from which to generate all subplots. [pandas Dataframe]
+    :param xlabel_jd: label to go under x-axis (JD axis) for each subplot. [string]
+    :param transform: Sloan r-i transform used for data. [float]
+    :param sigma: std deviation of comp responses from fit. [float]
+    :param image_prefix: prefix for output images' filenames. [string]
+    :return:
+    """
     _, mp_string, an_string = get_context()
     comp_ids = df_plot_comp_obs['SourceID'].drop_duplicates()
     n_comps = len(comp_ids)
@@ -2039,7 +2149,7 @@ def make_comp_variability_plots(df_plot_comp_obs, xlabel_jd, transform, sigma):
                 ax = axes[i_row, i_col]
                 ax.remove()
         plt.show()
-        plt.savefig('Image5_Comp Variability_' + '{:02d}'.format(i_figure + 1) + '.png')
+        plt.savefig(image_prefix + '5_Comp Variability_' + '{:02d}'.format(i_figure + 1) + '.png')
 
     # Verify that all comps were plotted exactly once (debug):
     all_comps_plotted_once = (sorted(comp_ids) == sorted(plotted_comp_ids))

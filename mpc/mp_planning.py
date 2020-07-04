@@ -213,8 +213,6 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
     an_dict_list = []  # results to be deposited here, to make a dataframe later.
     for mp in mpfile_dict.keys():
         mpfile = mpfile_dict[mp]
-        if str(mpfile.number) == '768':
-            iiii = 4
         # an_dict doesn't need to include defaults for case before or after mpfile ephemeris,
         #    because making the dataframe should put in NANs for missing keys anyway (check this later):
         an_dict = {'MPnumber': mpfile.number, 'MPname': mpfile.name, 'Motive': mpfile.motive,
@@ -241,10 +239,6 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
             hours_observable = ts_observable.seconds / 3600.0
             mid_observable = ts_observable.midpoint  # for loop exit
             best_utc = mid_observable  # update for loop continuation.
-            # ts_observable_no_moon = an_object.ts_observable(mp_radec,
-            #                                                 min_alt=MIN_MP_ALTITUDE,
-            #                                                 min_moon_dist=0.0)  # Timespan object
-            # hours_observable_no_moon = ts_observable_no_moon.seconds / 3600.0
 
         # Mark valid MPs that are observable too briefly:
         if status.lower() == 'ok':
