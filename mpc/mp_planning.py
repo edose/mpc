@@ -4,6 +4,7 @@ import os
 from datetime import datetime, timezone, timedelta
 from math import ceil, floor, sqrt
 
+import numpy as np
 import pandas as pd
 # from astroquery.mpc import MPC
 import requests
@@ -38,15 +39,15 @@ MAX_V_MAGNITUDE_DEFAULT = 18  # to ensure ridiculously faint MPs don't get into 
 
 MPFILE_DIRECTORY = 'C:/Dev/Photometry/MPfile'
 ACP_PLANNING_TOP_DIRECTORY = 'C:/Astro/ACP'
-MP_PHOTOMETRY_PLANNING_DIRECTORY = 'C:/Astro/MP Photometry/$Planning'
+# MP_PHOTOMETRY_PLANNING_DIRECTORY = 'C:/Astro/MP Photometry/$Planning'
 CURRENT_MPFILE_VERSION = '1.1'
 # MPfile version 1.1 = added #BRIGHTEST directive; #EPH_RANGE rather than #UTC_RANGE; added #FAMILY.
 
 FOR_PLANNING_____________________________________________________________ = 0
 
 
-def plan(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE, min_hours=MIN_HOURS_OBSERVABLE,
-         max_vmag=MAX_V_MAGNITUDE_DEFAULT):
+def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
+                   min_hours=MIN_HOURS_OBSERVABLE, max_vmag=MAX_V_MAGNITUDE_DEFAULT):
     """ Main planning workflow for MP photometry. Requires a
     :param an_string: Astronight, e.g. 20200201 [string or int]
     :param site_name: name of site for Site object. [string]
@@ -58,29 +59,36 @@ def plan(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE, min_hours=
     # Make and print table of values, 1 line/MP, sorted by earliest observable UTC:
     df_an_table = make_df_an_table(an_string, site_name='DSW',
                                    min_moon_dist=min_moon_dist, min_hours=min_hours)
+
+    # Write warning lines for MPs that are no longer observable:
+    gone_west_lines = []
+    for i in df_an_table.index:
+        if df_an_table.loc[i, 'Status'].lower() == 'too late':
+            gone_west_lines.append(' >>>>> WARNING: MP ' + df_an_table.loc[i, 'MPnumber'] +
+                                   ' ' + df_an_table.loc[i, 'MPname'] +
+                                   ' has gone low in the west, probably should archive the MPfile.')
+
+    # Remove too-faint MPs:
     bright_enough = [vmag <= max_vmag for vmag in df_an_table['V_mag']]
     mps_to_keep = bright_enough
     df_an_table = df_an_table.loc[mps_to_keep, :]
     if df_an_table is None:
         print('No MPs observable for AN', an_string + '.')
         return
+
     df = df_an_table.copy()
     table_lines = ['MP Photometry planning for AN ' + an_string + ':',
-                   ''.rjust(22) + 'Start Tran  End    V   Exp/s  Duty    P/hr']
-    gone_west_lines = []
-
+                   ''.rjust(22) + 'Start Tran  End    V   Exp/s Duty/%   P/hr']
     for i in df.index:
         # print(str(i), str(df.loc[i, 'MPnumber']), str(df.loc[i, 'Status']))
-        if df.loc[i, 'Status'] == 'gone west':
-            gone_west_lines.append(' >>>>> MP ' + df.loc[i, 'MPnumber'] + ' has gone low in the west, '
-                                   'probably should archive the MPfile.')
-            continue  # that's all for this MP.
-        if df.loc[i, 'Status'].upper() != 'OK':
+        if df.loc[i, 'Status'].lower() != 'ok':
             continue  # sentinel
-        duty_cycle_string = '  [na]' if df.loc[i, 'DutyCyclePct'] is None \
-            else str(round(df.loc[i, 'DutyCyclePct'])).rjust(5) + '%'
-        period_string = '   [na]' if df.loc[i, 'Period'] is None \
-            else '{0:7.2f}'.format(df.loc[i, 'Period'])
+        duty_cycle = df.loc[i, 'DutyCyclePct']
+        duty_cycle_string = '    --' if (duty_cycle is None or np.isnan(duty_cycle) == True) \
+            else str(int(round(duty_cycle))).rjust(6)
+        period = df.loc[i, 'Period']
+        period_string = '     ? ' if (period is None or np.isnan(period) == True) \
+            else '{0:7.2f}'.format(period)
         table_line_elements = [df.loc[i, 'MPnumber'].rjust(6),
                                df.loc[i, 'MPname'].ljust(15),
                                hhmm_from_datetime_utc(df.loc[i, 'StartUTC']),
@@ -205,6 +213,8 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
     an_dict_list = []  # results to be deposited here, to make a dataframe later.
     for mp in mpfile_dict.keys():
         mpfile = mpfile_dict[mp]
+        if str(mpfile.number) == '768':
+            iiii = 4
         # an_dict doesn't need to include defaults for case before or after mpfile ephemeris,
         #    because making the dataframe should put in NANs for missing keys anyway (check this later):
         an_dict = {'MPnumber': mpfile.number, 'MPname': mpfile.name, 'Motive': mpfile.motive,
@@ -214,33 +224,37 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
         best_utc = mid_dark  # best_utc will = mid-observable time at converged RA,Dec.
 
         # Converge on best RA, Dec, observable timespan (they interact, as MP is moving):
+        hours_observable = 0.0  # default to keep IDE happy.
         for i in range(2):
             data = mpfile.eph_from_utc(best_utc)
             if data is None:
-                status = 'date out of range'
+                if mpfile.eph_range[1] < an_object.ts_dark.start:
+                    status = 'too late'
+                else:
+                    status = 'too early'
                 break
-            status = 'OK'
+            status = 'ok'
             mp_radec = RaDec(data['RA'], data['Dec'])
             ts_observable = an_object.ts_observable(mp_radec,
                                                     min_alt=MIN_MP_ALTITUDE,
                                                     min_moon_dist=min_moon_dist)  # Timespan object
+            hours_observable = ts_observable.seconds / 3600.0
             mid_observable = ts_observable.midpoint  # for loop exit
             best_utc = mid_observable  # update for loop continuation.
-        if status == 'date out of range':
-            # print(mpfile.number, status)
-            continue  # if no eph data for this MP on this night, do not make a table row for this MP.
+            # ts_observable_no_moon = an_object.ts_observable(mp_radec,
+            #                                                 min_alt=MIN_MP_ALTITUDE,
+            #                                                 min_moon_dist=0.0)  # Timespan object
+            # hours_observable_no_moon = ts_observable_no_moon.seconds / 3600.0
 
-        # Refine MP's status before continuing:
-        hours_observable = ts_observable.seconds / 3600.0
-        if ts_observable.start <= an_object.ts_dark.start and hours_observable < MIN_HOURS_OBSERVABLE :
-            status = 'gone west'
-        elif hours_observable < min_hours:
-            status = 'too brief'
-        # print(mpfile.name, status)
+        # Mark valid MPs that are observable too briefly:
+        if status.lower() == 'ok':
+            if hours_observable < min_hours:
+                status = 'too brief'
 
         # For MPs observable this night, add one line to table:
-        if status.lower() in ['ok', 'gone west', 'too brief']:
-            an_dict['Status'] = status
+        # print(mpfile.name, status)
+        an_dict['Status'] = status
+        if status.lower() == 'ok':
             an_dict['RA'] = data['RA']
             an_dict['Dec'] = data['Dec']
             an_dict['StartUTC'] = ts_observable.start
@@ -350,7 +364,7 @@ def make_coverage_plots(an_string, site_name, df_an_table):
                 ax = axes[i_row, i_col]
                 ax_p = axes_p[i_row, i_col]
                 subplot_title = 'MP ' + this_mp +\
-                                '    {0:.1f} h'.format(df.loc[this_mp, 'Period']) +\
+                                '    {0:.2f} h'.format(df.loc[this_mp, 'Period']) +\
                                 '    {0:d} s'.format(int(round(df.loc[this_mp, 'ExpTime']))) +\
                                 '    {0:d}%'.format(int(round(df.loc[this_mp, 'DutyCyclePct'])))
                 make_labels_9_subplots(ax, subplot_title, '', '', '', zero_line=False)
@@ -447,18 +461,18 @@ def make_coverage_plots(an_string, site_name, df_an_table):
 
             # Save HOURLY coverage plots:
             filename = 'MP_hourly_coverage_' + an_string + '_{0:02d}'.format(i_figure + 1) + '.png'
-            mp_photometry_planning_fullpath = os.path.join(MP_PHOTOMETRY_PLANNING_DIRECTORY, filename)
-            # print('Saving hourly coverage to', mp_photometry_planning_fullpath)
-            fig.savefig(mp_photometry_planning_fullpath)
+            # mp_photometry_planning_fullpath = os.path.join(MP_PHOTOMETRY_PLANNING_DIRECTORY, filename)
+            # # print('Saving hourly coverage to', mp_photometry_planning_fullpath)
+            # fig.savefig(mp_photometry_planning_fullpath)
             acp_planning_fullpath = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string, filename)
             # print('Saving hourly coverage to', acp_planning_fullpath)
             fig.savefig(acp_planning_fullpath)
 
             # Save PHASE coverage plots:
             filename = 'MP_phase_coverage_' + an_string + '_{0:02d}'.format(i_figure + 1) + '.png'
-            mp_photometry_planning_fullpath = os.path.join(MP_PHOTOMETRY_PLANNING_DIRECTORY, filename)
-            # print('Saving phase coverage to', mp_photometry_planning_fullpath)
-            fig_p.savefig(mp_photometry_planning_fullpath)
+            # mp_photometry_planning_fullpath = os.path.join(MP_PHOTOMETRY_PLANNING_DIRECTORY, filename)
+            # # print('Saving phase coverage to', mp_photometry_planning_fullpath)
+            # fig_p.savefig(mp_photometry_planning_fullpath)
             acp_planning_fullpath = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string, filename)
             # print('Saving phase coverage to', acp_planning_fullpath)
             fig_p.savefig(acp_planning_fullpath)
@@ -646,7 +660,10 @@ def make_mpfile(mp_number, utc_date_brightest=None, days=150, mpfile_directory=M
     datetime_now = datetime.now()
     datetime_now_zero_utc = datetime(datetime_now.year, datetime_now.month,
                                      datetime_now.day).replace(tzinfo=timezone.utc)
-    datetime_start = max(datetime_brightest - timedelta(days=int(floor(days/2.0))), datetime_now_zero_utc)
+    datetime_start = datetime_brightest - timedelta(days=int(floor(days/2.0)))
+    if datetime_start < datetime_now_zero_utc:
+        print(' >>>>> WARNING: Ephemeris table starts IN THE PAST, at',
+              '{:%Y-%m-%d}'.format(datetime_start) + '.')
 
     # Get strings from MPC (minorplanetcenter.com), making > 1 call if needed for number of days:
     n_days_per_call = 90
