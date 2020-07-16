@@ -32,7 +32,7 @@ MIN_HOURS_OBSERVABLE = 2  # (default value) less than this, and MP is not includ
 DSW = ('254.34647d', '35.11861269964489d', '2220m')
 DSNM = ('251.10288d', '31.748657576406853d', '1372m')
 # next is: (v_mag, exp_time in sec), for photometry only.
-EXP_TIME_TABLE_PHOTOMETRY = [(13, 60), (14, 80), (15, 160), (16, 300), (17, 600)]
+EXP_TIME_TABLE_PHOTOMETRY = [(13, 60), (14, 80), (15, 160), (16, 300), (17, 600), (17.5, 900)]
 EXP_OVERHEAD = 20  # Nominal exposure overhead, in seconds.
 COV_RESOLUTION_MINUTES = 5  # min. coverage plot resolution, in minutes.
 MAX_V_MAGNITUDE_DEFAULT = 18  # to ensure ridiculously faint MPs don't get into planning & plots.
@@ -398,7 +398,11 @@ def make_coverage_plots(an_string, site_name, df_an_table):
                                                    edgecolor='black', facecolor='darkgray'))
 
                 # HOURLY coverage: add info box.
-                infobox_text = df.loc[this_mp, 'MPname'] + '   ' + MOON_CHARACTER + ' ' +\
+                max_len_infobox_mp_name = 12
+                infobox_mp_name = df.loc[this_mp, 'MPname']
+                if len(infobox_mp_name) > max_len_infobox_mp_name:
+                    infobox_mp_name = infobox_mp_name[0:max_len_infobox_mp_name] + '...'
+                infobox_text = infobox_mp_name + '   ' + MOON_CHARACTER + ' ' +\
                     str(int(round(df.loc[this_mp, 'MoonDist']))) + u'\N{DEGREE SIGN}' +\
                     '   ' + 'α=' + '{0:.1f}'.format(df.loc[this_mp, 'PhaseAngle']) + u'\N{DEGREE SIGN}' +\
                     '   ' + df.loc[this_mp, 'Motive']
@@ -634,7 +638,7 @@ def degrees_as_hex(angle_degrees, arcseconds_decimal_places=2):
     return hex_string
 
 
-MPFILE_STUFF____________________________________________________ = 0
+MPFILE____________________________________________________ = 0
 
 
 def make_mpfile(mp_number, utc_date_brightest=None, days=150, mpfile_directory=MPFILE_DIRECTORY):
