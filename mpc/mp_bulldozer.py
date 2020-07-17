@@ -1,7 +1,44 @@
 __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
+# ##############################################################################
+# mp_bulldozer.py // July-August 2020
+# Eric Dose, New Mexico Mira Project  [ <-- NMMP to be renamed late 2020 ]
+# Albuquerque, New Mexico, (what's left of the) USA
+#
+# To whomever is unlucky enough to stumble across this file in this repo 'mpc':
+#   No, it's not you, it's the code. Hold your nose for a couple of weeks, please.
+#
+# To wit: this is my drunken first attempt at a long-held wish to magically remove
+# sky background from minor planet (MP) / asteroid images.
+#
+# Theory is: it should be possible, because the MP is moving, but the stars are
+# essentially not. So, mask out the MP from all images,
+# average these masked images, and you should have a synthetic image of that
+# sky region as though the MP were not crossing it. You've 'bulldozed' the background.
+# Just what you need to remove the accursed effect of stars on MP photometry.
+#
+# The original plan to use mixed-model regression should have worked, but
+# statsmodel's implementation gives singular matrices. That's wrong, but I know of
+# no other MMR implementation in python. So now we're trying a more
+# classical photometry approach. It's going OK so far.
+#
+# It's going to require that I account not only for image-to-image background and
+# sky transparency changes, but definitely for PSF changes as well. And possibly for
+# airmass changes as the comp stars' differing extinction have their effect. Sigh.
+#
+# Please don't be alarmed by all the stuff hard-coded into this. This is just
+# conceptual coding and testing--the hard-coding will all get pulled out for
+# production (he said).
+#
+# We shall see. This is going to be a long slog. Wish me luck from a safe distance, and
+# Cheers,
+# Eric
+#
+# July 16, 2020 ... stay tuned
+#
+# ##############################################################################
+
 import os
-from math import log10
 
 import pandas as pd
 import numpy as np
@@ -15,8 +52,7 @@ from ccdproc import ImageFileCollection, wcs_project, trim_image, Combiner
 from photutils import make_source_mask, DAOStarFinder, CircularAperture, aperture_photometry,\
     CircularAnnulus
 
-from photrix.image import Image, FITS
-from photrix.util import MixedModelFit
+from .mp_phot import get_fits_filenames
 
 TEST_FITS_DIR = 'C:/Astro/MP Photometry/MP_1111/AN20200617'
 BB_LARGE_MARGIN = 400
@@ -31,60 +67,52 @@ MATCH_TOLERANCE = 2  # distance in pixels
 
 
 def try_bulldozer():
-    # Get test images as CCDData objects into :
-    ic = ImageFileCollection(location=TEST_FITS_DIR, keywords=['filter', 'date-obs'],
-                             glob_include='MP_*.f*')  # mishandles CCDData units.
-    ic.sort(['date-obs'])
-    filenames = ic.files_filtered(include_path=False)
-    images = [CCDData.read(os.path.join(TEST_FITS_DIR, f), unit='adu') for f in filenames]
-    for i in images:
-        i.meta['RADESYSa'] = i.meta.pop('RADECSYS')  # Replace obsolete key.
-    filters = [im.meta['Filter'] for im in images]
-    # date_obs = [im.meta['date-obs'] for im in images]
-    exposures = [im.meta['exposure'] for im in images]
-    jds = [im.meta['jd'] for im in images]
-    jd_mids = [jd + exp / 2 / 24 / 3600 for (jd, exp) in zip(jds, exposures)]
-    df_images = pd.DataFrame({'Filename': filenames, 'Image': images, 'Filter': filters,
-                              'Exposure': exposures, 'JD_mid': jd_mids})
-    df_images.index = filenames
-    df_images = df_images.loc[df_images['Filter'] == 'Clear', :]
-
-    # # NB: regular dictionaries are ordered in python 3.7+
-    # image_dict = {f: i for (f, i) in zip(filenames, images) if i.meta['FILTER'] == 'Clear'}
-    # for fn in image_dict.keys():
-    #     image_dict[fn].meta['RADESYSa'] = image_dict[fn].meta.pop('RADECSYS')  # Replace obsolete key.
-
-    # radec1 = image_dict['MP_191-0001-Clear.fts'].wcs.all_pix2world([[200, 300]], 1)
-    # for f, i in image_dict.items():
-    #     radec = i.wcs.all_pix2world([[200, 300]], 1)
-    #     print(f, str((3600 / 0.682) * (radec - radec1)))
-
-    # Call bulldozer():
-    # best_mp_fluxes = bulldozer(df_images)
-
-    whatever = bulldozer(df_images)
-    return whatever
-
-
-def bulldozer(df_images):
+    """ Dummy calling fn. """
+    directory_path = TEST_FITS_DIR
+    filter='Clear'
     mp_file_early = 'MP_191-0001-Clear.fts'
     mp_file_late = 'MP_191-0028-Clear.fts'
     mp_pix_early = (826.4, 1077.4)
     mp_pix_late = (1144.3, 1099.3)
+    ref_star_file = 'MP_191-0001-Clear.fts'
+    ref_star_pix = (957.2, 1125.0)
+    whatever = bulldozer(directory_path, filter,
+                         mp_file_early, mp_file_late, mp_pix_early, mp_pix_late,
+                         ref_star_file, ref_star_pix)
+    return whatever
 
-    df_images = bd_add_mp_radec(df_images, mp_file_early, mp_file_late, mp_pix_early, mp_pix_late)
 
-    df_images = bd_trim_to_larger_bb(df_images)
+def bulldozer(directory_path, filter,
+              mp_file_early, mp_file_late, mp_pix_early, mp_pix_late,
+              ref_star_file, ref_star_pix):
+    """ A new sky-flattening algorithm.
+    :param directory_path: where the FITS files are found. [string]
+    :param filter: photometric filter in place when the FITS images were taken. [string]
+    :param mp_file_early: name of a FITS file taken early in the session, to locate MP. [string]
+    :param mp_file_late: name of a FITS file taken late in the session, to locate MP. [string]
+    :param mp_pix_early: (x,y) FITS-convention pixel position of MP in mp_file_early. [2-tuple of floats]
+    :param mp_pix_late: (x,y) FITS-convention pixel position of MP in mp_file_late. [2-tuple of floats]
+    :param ref_star_file: name of FITS file in which ref star is easily located. [string]
+    :param ref_star_pix: (x,y) pixel position of ref star in mp_star_file. [2-tuple of floats]
+    :return: large dataframe, in which the most interesting column is 'Best_MP_flux',
+             the MP flux in total ADUs, from this sky-subtracted algorithm. [pandas DataFrame]
+    """
 
-    df_images = bd_align_images_in_larger_bb(df_images)
+    df_images = make_df_images(directory_path, filter)
 
-    df_images = bd_trim_to_smaller_bb(df_images)
+    df_images = add_mp_radecs(df_images, mp_file_early, mp_file_late, mp_pix_early, mp_pix_late)
 
-    df_images = bd_add_mp_pix_positions(df_images)
+    df_images = trim_to_larger_bb(df_images)
+
+    df_images = align_images_in_larger_bb(df_images)
+
+    df_images = trim_to_smaller_bb(df_images)
+
+    df_images = add_mp_pixel_positions(df_images)
 
     plot_first_last(df_images)
 
-    df_images = bd_add_background_data(df_images)
+    df_images = add_background_data(df_images)
 
     sources_images = make_sources_images(df_images)
 
@@ -112,13 +140,53 @@ def bulldozer(df_images):
 
     # Construct flux per pixel in every MP mask, subtract it from MP flux. Return that and raw flux too.
 
-    return
+
+    return df_images
 
 
 BULLDOZER_SUBFUNCTIONS_______________________________ = 0
 
 
-def bd_add_mp_radec(df_images, mp_file_early, mp_file_late, mp_pix_early, mp_pix_late):
+def make_df_images(directory_path, filter):
+    """ Make starting (small) version of key dataframe.
+    :param directory_path: where the FITS files are comprising this MP photometry session, where
+           "session" by convention = all images from one night, targeting one minor planet (MP). [string]
+    :param filter: name of the filter through which the FITS images were taken. [string]
+    :return: starting version of df_images, one row per FITS file.
+             To be used for this session of MP photometry. This is the central data table,
+             and it will be updated throughout the photometry workflow to follow. [pandas DataTable]
+    """
+    # --> Replace ImageFileCollection(), as it's just too buggy (e.g., badly mishandles CCDData unit parm).
+    # ic = ImageFileCollection(location=directory_path, keywords=['filter', 'date-obs'],
+    #                          glob_include='MP_*.f*')  # mishandles CCDData units.
+    # ic.sort(['date-obs'])
+    # filenames = ic.files_filtered(include_path=False)
+    # Get all FITS filenames in directory, and read them into list of CCDData objects:
+    filenames = get_fits_filenames(directory_path)
+    images = [CCDData.read(os.path.join(TEST_FITS_DIR, f), unit='adu') for f in filenames]
+
+    # Keep only filenames and images in chosen filter:
+    keep_image = [(im.meta['Filter'] == filter) for im in images]
+    filenames = [f for (f, ki) in zip(filenames, keep_image) if ki is True]
+    images = [im for (im, ki) in zip(images, keep_image) if ki is True]
+
+    # Replace obsolete header key often found in FITS files derived from MaxIm DL.
+    for i in images:
+        i.meta['RADESYSa'] = i.meta.pop('RADECSYS')  # both ops in one statement. cool.
+
+    # Gather initial data from CCDData objects, to go into df_images:
+    filters = [im.meta['Filter'] for im in images]
+    exposures = [im.meta['exposure'] for im in images]
+    jds = [im.meta['jd'] for im in images]
+    jd_mids = [jd + exp / 2 / 24 / 3600 for (jd, exp) in zip(jds, exposures)]
+    df_images = pd.DataFrame(data={'Filename': filenames, 'Image': images, 'Filter': filters,
+                                   'Exposure': exposures, 'JD_mid': jd_mids},
+                             index=filenames)
+    df_images = df_images.sort_values(by='JD_mid')
+    return df_images
+
+
+def add_mp_radecs(df_images, mp_file_early, mp_file_late, mp_pix_early, mp_pix_late):
     """ Adds MP RA,Dec to each image row in df_images, by linear interpolation.
         Assumes images are plate solved but not necessarily (& probably not) aligned.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
@@ -154,7 +222,7 @@ def bd_add_mp_radec(df_images, mp_file_early, mp_file_late, mp_pix_early, mp_pix
     return df_images
 
 
-def bd_trim_to_larger_bb(df_images):
+def trim_to_larger_bb(df_images):
     """ Trim images to a large bounding box (mostly to save effort).
         Images not yet aligned, so bounding box is made large enough to account for image-to-image shifts.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
@@ -183,7 +251,7 @@ def bd_trim_to_larger_bb(df_images):
     return df_images
 
 
-def bd_align_images_in_larger_bb(df_images):
+def align_images_in_larger_bb(df_images):
     """ Align (reposition images, update WCS) the image data within larger bounding box.
         OVERWRITE old image data.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
@@ -204,7 +272,7 @@ def bd_align_images_in_larger_bb(df_images):
     return df_images
 
 
-def bd_trim_to_smaller_bb(df_images):
+def trim_to_smaller_bb(df_images):
     """ Trim images to the final, smaller bounding box to be used for all photometry.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
     :return: dataframe with 'Image' larger-bounding-box images OVERWRITTEN by smaller-bb-trimmed images.
@@ -232,7 +300,7 @@ def bd_trim_to_smaller_bb(df_images):
     return df_images
 
 
-def bd_add_mp_pix_positions(df_images):
+def add_mp_pixel_positions(df_images):
     """ Calculate MP (x,y) pixel position for each image, save in dataframe as new columns.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
     :return: dataframe with new MP_x and 'Image' larger-bounding-box images OVERWRITTEN by smaller-bb-trimmed images.
@@ -273,7 +341,7 @@ def plot_first_last(df_images):
     plt.show()
 
 
-def bd_add_background_data(df_images):
+def add_background_data(df_images):
     """ For each image, calculate sigma-clipped mean, median background ADU levels & std. deviation;
         write to dataframe as new columns. Probably will use the sigma-clipped median as background ADUs.
         This all assumes constant background across this small subimage. Go to 2-D later if really needed.
