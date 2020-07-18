@@ -5,7 +5,7 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 # Eric Dose, New Mexico Mira Project  [ <-- NMMP to be renamed late 2020 ]
 # Albuquerque, New Mexico, (what's left of the) USA
 #
-# To whomever is unlucky enough to stumble across this file in this repo 'mpc':
+# To whomever this egregious new repo file inflicts its ugly self upon...
 #   No, it's not you, it's the code. Hold your nose for a couple of weeks, please.
 #
 # To wit: this is my drunken first attempt at a long-held wish to magically remove
@@ -71,7 +71,7 @@ R_MP_MASK = 12      # radius in pixels
 R_APERTURE = 9      # "
 R_ANNULUS_IN = 15   # "
 R_ANNULUS_OUT = 20  # "
-N_AVERAGED_IMAGE_SOURCES_TO_KEEP = 5
+N_AVERAGED_SUBIMAGE_SOURCES_TO_KEEP = 5
 
 SOURCE_MATCH_TOLERANCE = 2  # distance in pixels
 
@@ -114,44 +114,29 @@ def bulldozer(directory_path, filter,
 
     df_images = add_mp_radecs(df_images, mp_file_early, mp_file_late, mp_pix_early, mp_pix_late)
 
-    df_images = trim_to_larger_bb(df_images)
+    df_images = trim_to_mid_images(df_images)
 
-    df_images = align_images_in_larger_bb(df_images)
+    df_images = align_mid_images(df_images)
 
     print_ref_star_morphology(df_images, ref_star_radec)
 
-    plot_ref_star_kernels(df_images, ref_star_radec, ref_star_pix)
-    return df_images  # ################################################################
+    plot_ref_star_kernels(df_images, ref_star_radec)
 
-    df_images = trim_to_smaller_bb(df_images)
+    # return df_images  # ################################################################
+
+    df_images = trim_to_subimages(df_images)
 
     df_images = add_mp_pixel_positions(df_images)
 
-    # plot_first_last(df_images)
+    # plot_first_last_subimages(df_images)
 
     df_images = add_background_data(df_images)
 
-    df_images = add_mp_masked_images(df_images)
+    df_images = add_mp_masked_subimages(df_images)
 
     # plot_mp_masks(df_images)
 
-    averaged_image = make_averaged_image(df_images)
-
-    df_averaged_image_sources = find_averaged_image_sources(averaged_image, df_images)
-
-    df_sources = find_sources(df_images)
-
-    df_sources = keep_only_matching_sources(df_sources, df_averaged_image_sources)
-
-    df_sources = do_source_aperture_photometry(df_sources, df_images)
-
-    df_qualified_sources = qualify_sources(df_sources)
-
-    anchor_filename, df_anchor = select_anchor_image(df_qualified_sources, df_images)
-
-    normalized_relative_fluxes = calc_normalized_relative_fluxes(df_qualified_sources, df_anchor, df_images)
-
-    df_images = make_best_background_images(normalized_relative_fluxes, averaged_image, df_images)
+    averaged_image = make_averaged_subimage(df_images)
 
 
 
@@ -242,11 +227,11 @@ def add_mp_radecs(df_images, mp_file_early, mp_file_late, mp_pix_early, mp_pix_l
     return df_images
 
 
-def trim_to_larger_bb(df_images):
-    """ Trim images to a large bounding box (mostly to save effort).
+def trim_to_mid_images(df_images):
+    """ Trim images to mid-sized images using a large bounding box, ready for alignment.
         Images not yet aligned, so bounding box is made large enough to account for image-to-image shifts.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: dataframe with 'Image' full-size images OVERWRITTEN by larger-bb-trimmed images.
+    :return: dataframe with new 'Mid_image' column filled with larger-bb-trimmed images.
              New images have updated WCS but are not yet aligned. [pandas DataFrame]
     """
     # Make list of MP (RA, Dec) for each image:
@@ -257,81 +242,83 @@ def trim_to_larger_bb(df_images):
     print('initial images: first and last mp_pix:', str(mp_pix_list[0]), str(mp_pix_list[-1]))
     print()
 
-    # Do first trim to large bounding box (throw away most pixels as they are unneeded):
+    # Do first trim to mid-image size (throw away most pixels as they are unneeded):
     bb_x_min = int(floor(min([mp_pix[0] for mp_pix in mp_pix_list]) - BB_LARGE_MARGIN))
     bb_x_max = int(ceil(max([mp_pix[0] for mp_pix in mp_pix_list]) + BB_LARGE_MARGIN))
     bb_y_min = int(floor(min([mp_pix[1] for mp_pix in mp_pix_list]) - BB_LARGE_MARGIN))
     bb_y_max = int(ceil(max([mp_pix[1] for mp_pix in mp_pix_list]) + BB_LARGE_MARGIN))
 
     for i, im in zip(df_images.index, df_images['Image']):
-        # Remember, reverse the FITS/pixel axes when addressing np arrays directly:
-        df_images.loc[i, 'Image'] = trim_image(im[bb_y_min:bb_y_max, bb_x_min:bb_x_max])
-    # df_images.iloc[0]['Image'].wcs.printwcs()
-    print('trim_to_larger_bb() done.')
+        # Remember: reverse the FITS/pixel axes when addressing np arrays directly:
+        df_images.loc[i, 'Mid_images'] = trim_image(im[bb_y_min:bb_y_max, bb_x_min:bb_x_max])  # y, x
+    # df_images.iloc[0]['Mid_images'].wcs.printwcs()
+    print('trim_to_mid_images() done.')
     return df_images
 
 
-def align_images_in_larger_bb(df_images):
-    """ Align (reposition images, update WCS) the image data within larger bounding box.
-        OVERWRITE old image data.
+def align_mid_images(df_images):
+    """ Align (reposition images, update WCS) the mid-sized images. OVERWRITE column 'Mid-image'.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: dataframe with 'Image' images OVERWRITTEN by newly aligned images. [pandas DataFrame]
+    :return: dataframe with 'Mid_image' column OVERWRITTEN by newly aligned mid-images. [pandas DataFrame]
     """
-    # Align all images to first image:
-    first_image_wcs = (df_images.iloc[0])['Image'].wcs
-    for i, im in zip(df_images.index, df_images['Image']):
-        df_images.loc[i, 'Image'] = wcs_project(im, first_image_wcs)
+    # Align all mid-images to first mid-image:
+    first_image_wcs = (df_images.iloc[0])['Mid_image'].wcs
+    for i, im in zip(df_images.index, df_images['Mid_image']):
+        df_images.loc[i, 'Mid_image'] = wcs_project(im, first_image_wcs)
 
-    print("Post-alignment pix position of first image's MP RaDec (should be uniform):")
+    print("Post-alignment pix position of first mid-image's MP RaDec (should be uniform):")
     mp_ra_ref, mp_dec_ref = (df_images.iloc[0])['MP_RA'], (df_images.iloc[0])['MP_Dec']
     for i in df_images.index:
-        mp_pix_ref = df_images.loc[i, 'Image'].wcs.all_world2pix([[mp_ra_ref, mp_dec_ref]], 1,
-                                                                 ra_dec_order=True)[0]
+        mp_pix_ref = df_images.loc[i, 'Mid_image'].wcs.all_world2pix([[mp_ra_ref, mp_dec_ref]], 1,
+                                                                     ra_dec_order=True)[0]
         print('   ', df_images.loc[i, 'Filename'], str(mp_pix_ref))  # should be uniform across all images.
-    print('align_images_in_larger_bb() done.')
+    print('align_mid_images() done.')
     return df_images
 
 
-def trim_to_smaller_bb(df_images):
-    """ Trim images to the final, smaller bounding box to be used for all photometry.
+def trim_to_subimages(df_images):
+    """ Trim mid-images to the final, smallest size, using a small bounding box. Used for all MP photometry.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: dataframe with 'Image' larger-bounding-box images OVERWRITTEN by smaller-bb-trimmed images.
+    :return: dataframe with  new 'Subimage' column holding smaller-bb-trimmed images.
              New images have updated WCS. [pandas DataFrame]
     """
-    # Find bounding box based on first and last images, regardless of direction of MP motion:
-    image_first = (df_images.iloc[0])['Image']  # Images are aligned, so first and last image will suffice.
-    image_last = (df_images.iloc[-1])['Image']  # "
+    # Find bounding box based on first and last mid-images, regardless of direction of MP motion:
+    # Mid-images are aligned, so first and last mid-image will suffice.
+    mid_image_first = (df_images.iloc[0])['Mid_image']
+    mid_image_last = (df_images.iloc[-1])['Mid_image']
     mp_ra_first, mp_dec_first = (df_images.iloc[0])['MP_RA'], (df_images.iloc[0])['MP_Dec']
     mp_ra_last, mp_dec_last = (df_images.iloc[-1])['MP_RA'], (df_images.iloc[-1])['MP_Dec']
-    mp_pix_first = image_first.wcs.all_world2pix([[mp_ra_first, mp_dec_first]], 1, ra_dec_order=True)[0]
-    mp_pix_last = image_last.wcs.all_world2pix([[mp_ra_last, mp_dec_last]], 1, ra_dec_order=True)[0]
-    bb_x_min = int(round(min(mp_pix_first[0], mp_pix_last[0]) - BB_SMALLER_MARGIN))
-    bb_x_max = int(round(max(mp_pix_first[0], mp_pix_last[0]) + BB_SMALLER_MARGIN))
-    bb_y_min = int(round(min(mp_pix_first[1], mp_pix_last[1]) - BB_SMALLER_MARGIN))
-    bb_y_max = int(round(max(mp_pix_first[1], mp_pix_last[1]) + BB_SMALLER_MARGIN))
-    print('x: ', str(bb_x_min), str(bb_x_max), '      y: ', str(bb_y_min), str(bb_y_max))
+    mp_xy0_first = mid_image_first.wcs.all_world2pix([[mp_ra_first, mp_dec_first]], 0,
+                                                     ra_dec_order=True)[0]
+    mp_xy0_last = mid_image_last.wcs.all_world2pix([[mp_ra_last, mp_dec_last]], 0,
+                                                   ra_dec_order=True)[0]
+    bb_x0_min = int(round(min(mp_xy0_first[0], mp_xy0_last[0]) - BB_SMALLER_MARGIN))
+    bb_x0_max = int(round(max(mp_xy0_first[0], mp_xy0_last[0]) + BB_SMALLER_MARGIN))
+    bb_y0_min = int(round(min(mp_xy0_first[1], mp_xy0_last[1]) - BB_SMALLER_MARGIN))
+    bb_y0_max = int(round(max(mp_xy0_first[1], mp_xy0_last[1]) + BB_SMALLER_MARGIN))
+    print('x: ', str(bb_x0_min), str(bb_x0_max), '      y: ', str(bb_y0_min), str(bb_y0_max))
 
-    # Perform the trims, OVERWRITE old 'Image' entries:
+    # Perform the trims, save to new 'Subimage' column:
+    df_images['Subimage'] = None
     for i, im in zip(df_images.index, df_images['Image']):
         # Remember, reverse the two axes when using np arrays directly:
-        df_images.loc[i, 'Image'] = trim_image(im[bb_y_min:bb_y_max, bb_x_min:bb_x_max])
-    # print((df_images.iloc[0])['Image'].wcs.printwcs())
-    print('trim_to_smaller_bb() done.')
+        df_images.loc[i, 'Subimage'] = trim_image(im[bb_y0_min:bb_y0_max, bb_x0_min:bb_x0_max])
+    # print((df_images.iloc[0])['Subimage'].wcs.printwcs())
+    print('trim_to_subimages() done.')
     return df_images
 
 
 def add_mp_pixel_positions(df_images):
-    """ Calculate MP (x,y) pixel position for each image, save in dataframe as new columns.
+    """ Calculate MP (x,y) pixel position for each subimage, save in dataframe as new columns.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: dataframe with new MP_x and 'Image' larger-bounding-box images OVERWRITTEN by smaller-bb-trimmed images.
-             New images have updated WCS. [pandas DataFrame]
+    :return: dataframe with new 'MP_x' and 'MP_y' columns. [pandas DataFrame]
     """
     mp_pix_list = [im.wcs.all_world2pix([[mp_ra, mp_dec]], 0, ra_dec_order=True)[0]  # origin ZERO, arrays.
-                   for (im, mp_ra, mp_dec) in zip(df_images['Image'],
+                   for (im, mp_ra, mp_dec) in zip(df_images['Subimage'],
                                                   df_images['MP_RA'],
                                                   df_images['MP_Dec'])]
-    df_images['MP_x'] = [x for (x, y) in mp_pix_list]
-    df_images['MP_y'] = [y for (x, y) in mp_pix_list]
+    df_images['MP_x'] = [x for (x, y) in mp_pix_list]  # zero-origin
+    df_images['MP_y'] = [y for (x, y) in mp_pix_list]  # "
 
     print('MP pixel positions in aligned small-bb images:')
     for fn, pix in zip(df_images['Filename'], mp_pix_list):
@@ -343,242 +330,60 @@ def add_mp_pixel_positions(df_images):
 
 
 def add_background_data(df_images):
-    """ For each image, calculate sigma-clipped mean, median background ADU levels & std. deviation;
-        write to dataframe as new columns. Probably will use the sigma-clipped median as background ADUs.
-        This all assumes constant background across this small subimage. Go to 2-D later if really needed.
+    """ For each subimage, calculate sigma-clipped mean, median background ADU levels & std. deviation;
+        write to dataframe as new columns. We will use the sigma-clipped median as background ADUs.
+        This all assumes constant background across this small subimage...go to 2-D later if really needed.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
     :return: dataframe with new 'Bkgd_mean', 'Bkgd_median', and 'Bkgd_std' columns. [pandas DataFrame]
     """
     bkgd_masks = [make_source_mask(im.data, nsigma=2, npixels=5, filter_fwhm=2, dilate_size=11)
-                  for im in df_images['Image']]
+                  for im in df_images['Subimage']]
     stats = [sigma_clipped_stats(im.data, sigma=3.0, mask=b_mask)
-             for (im, b_mask) in zip(df_images['Image'], bkgd_masks)]
+             for (im, b_mask) in zip(df_images['Subimage'], bkgd_masks)]
     df_images['Bkgd_mean'], df_images['Bkgd_median'], df_images['Bkgd_std'] = tuple(zip(*stats))
     print('add_background_data() done.')
     return df_images
 
 
-def add_mp_masked_images(df_images):
+def add_mp_masked_subimages(df_images):
     """ Make background-subtracted, MP-masked images to be used in our actual photometry.
-        Return df_images updated with new column; does not alter 'Image' column.
+        Add separate, new column 'Subimage_masked'; does not alter other image columns.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: same dataframe with new 'MP_masked_image' column. [pandas DataFrame]
+    :return: same dataframe with new 'Subimage_masked' column. [pandas DataFrame]
     """
-    mp_masked_images = []
-    for i, im in enumerate(df_images['Image']):
-        mp_masked_image = im.copy()
-        mp_masked_image.data = mp_masked_image.data - df_images.iloc[i]['Bkgd_median']
+    mp_masked_subimages = []
+    for i, im in enumerate(df_images['Subimage']):
+        mp_masked_subimage = im.copy()
+        mp_masked_subimage.data = mp_masked_subimage.data - df_images.iloc[i]['Bkgd_median']
         radec_mp = [df_images.iloc[i]['MP_RA'], df_images.iloc[i]['MP_Dec']]
 
         # Origin is zero here, to address numpy array cells rather than FITS pixels.
-        x_mp, y_mp = tuple(mp_masked_image.wcs.all_world2pix([radec_mp], 0, ra_dec_order=True)[0])
+        x_mp, y_mp = tuple(mp_masked_subimage.wcs.all_world2pix([radec_mp], 0, ra_dec_order=True)[0])
         # Arrays are addressed y-first:
-        mp_masked_image.mask = np.fromfunction(lambda i, j: (j - x_mp)**2 + (i - y_mp)**2 <= R_MP_MASK**2,
-                                               shape=mp_masked_image.data.shape, dtype=int)
-        mp_masked_images.append(mp_masked_image)
-    df_images['MP_masked_image'] = mp_masked_images
-    print('add_mp_masked_images() done.')
+        mp_masked_subimage.mask = np.fromfunction(lambda i, j: (j - x_mp)**2 +
+                                                               (i - y_mp)**2 <= R_MP_MASK**2,
+                                                  shape=mp_masked_subimage.data.shape, dtype=int)
+        mp_masked_subimages.append(mp_masked_subimage)
+    df_images['Subimage_masked'] = mp_masked_subimages
+    print('add_mp_masked_subimages() done.')
     return df_images
 
 
-def make_averaged_image(df_images):
-    """ Make and return reference (background-subtracted, MP-masked) average image.
-        This is what the sky would look like, on average, if the MP were not there.
+def make_averaged_subimage(df_images):
+    """ Make and return reference (background-subtracted, MP-masked) average subimage.
+        This is what this sliver of sky would look like, on average, if the MP were not there.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: one small-bounding-box averaged, MP-masked image. [one astropy CCDData object]
+    :return: one averaged, MP-masked subimage. [one astropy CCDData object]
     """
-    combiner = Combiner(df_images['MP_masked_image'])
-    averaged_image = combiner.average_combine()
-    plot_averaged_image(df_images, averaged_image)
-    print('make_averaged_image() done.')
-    return averaged_image
-
-
-def find_averaged_image_sources(averaged_image, df_images):
-    """ Find sources in averaged image.
-    :param averaged_image: reference bkgd-subtracted, MP-masked image. [one astropy CCDData objects]
-    :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: dataframe of source info, one row per source. [pandas DataFrame]
-    """
-    expected_std = np.sqrt(sum([std**2 for std in df_images['Bkgd_std']]) / len(df_images)**2)
-    print('expected_std =', '{0:.3f}'.format(expected_std))
-    daofind = DAOStarFinder(fwhm=7.0, threshold=5.0 * expected_std, sky=0.0, exclude_border=True)
-    averaged_image_sources = daofind(data=averaged_image.data)  # returns an astropy Table object.
-    df_averaged_image_sources = averaged_image_sources.to_pandas() \
-        .sort_values(by='flux', ascending=False)[:N_AVERAGED_IMAGE_SOURCES_TO_KEEP]
-    df_averaged_image_sources.index = range(len(df_averaged_image_sources))
-    df_averaged_image_sources = df_averaged_image_sources[['xcentroid', 'ycentroid']]
-    print('fine_averaged_image_sources() done:', str(len(df_averaged_image_sources)),
-          'averaged-image sources found.')
-    return df_averaged_image_sources
-
-
-def find_sources(df_images):
-    """ Find sources in all subimages, without referring to averaged image at all.
-    :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: dataframe of source info, one row per source. [pandas DataFrame]
-    """
-    df_sources_list = []
-    for i, s_im in enumerate(df_images['MP_masked_image']):
-        daofind = DAOStarFinder(fwhm=7.0, threshold=5.0 * df_images.iloc[i]['Bkgd_std'], sky=0.0,
-                                exclude_border=True)
-        df = daofind(data=s_im.data, mask=s_im.mask).to_pandas()
-        df['Filename'] = df_images.iloc[i]['Filename']
-        df_sources_list.append(df)
-    df_sources = pd.concat(df_sources_list)
-    df_sources.index = range(len(df_sources))
-    df_sources['SourceID'] = None
-    df_sources['FluxADU'] = None
-    df_sources = df_sources[['Filename', 'SourceID', 'xcentroid', 'ycentroid', 'FluxADU']]
-    print('find_sources() done', str(len(df_sources)), 'sources found.')
-    return df_sources
-
-
-def keep_only_matching_sources(df_sources, df_averaged_image_sources):
-    """ Try to match sources found in all subimages to those found in averaged image,
-        keep only those matching, discard the rest.
-    :param df_sources: dataframe of source info from all subimages, one row per source. [pandas DataFrame]
-    :param df_averaged_image_sources: source info, averaged image, one row per source. [pandas DataFrame]
-    :return: df_sources with only matching sources retained. [pandas DataFrame]
-    """
-    for i_s in df_sources.index:
-        x_s, y_s = df_sources.loc[i_s, 'xcentroid'], df_sources.loc[i_s, 'ycentroid']
-        for i_as in df_averaged_image_sources.index:
-            x_as, y_as = df_averaged_image_sources.loc[i_as, 'xcentroid'], \
-                         df_averaged_image_sources.loc[i_as, 'ycentroid']
-            distance2 = (x_s - x_as)**2 + (y_s - y_as)**2
-            if distance2 <= SOURCE_MATCH_TOLERANCE**2:
-                df_sources.loc[i_s, 'SourceID'] = i_as  # assign id from averaged-image sources.
-                break
-    sources_to_keep = [s_id is not None for s_id in df_sources['SourceID']]
-    df_sources = df_sources.loc[sources_to_keep, :]
-    print('keep_only_matching_sources() done:', str(len(df_sources)), 'sources kept.')
-    return df_sources
-
-
-def do_source_aperture_photometry(df_sources, df_images):
-    """ Do aperture photometry on each kept source in each subimage, write results to dataframe.
-    :param df_sources: dataframe of source info from all subimages, one row per source. [pandas DataFrame]
-    :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: df_sources with added columns of aperture photometry results. [pandas DataFrame]
-    """
-    for i, fn in enumerate(df_images.index):
-        this_masked_image_data = df_images.loc[fn, 'MP_masked_image']
-        is_this_file = (df_sources['Filename'] == fn)
-        sources_index_list = df_sources.index[is_this_file]
-        x_positions = df_sources.loc[sources_index_list, 'xcentroid']
-        y_positions = df_sources.loc[sources_index_list, 'ycentroid']
-        positions = np.transpose((x_positions, y_positions))
-        apertures = CircularAperture(positions, r=R_APERTURE)
-        phot_table = aperture_photometry(this_masked_image_data, apertures)
-        df_phot = phot_table.to_pandas()
-        df_phot.index = sources_index_list
-        annulus_apertures = CircularAnnulus(positions, r_in=R_ANNULUS_IN, r_out=R_ANNULUS_OUT)
-        annulus_masks = annulus_apertures.to_mask(method='center')
-        bkgd_median_list = []
-        for mask in annulus_masks:
-            annulus_data = mask.multiply(this_masked_image_data)
-            annulus_data_1d = annulus_data[mask.data > 0]
-            _, median_sigclip, _ = sigma_clipped_stats(annulus_data_1d)
-            bkgd_median_list.append(median_sigclip)
-        bkgd_median = np.array(bkgd_median_list)
-        df_phot['annulus_median'] = bkgd_median
-        df_phot['aper_bkgd'] = bkgd_median * apertures.area
-        df_phot['final_phot'] = df_phot['aperture_sum'] - df_phot['aper_bkgd']
-        df_sources.loc[sources_index_list, 'FluxADU'] = df_phot['final_phot']
-    flux_is_ok = [flux is not None for flux in df_sources['FluxADU']]  # could add warning if != len.
-    df_sources = df_sources.loc[flux_is_ok, :]
-    print('do_source_aperture_photometry() done.')
-    return df_sources
-
-
-def qualify_sources(df_sources):
-    """ Keep only sources having median flux at least 10% of highest median flux.
-    :param df_sources: dataframe of source info from all subimages, one row per source. [pandas DataFrame]
-    :return: df_qualified_sources, keeping only rows for sources with substantial flux. [pandas DataFrame]
-    """
-    source_ids = df_sources['SourceID'].drop_duplicates()
-    median_fluxes = []  # will be in same order as source_ids
-    for id in source_ids:
-        is_this_id = (df_sources['SourceID'] == id)
-        source_fluxes = df_sources.loc[is_this_id, 'FluxADU']
-        median_fluxes.append(source_fluxes.median())
-    max_median = max(median_fluxes)
-    median_flux_high_enough = [f >= 0.1 * max_median for f in median_fluxes]
-    qualified_source_ids = list(source_ids[median_flux_high_enough])
-    to_keep = [id in qualified_source_ids for id in df_sources['SourceID']]
-    df_qualified_sources = df_sources.loc[to_keep, :]
-    print('qualify_sources() done:', str(len(df_qualified_sources)), 'found.')
-    return df_qualified_sources
-
-
-def select_anchor_image(df_qualified_sources, df_images):
-    """ Find an image (or the first one if several) with a flux entry for every qualified source,
-        label this the "anchor image" for use in finding relative source strengths between images.
-    :param df_qualified_sources: data for qualified sources, one row per source x image. [pandas DataFrame]
-    :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: anchor_filename, df_anchor. [2-tuple of string, pandas DataFrame]
-    """
-    qualified_source_ids = df_qualified_sources['SourceID'].drop_duplicates()
-    anchor_filename = None
-    for fn in df_images.index:
-        if sum([f == fn for f in df_qualified_sources['Filename']]) == len(qualified_source_ids):
-            anchor_filename = fn
-            break
-    if anchor_filename is None:
-        print(' >>>>> ERROR: No image has a flux for every qualified source (unusual).')
-        return None
-    df_anchor = df_qualified_sources[df_qualified_sources['Filename'] == anchor_filename].copy()
-    df_anchor.index = df_anchor['SourceID']
-    print('select_anchor_image() done.')
-    return anchor_filename, df_anchor
-
-
-def calc_normalized_relative_fluxes(df_qualified_sources, df_anchor, df_images):
-    """ Calculate normalized relative flux for each subimage, which will be used to scale averaged
-        image to subtract source images from subimages.
-    :param df_qualified_sources: data for qualified sources, one row per source x image. [pandas DataFrame]
-    :param df_anchor: data for anchor subimage & sources. [pandas DataFrame]
-    :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: dictionary of normalized relative fluxes for each subimage. [python dict]
-    """
-    qualified_source_ids = df_qualified_sources['SourceID'].drop_duplicates()
-    anchor_flux_dict = {id: df_anchor.loc[id, 'FluxADU'] for id in qualified_source_ids}  # lookup table.
-
-    # Calculate normlized relative fluxes, for use in scaling background for each image:
-    relative_fluxes_dict = {fn: [] for fn in df_images.index}  # to be populated below.
-    for i in df_qualified_sources.index:
-        filename = df_qualified_sources.loc[i, 'Filename']
-        source_id = df_qualified_sources.loc[i, 'SourceID']
-        relative_fluxes_dict[filename].append(df_qualified_sources.loc[i, 'FluxADU'] /
-                                              anchor_flux_dict[source_id])
-    median_relative_fluxes_dict = {fn: np.median(relative_fluxes_dict[fn])
-                                   for fn in relative_fluxes_dict.keys()}
-    mean_median = np.mean([x for x in median_relative_fluxes_dict.values()])
-    normalized_relative_fluxes = {fn: x / mean_median for (fn, x) in median_relative_fluxes_dict.items()}
-    print('calc_normalized_relative_fluxes() done.')
-    return normalized_relative_fluxes
-
-
-def make_best_background_images(normalized_relative_fluxes, averaged_image, df_images):
-    """ Make best estimate of each image without MP (best background to MP).
-        Uses sum of flat background plus averaged image scaled by relative source flux.
-    :param normalized_relative_fluxes: normalized relative fluxes for each subimage. [python dict]
-    :param averaged_image: small-bounding-box averaged, MP-masked image. [astropy CCDData object]
-    :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: df_images with new column 'Bkdg_image' [pandas DataFrame]
-    """
-    df_images['Bkgd_image'] = [df_images.loc[fn, 'Bkgd_median'] +
-                               normalized_relative_fluxes[fn] * averaged_image
-                               for fn in df_images['Filename']]
-    plot_best_background_images(df_images)
-    print('make_best_background_images() done.')
-    return df_images
+    combiner = Combiner(df_images['Subimage_masked'])
+    averaged_subimage = combiner.average_combine()
+    plot_averaged_subimage(df_images, averaged_subimage)
+    print('make_averaged_subimage() done.')
+    return averaged_subimage
 
 
 def do_mp_aperture_photometry():
     pass
-
 
 
 PLOTTING_ETC_FUNCTIONS__________________________ = 0
@@ -591,21 +396,22 @@ def do_gamma(image, gamma=0.0625, dark_clip=0.002):
     return np.power(im_scaled, gamma)
 
 
-def plot_first_last(df_images):
+def plot_first_last_subimages(df_images):
     """ For testing. """
     fig, (ax1, ax2) = plt.subplots(2, 1)
     ax1.set_title(df_images.iloc[0]['Filename'])
-    ax1.imshow(do_gamma(df_images.iloc[0]['Image']), origin='upper', interpolation='none', cmap='Greys')
+    ax1.imshow(do_gamma(df_images.iloc[0]['Subimage']), origin='upper', interpolation='none', cmap='Greys')
     ax2.set_title(df_images.iloc[-1]['Filename'])
-    ax2.imshow(do_gamma(df_images.iloc[-1]['Image']), origin='upper', interpolation='none', cmap='Greys')
+    ax2.imshow(do_gamma(df_images.iloc[-1]['Subimage']), origin='upper', interpolation='none', cmap='Greys')
     plt.tight_layout()
     plt.show()
 
 
 def print_ref_star_morphology(df_images, ref_star_radec):
-    ims = df_images['Image']
-    ref_star_xy0 = tuple(df_images.iloc[0]['Image'].wcs.all_world2pix(ref_star_radec, 0,
-                                                                      ra_dec_order=True)[0])
+    # This should use mid_images rather than subimages; less risk of bumping into image boundaries.
+    ims = df_images['Mid_image']
+    ref_star_xy0 = tuple(df_images.iloc[0]['Mid_image'].wcs.all_world2pix(ref_star_radec, 0,
+                                                                          ra_dec_order=True)[0])
     print('ref_star_xy0 =', str(ref_star_xy0))
     x, y = ref_star_xy0
     x_min = int(floor(x - 25))
@@ -613,7 +419,7 @@ def print_ref_star_morphology(df_images, ref_star_radec):
     y_min = int(floor(y - 25))
     y_max = int(ceil(y + 25))
     plot_data = []
-    for i, im in enumerate(df_images['Image']):
+    for i, im in enumerate(df_images['Mid_image']):
         data = im.data[y_min:y_max, x_min:x_max].copy()  # x & y reversed for direct mp.array access
         _, median, _ = sigma_clipped_stats(data, sigma=3.0)
         data -= median  # subtract background
@@ -638,12 +444,13 @@ def print_ref_star_morphology(df_images, ref_star_radec):
     plt.show()
 
 
-def plot_ref_star_kernels(df_images, ref_star_radec, ref_star_pix):
+def plot_ref_star_kernels(df_images, ref_star_radec):
     """ For each large_bb subimage, plot original kernel and psf_matching_kernel. """
+    # This should use mid_images rather than subimages; less risk of bumping into image boundaries.
     nominal_size = 80
     target_sigma = 5.176  # largest semi-major axis
 
-    kernels = [get_ref_star_kernel(im, ref_star_radec, nominal_size) for im in df_images['Image']]
+    kernels = [get_ref_star_kernel(im, ref_star_radec, nominal_size) for im in df_images['Subimage']]
     shape = kernels[0].shape
     size = shape[0]
     window = (SplitCosineBellWindow(alpha=0.5, beta=0.25))(shape)  # window fn of same shape as kernels.
@@ -664,24 +471,11 @@ def plot_ref_star_kernels(df_images, ref_star_radec, ref_star_pix):
     for (fn, mk) in zip(df_images['Filename'], matching_kernels):
         print(fn, ' min, max =', '{0:.6f}'.format(np.min(mk)), '{0:.6f}'.format(np.max(mk)))
 
-    # Plot example window functions:
-    # fig, (ax1, ax2) = plt.subplots(2, 1)
-    # alpha = 0.1
-    # ax1.set_title('CosineBellWindow' + str(alpha))
-    # ax1.imshow((CosineBellWindow(alpha=alpha))(shape),
-    #            origin='upper', interpolation='none', cmap='viridis')
-    # alpha = 0.4
-    # ax2.set_title('CosineBellWindow' + str(alpha))
-    # ax2.imshow((CosineBellWindow(alpha=alpha))(shape),
-    #            origin='upper', interpolation='none', cmap='viridis')
-    # plt.tight_layout()
-    # plt.show()
-
     n_rows = len(kernels)
     rows_per_fig = 4
-
     norm = ImageNormalize(stretch=LogStretch())
     rows_this_fig = 0
+    axes = None  # keep IDE happy.
     for i_row in range(n_rows):
         if rows_this_fig <= 0:
             fig, axes = plt.subplots(ncols=2, nrows=rows_per_fig, figsize=(5, 3 * rows_per_fig))
@@ -704,51 +498,31 @@ def plot_ref_star_kernels(df_images, ref_star_radec, ref_star_pix):
 
 
 def plot_mp_masks(df_images):
+    # Use subimages only.
     fig, (ax1, ax2) = plt.subplots(2, 1)
     ax1.set_title('Subimage ' + df_images.iloc[0]['Filename'])
-    ax1.imshow(do_gamma(df_images.iloc[0]['Image']), origin='upper', interpolation='none', cmap='Greys')
+    ax1.imshow(do_gamma(df_images.iloc[0]['Subimage']), origin='upper', interpolation='none', cmap='Greys')
     ax2.set_title('MP Mask')
-    ax2.imshow(df_images.iloc[0]['MP_masked_image'].mask, origin='upper')
+    ax2.imshow(df_images.iloc[0]['Subimage_masked'].mask, origin='upper')
     plt.tight_layout()
     plt.show()
 
     fig, (ax1, ax2) = plt.subplots(2, 1)
     ax1.set_title('Subimage ' + df_images.iloc[-1]['Filename'])
-    ax1.imshow(do_gamma(df_images.iloc[-1]['Image']), origin='upper', interpolation='none', cmap='Greys')
+    ax1.imshow(do_gamma(df_images.iloc[-1]['Subimage']), origin='upper', interpolation='none', cmap='Greys')
     ax2.set_title('MP Mask')
-    ax2.imshow(df_images.iloc[-1]['MP_masked_image'].mask, origin='upper')
+    ax2.imshow(df_images.iloc[-1]['Subimage_masked'].mask, origin='upper')
     plt.tight_layout()
     plt.show()
 
 
-def plot_averaged_image(df_images, averaged_image):
+def plot_averaged_subimage(df_images, averaged_subimage):
     fig, (ax1, ax2) = plt.subplots(2, 1)
     ax1.set_title('Subimage ' + df_images.iloc[-1]['Filename'])
-    ax1.imshow(do_gamma(df_images.iloc[-1]['Image']), origin='upper', interpolation='none', cmap='Greys')
-    ax2.set_title('Avg image')
-    ax2.imshow(do_gamma(averaged_image), origin='upper', interpolation='none', cmap='Greys')
+    ax1.imshow(do_gamma(df_images.iloc[-1]['Subimage']), origin='upper', interpolation='none', cmap='Greys')
+    ax2.set_title('Averaged subimage')
+    ax2.imshow(do_gamma(averaged_subimage), origin='upper', interpolation='none', cmap='Greys')
     plt.tight_layout()
-    plt.show()
-
-
-def plot_best_background_images(df_images):
-    image_indices = [0, 1, 2, len(df_images) - 1]
-    fig, axes = plt.subplots(ncols=3, nrows=len(image_indices))
-    for i_row, image_index in enumerate(image_indices):
-        image_index = image_indices[i_row]
-        image = df_images.iloc[image_index]['Image']
-        bkgd_image = df_images.iloc[image_index]['Bkgd_image']
-        ax = axes[i_row, 0]
-        ax.set_title(df_images.iloc[image_index]['Filename'])
-        ax.imshow(do_gamma(image), origin='upper', interpolation='none', cmap='Greys')
-        ax = axes[i_row, 1]
-        ax.set_title('Scaled bkgd')
-        ax.imshow(do_gamma(bkgd_image), origin='upper', interpolation='none', cmap='Greys')
-        ax = axes[i_row, 2]
-        ax.set_title('Bkdg-subtr')
-        ax.imshow(do_gamma(np.clip(image - bkgd_image, a_min=0, a_max=None)),
-                  origin='upper', interpolation='none', cmap='Greys')
-    fig.tight_layout()
     plt.show()
 
 
@@ -787,4 +561,221 @@ def get_ref_star_kernel(image, ref_star_radec, size):
 
 
 DETRITUS________________________________________ = 0
+
+# This stuff just no longer needed.
+
+# df_averaged_image_sources = find_sources_in_averaged_subimage(averaged_image, df_images)
+# df_sources = find_sources_in_all_subimages(df_images)
+# df_sources = keep_only_matching_sources(df_sources, df_averaged_image_sources)
+# df_sources = do_subimage_source_aperture_photometry(df_sources, df_images)
+# df_qualified_sources = qualify_subimage_sources(df_sources)
+# anchor_filename, df_anchor = select_anchor_subimage(df_qualified_sources, df_images)
+# normalized_relative_fluxes = calc_normalized_relative_fluxes(df_qualified_sources, df_anchor, df_images)
+# df_images = make_best_background_subimages(normalized_relative_fluxes, averaged_image, df_images)
+
+
+# def find_sources_in_averaged_subimage(averaged_subimage, df_images):
+#     """ Find sources in averaged subimage.
+#     :param averaged_subimage: reference bkgd-subtracted, MP-masked subimage. [one astropy CCDData objects]
+#     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
+#     :return: new dataframe of source info, one row per source. [pandas DataFrame]
+#     """
+#     expected_std = np.sqrt(sum([std**2 for std in df_images['Bkgd_std']]) / len(df_images)**2)
+#     print('expected_std =', '{0:.3f}'.format(expected_std))
+#     daofind = DAOStarFinder(fwhm=7.0, threshold=5.0 * expected_std, sky=0.0, exclude_border=True)
+#     averaged_subimage_sources = daofind(data=averaged_subimage.data)  # returns an astropy Table object.
+#     df_averaged_subimage_sources = averaged_subimage_sources.to_pandas() \
+#         .sort_values(by='flux', ascending=False)[:N_AVERAGED_SUBIMAGE_SOURCES_TO_KEEP]
+#     df_averaged_subimage_sources.index = range(len(df_averaged_subimage_sources))
+#     df_averaged_subimage_sources = df_averaged_subimage_sources[['xcentroid', 'ycentroid']]
+#     print('find_sources_in_averaged_subimage() done:', str(len(df_averaged_subimage_sources)),
+#           'sources found in averaged subimage.')
+#     return df_averaged_subimage_sources
+#
+#
+# def find_sources_in_all_subimages(df_images):
+#     """ Find sources in all subimages, without referring to averaged image at all.
+#     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
+#     :return: new dataframe of source info, one row per source. [pandas DataFrame]
+#     """
+#     df_subimage_sources_list = []
+#     for i, s_im in enumerate(df_images['Subimage_masked']):
+#         daofind = DAOStarFinder(fwhm=7.0, threshold=5.0 * df_images.iloc[i]['Bkgd_std'], sky=0.0,
+#                                 exclude_border=True)
+#         df = daofind(data=s_im.data, mask=s_im.mask).to_pandas()
+#         df['Filename'] = df_images.iloc[i]['Filename']
+#         df_subimage_sources_list.append(df)
+#     df_subimage_sources = pd.concat(df_subimage_sources_list)
+#     df_subimage_sources.index = range(len(df_subimage_sources))
+#     df_subimage_sources['SourceID'] = None
+#     df_subimage_sources['FluxADU'] = None
+#     df_subimage_sources = df_subimage_sources[['Filename', 'SourceID',
+#                                                'xcentroid', 'ycentroid', 'FluxADU']]
+#     print('find_sources_in_all_subimages() done:', str(len(df_subimage_sources)), 'sources found.')
+#     return df_subimage_sources
+#
+#
+# def keep_only_matching_sources(df_subimage_sources, df_averaged_subimage_sources):
+#     """ Try to match sources found in all subimages to those found in averaged subimage,
+#         keep only those sources that match, discard the rest.
+#     :param df_subimage_sources: dataframe of source info from all subimages, one row per source. [pandas DataFrame]
+#     :param df_averaged_subimage_sources: source info, averaged subimage,
+#                one row per source. [pandas DataFrame]
+#     :return: df_subimage_sources, now with only matching sources retained. [pandas DataFrame]
+#     """
+#     for i_s in df_subimage_sources.index:
+#         x_s, y_s = df_subimage_sources.loc[i_s, 'xcentroid'], df_subimage_sources.loc[i_s, 'ycentroid']
+#         for i_as in df_averaged_subimage_sources.index:
+#             x_as, y_as = df_averaged_subimage_sources.loc[i_as, 'xcentroid'], \
+#                          df_averaged_subimage_sources.loc[i_as, 'ycentroid']
+#             distance2 = (x_s - x_as)**2 + (y_s - y_as)**2
+#             if distance2 <= SOURCE_MATCH_TOLERANCE**2:
+#                 df_subimage_sources.loc[i_s, 'SourceID'] = i_as  # assign id from averaged-image sources.
+#                 break
+#     sources_to_keep = [s_id is not None for s_id in df_subimage_sources['SourceID']]
+#     df_subimage_sources = df_subimage_sources.loc[sources_to_keep, :]
+#     print('keep_only_matching_sources() done:', str(len(df_subimage_sources)), 'sources kept.')
+#     return df_subimage_sources
+#
+#
+# def do_subimage_source_aperture_photometry(df_subimage_sources, df_images):
+#     """ Do aperture photometry on each kept source in each subimage, write results to dataframe.
+#     :param df_subimage_sources: dataframe of source info from all subimages, one row per source. [pandas DataFrame]
+#     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
+#     :return: df_subimage_sources with added columns of aperture photometry results. [pandas DataFrame]
+#     """
+#     for i, fn in enumerate(df_images.index):
+#         this_masked_subimage_data = df_images.loc[fn, 'Subimage_masked']
+#         is_this_file = (df_subimage_sources['Filename'] == fn)
+#         sources_index_list = df_subimage_sources.index[is_this_file]
+#         x_positions = df_subimage_sources.loc[sources_index_list, 'xcentroid']
+#         y_positions = df_subimage_sources.loc[sources_index_list, 'ycentroid']
+#         positions = np.transpose((x_positions, y_positions))
+#         apertures = CircularAperture(positions, r=R_APERTURE)
+#         phot_table = aperture_photometry(this_masked_subimage_data, apertures)
+#         df_phot = phot_table.to_pandas()
+#         df_phot.index = sources_index_list
+#         annulus_apertures = CircularAnnulus(positions, r_in=R_ANNULUS_IN, r_out=R_ANNULUS_OUT)
+#         annulus_masks = annulus_apertures.to_mask(method='center')
+#         bkgd_median_list = []
+#         for mask in annulus_masks:
+#             annulus_data = mask.multiply(this_masked_subimage_data)
+#             annulus_data_1d = annulus_data[mask.data > 0]
+#             _, median_sigclip, _ = sigma_clipped_stats(annulus_data_1d)
+#             bkgd_median_list.append(median_sigclip)
+#         bkgd_median = np.array(bkgd_median_list)
+#         df_phot['annulus_median'] = bkgd_median
+#         df_phot['aper_bkgd'] = bkgd_median * apertures.area
+#         df_phot['final_phot'] = df_phot['aperture_sum'] - df_phot['aper_bkgd']
+#         df_subimage_sources.loc[sources_index_list, 'FluxADU'] = df_phot['final_phot']
+#     flux_is_ok = [flux is not None for flux in df_subimage_sources['FluxADU']]
+#     df_subimage_sources = df_subimage_sources.loc[flux_is_ok, :]
+#     print('do_subimage_source_aperture_photometry() done.')
+#     return df_subimage_sources
+#
+#
+# def qualify_subimage_sources(df_subimage_sources):
+#     """ Keep only subimage sources having median flux at least 10% of highest median flux.
+#     :param df_subimage_sources: source info from all subimages, one row per source. [pandas DataFrame]
+#     :return: df_qualified_subimage_sources, keeping only rows for sources with substantial flux. [pandas DataFrame]
+#     """
+#     source_ids = df_subimage_sources['SourceID'].drop_duplicates()
+#     median_fluxes = []  # will be in same order as source_ids
+#     for id in source_ids:
+#         is_this_id = (df_subimage_sources['SourceID'] == id)
+#         source_fluxes = df_subimage_sources.loc[is_this_id, 'FluxADU']
+#         median_fluxes.append(source_fluxes.median())
+#     max_median = max(median_fluxes)
+#     median_flux_high_enough = [f >= 0.1 * max_median for f in median_fluxes]
+#     qualified_source_ids = list(source_ids[median_flux_high_enough])
+#     to_keep = [id in qualified_source_ids for id in df_subimage_sources['SourceID']]
+#     df_qualified_subimage_sources = df_subimage_sources.loc[to_keep, :]
+#     print('qualify_subimage_sources() done:', str(len(df_qualified_subimage_sources)), 'found.')
+#     return df_qualified_subimage_sources
+#
+#
+# def select_anchor_subimage(df_qualified_subimage_sources, df_images):
+#     """ Find an image (or the first one if several) with a flux entry for every qualified source,
+#         label this the "anchor image" for use in finding relative source strengths between images.
+#     :param df_qualified_subimage_sources: data for qualified sources, one row per source x image. [pandas DataFrame]
+#     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
+#     :return: anchor_subimage_filename, df_anchor_subimage. [2-tuple of string, pandas DataFrame]
+#     """
+#     qualified_source_ids = df_qualified_subimage_sources['SourceID'].drop_duplicates()
+#     anchor_subimage_filename = None
+#     for fn in df_images.index:
+#         if sum([f == fn for f in df_qualified_subimage_sources['Filename']]) == len(qualified_source_ids):
+#             anchor_subimage_filename = fn
+#             break
+#     if anchor_subimage_filename is None:
+#         print(' >>>>> ERROR: No image has a flux for every qualified source (unusual).')
+#         return None
+#     df_anchor_subimage = df_qualified_subimage_sources[df_qualified_subimage_sources['Filename'] ==
+#                                                        anchor_subimage_filename].copy()
+#     df_anchor_subimage.index = df_anchor_subimage['SourceID']
+#     print('select_anchor_subimage() done.')
+#     return anchor_subimage_filename, df_anchor_subimage
+#
+#
+# def calc_normalized_relative_fluxes(df_qualified_subimage_sources, df_anchor_subimage, df_images):
+#     """ Calculate normalized relative flux for each subimage, which will be used to scale averaged
+#         image to subtract source images from subimages.
+#     :param df_qualified_subimage_sources: qualified sources, one row per source x image. [pandas DataFrame]
+#     :param df_anchor_subimage: data for anchor subimage & sources. [pandas DataFrame]
+#     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
+#     :return: dictionary of normalized relative fluxes for each subimage. [python dict]
+#     """
+#     qualified_source_ids = df_qualified_subimage_sources['SourceID'].drop_duplicates()
+#     anchor_flux_dict = {id: df_anchor_subimage.loc[id, 'FluxADU'] for id in qualified_source_ids}  # lookup.
+#
+#     # Calculate normlized relative fluxes, for use in scaling background for each subimage:
+#     relative_fluxes_dict = {fn: [] for fn in df_images.index}  # to be populated below.
+#     for i in df_qualified_subimage_sources.index:
+#         filename = df_qualified_subimage_sources.loc[i, 'Filename']
+#         source_id = df_qualified_subimage_sources.loc[i, 'SourceID']
+#         relative_fluxes_dict[filename].append(df_qualified_subimage_sources.loc[i, 'FluxADU'] /
+#                                               anchor_flux_dict[source_id])
+#     median_relative_fluxes_dict = {fn: np.median(relative_fluxes_dict[fn])
+#                                    for fn in relative_fluxes_dict.keys()}
+#     mean_median = np.mean([x for x in median_relative_fluxes_dict.values()])
+#     normalized_relative_fluxes = {fn: x / mean_median for (fn, x) in median_relative_fluxes_dict.items()}
+#     print('calc_normalized_relative_fluxes() done.')
+#     return normalized_relative_fluxes
+#
+#
+# def make_best_background_subimages(normalized_relative_fluxes, averaged_subimage, df_images):
+#     """ Make best estimate of each subimage without MP (for best local background to MP).
+#         Uses sum of flat background plus averaged subimage scaled by relative source flux.
+#     :param normalized_relative_fluxes: normalized relative fluxes for each subimage. [python dict]
+#     :param averaged_subimage: the averaged, MP-masked subimage. [astropy CCDData object]
+#     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
+#     :return: df_images with new column 'Subimage_bkgd' [pandas DataFrame]
+#     """
+#     df_images['Subimage_bkgd'] = [df_images.loc[fn, 'Bkgd_median'] +
+#                                   normalized_relative_fluxes[fn] * averaged_subimage
+#                                   for fn in df_images['Filename']]
+#     plot_best_background_subimages(df_images)
+#     print('make_best_background_subimages() done.')
+#     return df_images
+#
+#
+# def plot_best_background_subimages(df_images):
+#     image_indices = [0, 1, 2, len(df_images) - 1]
+#     fig, axes = plt.subplots(ncols=3, nrows=len(image_indices))
+#     for i_row, image_index in enumerate(image_indices):
+#         image_index = image_indices[i_row]
+#         subimage = df_images.iloc[image_index]['Subimage']
+#         bkgd_subimage = df_images.iloc[image_index]['Bkgd_image']
+#         ax = axes[i_row, 0]
+#         ax.set_title(df_images.iloc[image_index]['Filename'])
+#         ax.imshow(do_gamma(subimage), origin='upper', interpolation='none', cmap='Greys')
+#         ax = axes[i_row, 1]
+#         ax.set_title('Scaled bkgd')
+#         ax.imshow(do_gamma(bkgd_subimage), origin='upper', interpolation='none', cmap='Greys')
+#         ax = axes[i_row, 2]
+#         ax.set_title('Bkdg-subtr')
+#         ax.imshow(do_gamma(np.clip(subimage - bkgd_subimage, a_min=0, a_max=None)),
+#                   origin='upper', interpolation='none', cmap='Greys')
+#     fig.tight_layout()
+#     plt.show()
 
