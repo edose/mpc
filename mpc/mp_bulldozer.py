@@ -51,12 +51,13 @@ import matplotlib.pyplot as plt
 from astropy.stats import sigma_clipped_stats
 from astropy.nddata import CCDData
 from astropy.modeling.models import Gaussian2D
-from astropy.visualization import LogStretch, SqrtStretch
-from astropy.visualization.mpl_normalize import ImageNormalize
-from ccdproc import ImageFileCollection, wcs_project, trim_image, Combiner
+from astropy.convolution import convolve
+from astropy.visualization import LogStretch
+from astropy.visualization.mpl_normalize import ImageNormalize, imshow_norm, MinMaxInterval
+from ccdproc import wcs_project, trim_image, Combiner
 from photutils import make_source_mask, DAOStarFinder, CircularAperture, aperture_photometry,\
     CircularAnnulus, data_properties, create_matching_kernel, \
-    TukeyWindow, TopHatWindow, SplitCosineBellWindow, CosineBellWindow
+    SplitCosineBellWindow, CosineBellWindow
 
 from .mp_phot import get_fits_filenames
 
@@ -64,16 +65,18 @@ FWHM_PER_SIGMA = 2 * sqrt(2 * log(2))  # ca. 2.355
 
 TEST_FITS_DIR = 'C:/Astro/MP Photometry/MP_1111/AN20200617'
 PIXEL_SHIFT_TOLERANCE = 200  # maximum image shift in pixels we expect from bad pointing, tracking, etc.
-BB_LARGE_PADDING = 100       # min distance MP-image edge, for large bounding box images.
-BB_LARGE_MARGIN = PIXEL_SHIFT_TOLERANCE + BB_LARGE_PADDING
-BB_SMALLER_MARGIN = 80  # margin around bounding box, in pixels.
-R_MP_MASK = 12      # radius in pixels
+
+
+KERNEL_NOMINAL_SIZE = 80  # edge length in pixels
+MID_IMAGE_PADDING = 25  # extra padding around bounding box, in pixels.
+SUBIMAGE_PADDING = 80   # "
+# TODO: need to make equal the MP and comp-star radii for aperture photometry.
+R_MP_MASK = 15      # radius in pixels
 R_APERTURE = 9      # "
 R_ANNULUS_IN = 15   # "
 R_ANNULUS_OUT = 20  # "
-N_AVERAGED_SUBIMAGE_SOURCES_TO_KEEP = 5
 
-SOURCE_MATCH_TOLERANCE = 2  # distance in pixels
+# SOURCE_MATCH_TOLERANCE = 2  # distance in pixels
 
 
 def try_bulldozer():
@@ -108,42 +111,62 @@ def bulldozer(directory_path, filter,
              the MP flux in total ADUs, from this sky-subtracted algorithm. [pandas DataFrame]
     """
 
-    df_images = make_df_images(directory_path, filter)
+    # ###################################################################################
+    # Initial setup: ####################################################################
+
+    df_images = start_df_images(directory_path, filter)
 
     ref_star_radec = calc_ref_star_radec(df_images, ref_star_file, ref_star_pix)
 
-    df_images = add_mp_radecs(df_images, mp_file_early, mp_file_late, mp_pix_early, mp_pix_late)
+    df_images = calc_mp_radecs(df_images, mp_file_early, mp_file_late, mp_pix_early, mp_pix_late)
 
-    df_images = trim_to_mid_images(df_images)
+    df_images = calc_image_offsets(df_images, ref_star_radec)
+
+    # ###################################################################################
+    # Make mid-images, ref-star kernels, and matching kernels (1/image): ################
+
+    df_images = crop_to_mid_images(df_images, ref_star_radec)
 
     df_images = align_mid_images(df_images)
 
-    print_ref_star_morphology(df_images, ref_star_radec)
+    df_images = recrop_mid_images(df_images)
 
-    plot_ref_star_kernels(df_images, ref_star_radec)
+    return df_images
 
-    # return df_images  # ################################################################
+    df_images = make_ref_star_psfs(df_images, ref_star_radec)
 
-    df_images = trim_to_subimages(df_images)
+    target_sigma = calc_target_kernel_sigma(df_images, ref_star_radec)
 
-    df_images = add_mp_pixel_positions(df_images)
+    df_images = make_matching_kernels(df_images, target_sigma)
 
-    # plot_first_last_subimages(df_images)
+    df_images = convolve_mid_images(df_images)
 
-    df_images = add_background_data(df_images)
+    # ###################################################################################
+    # Make subimages (already aligned and convolved) & a few derivatives:  ##############
 
-    df_images = add_mp_masked_subimages(df_images)
+    df_images = crop_to_subimages(df_images)
 
-    # plot_mp_masks(df_images)
+    df_images = calc_mp_pixel_positions(df_images)
+
+    df_images = mask_mp_from_subimages(df_images)
+
+    df_images = calc_background_statistics(df_images)
+
+    df_images = subtract_background_from_subimages(df_images)
 
     averaged_image = make_averaged_subimage(df_images)
 
+    # ###################################################################################
+    # Get best MP fluxes from all subimages: ############################################
 
+    # OLS each MP-masked image to a + b*sources (does a ~= above bkgd?)
+    df_images = decompose_subimages(df_images, averaged_image)
 
+    # make best unmasked images from OLS (i.e., ~ MP-only on ~zero bkgd)
+    df_images = make_mp_only_subimages(df_images)
 
-
-    # Construct flux per pixel in every MP mask, subtract it from MP flux. Return that and raw flux too.
-
+    # aperture photometry to get best MP fluxes (do we even need sky annulae?)
+    df_images = do_mp_aperture_photometry(df_images)
 
     return df_images
 
@@ -151,7 +174,7 @@ def bulldozer(directory_path, filter,
 BULLDOZER_SUBFUNCTIONS_______________________________ = 0
 
 
-def make_df_images(directory_path, filter):
+def start_df_images(directory_path, filter):
     """ Make starting (small) version of key dataframe.
     :param directory_path: where the FITS files are comprising this MP photometry session, where
            "session" by convention = all images from one night, targeting one minor planet (MP). [string]
@@ -161,19 +184,20 @@ def make_df_images(directory_path, filter):
              and it will be updated throughout the photometry workflow to follow. [pandas DataTable]
     """
     # Get all FITS filenames in directory, and read them into list of CCDData objects:
-    filenames = get_fits_filenames(directory_path)
-    images = [CCDData.read(os.path.join(TEST_FITS_DIR, f), unit='adu') for f in filenames]
+    filenames = [fn for fn in get_fits_filenames(directory_path) if fn.startswith('MP_')]
+    images = [CCDData.read(os.path.join(TEST_FITS_DIR, fn), unit='adu') for fn in filenames]
 
     # Keep only filenames and images in chosen filter:
     keep_image = [(im.meta['Filter'] == filter) for im in images]
     filenames = [f for (f, ki) in zip(filenames, keep_image) if ki is True]
     images = [im for (im, ki) in zip(images, keep_image) if ki is True]
 
-    # Replace obsolete header key often found in FITS files derived from MaxIm DL.
+    # Replace obsolete header key often found in FITS files derived from MaxIm DL:
     for i in images:
-        i.meta['RADESYSa'] = i.meta.pop('RADECSYS')  # both ops in one statement. cool.
+        if 'RADECSYS' in i.meta.keys():
+            i.meta['RADESYSa'] = i.meta.pop('RADECSYS')  # both ops in one statement. cool.
 
-    # Gather initial data from CCDData objects, to go into df_images:
+    # Gather initial data from CCDData objects, then make df_images:
     filters = [im.meta['Filter'] for im in images]
     exposures = [im.meta['exposure'] for im in images]
     jds = [im.meta['jd'] for im in images]
@@ -182,18 +206,19 @@ def make_df_images(directory_path, filter):
                                    'Exposure': exposures, 'JD_mid': jd_mids},
                              index=filenames)
     df_images = df_images.sort_values(by='JD_mid')
-    print('make_df_images() done:', len(df_images), 'images.')
+    print('start_df_images() done:', len(df_images), 'images.')
     return df_images
 
 
 def calc_ref_star_radec(df_images, ref_star_file, ref_star_pix):
-    """ Returns RA,Dec sky position of reference star (for later use, but must be done on full image). """
-    ref_star_radec = df_images.loc[ref_star_file, 'Image'].wcs.all_pix2world([list(ref_star_pix)], 1)
+    """ Returns RA,Dec sky position of reference star."""
+    origin = 1  # because user is reading pix positions from FITS image.
+    ref_star_radec = df_images.loc[ref_star_file, 'Image'].wcs.all_pix2world([list(ref_star_pix)], origin)
     print('ref_star_radec =', str(ref_star_radec))
     return ref_star_radec
 
 
-def add_mp_radecs(df_images, mp_file_early, mp_file_late, mp_pix_early, mp_pix_late):
+def calc_mp_radecs(df_images, mp_file_early, mp_file_late, mp_pix_early, mp_pix_late):
     """ Adds MP RA,Dec to each image row in df_images, by linear interpolation.
         Assumes images are plate solved but not necessarily (& probably not) aligned.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
@@ -227,37 +252,69 @@ def add_mp_radecs(df_images, mp_file_early, mp_file_late, mp_pix_early, mp_pix_l
     return df_images
 
 
-def trim_to_mid_images(df_images):
-    """ Trim images to mid-sized images using a large bounding box, ready for alignment.
-        Images not yet aligned, so bounding box is made large enough to account for image-to-image shifts.
+def calc_image_offsets(df_images, ref_star_radec):
+    """ Calculate and store image-to-image shifts due to imperfect pointing, tracking, etc.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: dataframe with new 'Mid_image' column filled with larger-bb-trimmed images.
-             New images have updated WCS but are not yet aligned. [pandas DataFrame]
+    :param ref_star_radec: RA,Dec sky position of reference star. [2-list of floats]
+    :return: dataframe updated with X and Y offsets (relative to first image). [pandas DataFrame]
     """
-    # Make list of MP (RA, Dec) for each image:
-    mp_pix_list = [im.wcs.all_world2pix([[mp_ra, mp_dec]], 1, ra_dec_order=True)[0]
-                   for (im, mp_ra, mp_dec) in zip(df_images['Image'],
-                                                  df_images['MP_RA'],
-                                                  df_images['MP_Dec'])]
-    print('initial images: first and last mp_pix:', str(mp_pix_list[0]), str(mp_pix_list[-1]))
-    print()
+    xy0_list = [im.wcs.all_world2pix(ref_star_radec, 0, ra_dec_order=True)[0] for im in df_images['Image']]
+    df_images['X_offset'] = [xy[0] - (xy0_list[0])[0] for xy in xy0_list]
+    df_images['Y_offset'] = [xy[1] - (xy0_list[0])[1] for xy in xy0_list]
+    print("Pre-alignment image offsets from first image:")
+    for i in df_images.index:
+        print('   ', df_images.loc[i, 'Filename'],
+              '{0:.3f}'.format(df_images.loc[i, 'X_offset']),
+              '{0:.3f}'.format(df_images.loc[i, 'Y_offset']))
+    return df_images
 
-    # Do first trim to mid-image size (throw away most pixels as they are unneeded):
-    bb_x_min = int(floor(min([mp_pix[0] for mp_pix in mp_pix_list]) - BB_LARGE_MARGIN))
-    bb_x_max = int(ceil(max([mp_pix[0] for mp_pix in mp_pix_list]) + BB_LARGE_MARGIN))
-    bb_y_min = int(floor(min([mp_pix[1] for mp_pix in mp_pix_list]) - BB_LARGE_MARGIN))
-    bb_y_max = int(ceil(max([mp_pix[1] for mp_pix in mp_pix_list]) + BB_LARGE_MARGIN))
 
+def crop_to_mid_images(df_images, ref_star_radec):
+    """ Crop full images to much smaller mid-sized_images, used (for speed) for alignment and convolutions.
+    :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
+    :param ref_star_radec:
+    :return: dataframe with new 'Mid_image' column. New images have updated WCS. [pandas DataFrame]
+    """
+    # Beginning, minimal bounding box (to be enlarged) must contain MP locations from all images, and
+    #    reference star, too. We will use first image, because X- and Y-offsets are relative to that.
+    mp_ra_earliest, mp_dec_earlies = (df_images.iloc[0])['MP_RA'], (df_images.iloc[0])['MP_Dec']
+    mp_ra_latest, mp_dec_latest = (df_images.iloc[-1])['MP_RA'], (df_images.iloc[-1])['MP_Dec']
+    mp_xy0_earliest = df_images.iloc[0]['Image'].wcs.all_world2pix([[mp_ra_earliest, mp_dec_earlies]], 0,
+                                                                   ra_dec_order=True)[0]
+    mp_xy0_latest = df_images.iloc[0]['Image'].wcs.all_world2pix([[mp_ra_latest, mp_dec_latest]], 0,
+                                                                 ra_dec_order=True)[0]
+    ref_star_xy0 = df_images.iloc[0]['Image'].wcs.all_world2pix(ref_star_radec, 0,
+                                                                ra_dec_order=True)[0]
+    min_x0 = min(mp_xy0_earliest[0], mp_xy0_latest[0], ref_star_xy0[0])  # beginning bounding box only.
+    max_x0 = max(mp_xy0_earliest[0], mp_xy0_latest[0], ref_star_xy0[0])  # "
+    min_y0 = min(mp_xy0_earliest[1], mp_xy0_latest[1], ref_star_xy0[1])  # "
+    max_y0 = max(mp_xy0_earliest[1], mp_xy0_latest[1], ref_star_xy0[1])  # "
+
+    # Calculate dimensions of full bounding box for mid-images:
+    bb_min_x0 = int(round(min_x0 + min(df_images['X_offset']) -
+                          2 * KERNEL_NOMINAL_SIZE - MID_IMAGE_PADDING))
+    bb_max_x0 = int(round(max_x0 + max(df_images['X_offset']) +
+                          2 * KERNEL_NOMINAL_SIZE + MID_IMAGE_PADDING))
+    bb_min_y0 = int(round(min_y0 + min(df_images['Y_offset']) -
+                          2 * KERNEL_NOMINAL_SIZE - MID_IMAGE_PADDING))
+    bb_max_y0 = int(round(max_y0 + max(df_images['Y_offset']) +
+                          2 * KERNEL_NOMINAL_SIZE + MID_IMAGE_PADDING))
+    print('Mid_image crop:    x: ', str(bb_min_x0), str(bb_max_x0),
+          '      y: ', str(bb_min_y0), str(bb_max_y0))
+
+    # Perform the crop, save to new 'Mid_image' column:
+    df_images['Mid_image'] = None
     for i, im in zip(df_images.index, df_images['Image']):
-        # Remember: reverse the FITS/pixel axes when addressing np arrays directly:
-        df_images.loc[i, 'Mid_images'] = trim_image(im[bb_y_min:bb_y_max, bb_x_min:bb_x_max])  # y, x
-    # df_images.iloc[0]['Mid_images'].wcs.printwcs()
-    print('trim_to_mid_images() done.')
+        # Must reverse the two axes when using np arrays directly:
+        df_images.loc[i, 'Mid_image'] = trim_image(im[bb_min_y0:bb_max_y0, bb_min_x0:bb_max_x0])
+    print((df_images.iloc[0])['Mid_image'].wcs.printwcs())
+    # plot_images('Raw subimages', df_images['Filename'], df_images['Mid_image'])
+    print('crop_to_mid_images() done.')
     return df_images
 
 
 def align_mid_images(df_images):
-    """ Align (reposition images, update WCS) the mid-sized images. OVERWRITE column 'Mid-image'.
+    """ Align (reposition images, update WCS) the mid-sized images. OVERWRITE column 'Mid_image'.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
     :return: dataframe with 'Mid_image' column OVERWRITTEN by newly aligned mid-images. [pandas DataFrame]
     """
@@ -266,20 +323,140 @@ def align_mid_images(df_images):
     for i, im in zip(df_images.index, df_images['Mid_image']):
         df_images.loc[i, 'Mid_image'] = wcs_project(im, first_image_wcs)
 
-    print("Post-alignment pix position of first mid-image's MP RaDec (should be uniform):")
+    # Print a summary:
+    print("Post-alignment pix position of first image's MP RaDec (should be uniform):")
     mp_ra_ref, mp_dec_ref = (df_images.iloc[0])['MP_RA'], (df_images.iloc[0])['MP_Dec']
     for i in df_images.index:
-        mp_pix_ref = df_images.loc[i, 'Mid_image'].wcs.all_world2pix([[mp_ra_ref, mp_dec_ref]], 1,
+        mp_pix_ref = df_images.loc[i, 'Mid_image'].wcs.all_world2pix([[mp_ra_ref, mp_dec_ref]], 0,
                                                                      ra_dec_order=True)[0]
         print('   ', df_images.loc[i, 'Filename'], str(mp_pix_ref))  # should be uniform across all images.
+    plot_images('Aligned mid-images', df_images['Filename'], df_images['Mid_image'])
     print('align_mid_images() done.')
     return df_images
 
 
-def trim_to_subimages(df_images):
-    """ Trim mid-images to the final, smallest size, using a small bounding box. Used for all MP photometry.
+def recrop_mid_images(df_images):
+    """ Find largest bounding box with no masked or NaN values, crop all (aligned) mid-values to that bb.
+    :param df_images:
+    :return:
+    """
+    pixel_sum = np.sum([im.data] for im in df_images['Mid_image'])  # NaN if any images has NaN at that pix.
+    nan_or_zero = pixel_sum * np.zeros_like(pixel_sum)  # array of only NaN or zeroes.
+    x0_index, y0_index = np.meshgrid(range(nan_or_zero.shape[0]), range(nan_or_zero.shape[1]))
+    x0_grid = nan_or_zero * x0_index
+    y0_grid = nan_or_zero * y0_index
+    x0_min, x0_max = np.min(x0_grid), np.max(x0_grid)
+    y0_min, y0_max = np.min(y0_grid), np.max(y0_grid)
+    recropped_mid_images = [trim_image(im[y0_min:y0_max, x0_min:x0_min]) for im in df_images['Mid_image']]
+    df_images['Mid_image'] = recropped_mid_images
+    print('Mid_image recrop:    x: ', str(x0_min), str(x0_min), '      y: ', str(y0_min), str(y0_max))
+    plot_images('Recropped mid-images', df_images['Filename'], df_images['Mid_image'])
+    print('recrop_mid_images() done.')
+    return df_images
+
+
+def make_ref_star_psfs(df_images, ref_star_radec, nominal_size=KERNEL_NOMINAL_SIZE):
+    """ Make ref star PSFs (very small kernel-sized images, bkdg-subtracted) and store them in df_images.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: dataframe with  new 'Subimage' column holding smaller-bb-trimmed images.
+    :param ref_star_radec: RA,Dec of reference star in degrees. [2-list of floats]
+    :param nominal_size: pixels per (square) kernel's side; will be forced odd if not already. [int]
+    :return: small array centered on ref-star, suitable as psf to make matching kernel. [numpy array]
+    """
+    half_size = int(nominal_size / 2.0)
+    xy0_list = [tuple(im.wcs.all_world2pix(ref_star_radec, 0, ra_dec_order=True)[0])
+                for im in df_images['Mid_image']]
+    x_centers = [int(round(xy0[0])) for xy0 in xy0_list]
+    y_centers = [int(round(xy0[1])) for xy0 in xy0_list]
+    x_mins = [xc - half_size for xc in x_centers]
+    x_maxs = [xc + half_size + 1 for xc in x_centers]
+    y_mins = [yc - half_size for yc in y_centers]
+    y_maxs = [yc + half_size + 1 for yc in y_centers]
+    arrays = [im.data[y_min:y_max, x_min:x_max].copy()
+              for (im, x_min, x_max, y_min, y_max)
+              in zip(df_images['Mid_image'], x_mins, x_maxs, y_mins, y_maxs)]
+    medians = [sigma_clipped_stats(arr, sigma=3.0)[1] for arr in arrays]
+    bkgd_subtracted_arrays = [array - median for (array, median) in zip(arrays, medians)]
+    shape = bkgd_subtracted_arrays[0].shape
+    window = (SplitCosineBellWindow(alpha=0.5, beta=0.25))(shape)  # window fn of same shape as kernels.
+    raw_kernels = [bsa * window for bsa in bkgd_subtracted_arrays]
+    normalized_kernels = [rk / np.sum(rk) for rk in raw_kernels]
+    df_images['RefStarPSF'] = normalized_kernels
+    # plot_images('Ref Star PSF', df_images['Filename'], df_images['RefStarPSF'])
+    return df_images
+
+
+def calc_target_kernel_sigma(df_images, ref_star_radec):
+    """ Calculate target sigma for Gaussian target kernel.
+        Should be just a little larger than ref_star's (largest) PSF across all the images.
+    :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
+    :param ref_star_radec: RA,Dec of reference star in degrees. [2-list of floats]
+    :return: good estimate of sigma for target kernel. [float]
+    """
+    sigma_list = []
+    print('Ref star PSF x, y, sigma:')
+    for i, im in enumerate(df_images['RefStarPSF']):
+        dps = data_properties(im)  # photutils.segmentation.SourceProperties object.
+        sigma_list.append(dps.semimajor_axis_sigma.value)
+        print('   ', df_images.iloc[i]['Filename'],
+              '{:.2f}'.format(dps.xcentroid.value),
+              '{:.2f}'.format(dps.ycentroid.value),
+              '{:.3f}'.format(dps.semimajor_axis_sigma.value))
+    max_sigma = max(sigma_list)
+    target_sigma = 1.15 * max_sigma
+    print('Target sigma:', '{:.3f}'.format(target_sigma))
+    return target_sigma
+
+
+def make_matching_kernels(df_images, target_sigma):
+    """ Make matching kernels to render subimages' ref_star Gaussian with target_sigma.
+        Use mid-images rather than subimages, to minimize risk of bumping into image boundaries.
+    :param df_images: [pandas DataFrame]
+    :param target_sigma: in pixels. [float]
+    :return: df_images with new column 'MatchingKernel' with needed matching kernels. [pandas DataFrame]
+    """
+    # Get source PSFs:
+    ref_star_psfs = df_images['RefStarPSF']
+    shape = ref_star_psfs[0].shape
+    size = shape[0]
+    center = int(size / 2)
+
+    # Make target PSFs (Gaussian):
+    y, x = np.mgrid[0:size, 0:size]
+    gaussian = Gaussian2D(1, center, center, target_sigma, target_sigma)
+    target_psf = gaussian(x, y)
+    target_psf /= np.sum(target_psf)  # ensure normalized.
+
+    # Make and store matching kernels:
+    low_pass_window = CosineBellWindow(alpha=0.35)
+    matching_kernels = [create_matching_kernel(psf, target_psf, window=low_pass_window)
+                        for psf in ref_star_psfs]
+    df_images['MatchingKernel'] = matching_kernels
+    # plot_images('Matching Kernels', df_images['Filename'], df_images['MatchingKernel'])
+    return df_images
+
+
+def convolve_mid_images(df_images):
+    """ Convolve mid-images with matching kernel, to make source PSFs close to the target Gaussian PSF.
+    :param df_images: [pandas DataFrame]
+    :return: df_images with new column 'Mid_image_convolved'. [pandas DataFrame]
+    """
+    # Note that astropy convolve() operates on NDData arrays, not on CCDData objects.
+    # So we operate on im.data, not on im itself.
+    # boundary is set to 'extend' because the background is not necessarily near zero.
+    df_images['Mid_image_convolved'] = df_images['Mid_image'].copy()
+    for im in df_images['Mid_image_convolved']:
+        im.data = [convolve(im.data, kernel, boundary='extend')
+                   for (im, kernel) in zip(df_images['Mid_image'], df_images['MatchingKernel'])]
+    plot_images('Convolved mid-images', df_images['Filename'], df_images['Mid_image_convolved'])
+    return df_images
+
+
+def crop_to_subimages(df_images, ref_star_radec):
+    """ Trim mid-images to the final, smallest size, using a small bounding box. Used for all MP photometry.
+    :param df_images: dataframe, one row per session image in photometric filter.
+                      Mid-images are assumed of uniform size, aligned, and convolved. [pandas DataFrame]
+    :param ref_star_radec:
+    :return: dataframe with new 'Subimage' column holding smallest images.
              New images have updated WCS. [pandas DataFrame]
     """
     # Find bounding box based on first and last mid-images, regardless of direction of MP motion:
@@ -292,23 +469,28 @@ def trim_to_subimages(df_images):
                                                      ra_dec_order=True)[0]
     mp_xy0_last = mid_image_last.wcs.all_world2pix([[mp_ra_last, mp_dec_last]], 0,
                                                    ra_dec_order=True)[0]
-    bb_x0_min = int(round(min(mp_xy0_first[0], mp_xy0_last[0]) - BB_SMALLER_MARGIN))
-    bb_x0_max = int(round(max(mp_xy0_first[0], mp_xy0_last[0]) + BB_SMALLER_MARGIN))
-    bb_y0_min = int(round(min(mp_xy0_first[1], mp_xy0_last[1]) - BB_SMALLER_MARGIN))
-    bb_y0_max = int(round(max(mp_xy0_first[1], mp_xy0_last[1]) + BB_SMALLER_MARGIN))
-    print('x: ', str(bb_x0_min), str(bb_x0_max), '      y: ', str(bb_y0_min), str(bb_y0_max))
+    ref_star_xy0 = df_images.iloc[0]['Image'].wcs.all_world2pix(ref_star_radec, 0,
+                                                                ra_dec_order=True)[0]
+    bb_x0_min = int(round(min(mp_xy0_first[0], mp_xy0_last[0], ref_star_xy0[0]) - SUBIMAGE_PADDING))
+    bb_x0_max = int(round(max(mp_xy0_first[0], mp_xy0_last[0], ref_star_xy0[0]) + SUBIMAGE_PADDING))
+    bb_y0_min = int(round(min(mp_xy0_first[1], mp_xy0_last[1], ref_star_xy0[1]) - SUBIMAGE_PADDING))
+    bb_y0_max = int(round(max(mp_xy0_first[1], mp_xy0_last[1], ref_star_xy0[1]) + SUBIMAGE_PADDING))
+    print('Subimage crop:    x: ', str(bb_x0_min), str(bb_x0_max),
+          '      y: ', str(bb_y0_min), str(bb_y0_max))
 
     # Perform the trims, save to new 'Subimage' column:
     df_images['Subimage'] = None
-    for i, im in zip(df_images.index, df_images['Image']):
-        # Remember, reverse the two axes when using np arrays directly:
+    for i, im in zip(df_images.index, df_images['Mid_image']):
+        # Must reverse the two axes when using np arrays directly:
         df_images.loc[i, 'Subimage'] = trim_image(im[bb_y0_min:bb_y0_max, bb_x0_min:bb_x0_max])
-    # print((df_images.iloc[0])['Subimage'].wcs.printwcs())
-    print('trim_to_subimages() done.')
+    print((df_images.iloc[0])['Subimage'].wcs.printwcs())
+
+    plot_images('Raw subimages', df_images['Filename'], df_images['Subimage'])
+    print('crop_to_subimages() done.')
     return df_images
 
 
-def add_mp_pixel_positions(df_images):
+def calc_mp_pixel_positions(df_images):
     """ Calculate MP (x,y) pixel position for each subimage, save in dataframe as new columns.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
     :return: dataframe with new 'MP_x' and 'MP_y' columns. [pandas DataFrame]
@@ -320,34 +502,16 @@ def add_mp_pixel_positions(df_images):
     df_images['MP_x'] = [x for (x, y) in mp_pix_list]  # zero-origin
     df_images['MP_y'] = [y for (x, y) in mp_pix_list]  # "
 
-    print('MP pixel positions in aligned small-bb images:')
+    print('MP pixel positions in subimages:')
     for fn, pix in zip(df_images['Filename'], mp_pix_list):
         print('   ', fn, str(pix))
-        # fullpath = os.path.join(TEST_FITS_DIR, 'Lil_' + fn)
-        # df_images.loc[fn, 'Image'].write(fullpath)
-    print('add_mp_pixel_positions() done.')
+    print('calc_mp_pixel_positions() done.')
     return df_images
 
 
-def add_background_data(df_images):
-    """ For each subimage, calculate sigma-clipped mean, median background ADU levels & std. deviation;
-        write to dataframe as new columns. We will use the sigma-clipped median as background ADUs.
-        This all assumes constant background across this small subimage...go to 2-D later if really needed.
-    :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: dataframe with new 'Bkgd_mean', 'Bkgd_median', and 'Bkgd_std' columns. [pandas DataFrame]
-    """
-    bkgd_masks = [make_source_mask(im.data, nsigma=2, npixels=5, filter_fwhm=2, dilate_size=11)
-                  for im in df_images['Subimage']]
-    stats = [sigma_clipped_stats(im.data, sigma=3.0, mask=b_mask)
-             for (im, b_mask) in zip(df_images['Subimage'], bkgd_masks)]
-    df_images['Bkgd_mean'], df_images['Bkgd_median'], df_images['Bkgd_std'] = tuple(zip(*stats))
-    print('add_background_data() done.')
-    return df_images
-
-
-def add_mp_masked_subimages(df_images):
-    """ Make background-subtracted, MP-masked images to be used in our actual photometry.
-        Add separate, new column 'Subimage_masked'; does not alter other image columns.
+def mask_mp_from_subimages(df_images):
+    """ Make MP-masked subimages; not yet background-subtracted. Save in new column 'Subimage_masked'.
+        (We do this before calculating background statistics, to make them just a bit more accurate.)
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
     :return: same dataframe with new 'Subimage_masked' column. [pandas DataFrame]
     """
@@ -365,7 +529,38 @@ def add_mp_masked_subimages(df_images):
                                                   shape=mp_masked_subimage.data.shape, dtype=int)
         mp_masked_subimages.append(mp_masked_subimage)
     df_images['Subimage_masked'] = mp_masked_subimages
-    print('add_mp_masked_subimages() done.')
+    print('mask_mp_from_subimages() done.')
+    return df_images
+
+
+def calc_background_statistics(df_images):
+    """ For each subimage, calculate sigma-clipped mean, median background ADU levels & std. deviation;
+        write to dataframe as new columns. We will use the sigma-clipped median as background ADUs.
+        This all assumes constant background across this small subimage...go to 2-D later if really needed.
+    :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
+    :return: dataframe with new 'Bkgd_mean', 'Bkgd_median', and 'Bkgd_std' columns. [pandas DataFrame]
+    """
+    source_masks = [make_source_mask(im.data, nsigma=2, npixels=5, filter_fwhm=2, dilate_size=11)
+                    for im in df_images['Subimage_masked']]  # very aggressive mask: ok.
+    mp_and_source_masks = [(im.mask and source_mask)
+                           for (im, source_mask) in zip(df_images['Subimage_masked'], source_masks)]
+    stats = [sigma_clipped_stats(im.data, sigma=3.0, mask=b_mask)
+             for (im, b_mask) in zip(df_images['Subimage_masked'], mp_and_source_masks)]
+    df_images['Bkgd_mean'], df_images['Bkgd_median'], df_images['Bkgd_std'] = tuple(zip(*stats))
+    print('calc_background_statistics() done.')
+    return df_images
+
+
+def subtract_background_from_subimages(df_images):
+    """ Make background-subtracted (still MP-masked) sub images ready for use in our actual photometry.
+        Add separate, new column 'Subimage_bkgd_subtr'; does not alter other image columns.
+    :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
+    :return: same dataframe with new 'Subimage_bkgd_subtr' column. [pandas DataFrame]
+    """
+    df_images['Subimage_bkgd_subtr'] = [(im.copy() - bkgd_median)
+                                        for (im, bkgd_median) in zip(df_images['Subimage_masked'],
+                                                                     df_images['Bkgd_median'])]
+    print('subtract_background_from_subimages() done.')
     return df_images
 
 
@@ -375,15 +570,33 @@ def make_averaged_subimage(df_images):
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
     :return: one averaged, MP-masked subimage. [one astropy CCDData object]
     """
-    combiner = Combiner(df_images['Subimage_masked'])
+    combiner = Combiner(df_images['Subimage_bkgd_subtr'])
     averaged_subimage = combiner.average_combine()
     plot_averaged_subimage(df_images, averaged_subimage)
     print('make_averaged_subimage() done.')
     return averaged_subimage
 
 
-def do_mp_aperture_photometry():
+def decompose_subimages(df_images, averaged_image):
     pass
+    return df_images
+
+
+def make_mp_only_subimages(df_images):
+    pass
+    return df_images
+
+
+def do_mp_aperture_photometry(df_images):
+    pass
+    return df_images
+
+
+
+
+
+
+
 
 
 PLOTTING_ETC_FUNCTIONS__________________________ = 0
@@ -394,6 +607,27 @@ def do_gamma(image, gamma=0.0625, dark_clip=0.002):
     # im_min += dark_clip * (im_max - im_min)
     im_scaled = np.clip((image - im_min) / (im_max - im_min), dark_clip, 1.0)
     return np.power(im_scaled, gamma)
+
+
+def plot_images(figtitle, name_list, image_list):
+    plots_per_figure = 4
+    plots_per_row = 2
+    rows_per_figure = plots_per_figure // plots_per_row
+    norm = ImageNormalize(stretch=LogStretch(250.0))
+    axes = None  # keep IDE happy.
+    for i, im in enumerate(image_list):
+        _, i_plot_this_figure = divmod(i, plots_per_figure)
+        i_row, i_col = divmod(i_plot_this_figure, plots_per_row)
+        if i_plot_this_figure == 0:
+            fig, axes = plt.subplots(ncols=plots_per_row, nrows=rows_per_figure,
+                                     figsize=(7, 4 * rows_per_figure))
+            fig.suptitle(figtitle)
+        ax = axes[i_row, i_col]
+        ax.set_title(name_list.iloc[i])
+        im, norm = imshow_norm(im, ax, origin='upper', cmap='Greys',
+                               interval=MinMaxInterval(), stretch=LogStretch(250.0))
+        if i_plot_this_figure == plots_per_figure - 1:
+            plt.show()
 
 
 def plot_first_last_subimages(df_images):
@@ -447,27 +681,13 @@ def print_ref_star_morphology(df_images, ref_star_radec):
 def plot_ref_star_kernels(df_images, ref_star_radec):
     """ For each large_bb subimage, plot original kernel and psf_matching_kernel. """
     # This should use mid_images rather than subimages; less risk of bumping into image boundaries.
-    nominal_size = 80
+    nominal_size = KERNEL_NOMINAL_SIZE
     target_sigma = 5.176  # largest semi-major axis
-
-    kernels = [get_ref_star_kernel(im, ref_star_radec, nominal_size) for im in df_images['Subimage']]
-    shape = kernels[0].shape
-    size = shape[0]
-    window = (SplitCosineBellWindow(alpha=0.5, beta=0.25))(shape)  # window fn of same shape as kernels.
-    # window = (TukeyWindow(alpha=0.4))(shape)  # window function of same shape as kernels.
-    kernels = [k * window for k in kernels]   # taper to zero all fluxes far from center.
-    kernels = [k / np.sum(k) for k in kernels]   # normalize.
-
-    center = int(size / 2)
-    y, x = np.mgrid[0:size, 0:size]
-    gaussian = Gaussian2D(1, center, center, target_sigma, target_sigma)
-    target_kernel = gaussian(x, y)
-    target_kernel /= np.sum(target_kernel)  # ensure normalized.
-
-    # window = TukeyWindow(alpha=0.4)
-    # window = TopHatWindow(0.35)
-    window = CosineBellWindow(alpha=0.35)
-    matching_kernels = [create_matching_kernel(k, target_kernel, window=window) for k in kernels]
+    #
+    kernels = df_images['RefStarKernel']
+    # kernels = [get_ref_star_kernel(im, ref_star_radec, nominal_size) for im in df_images['Mid_image']]
+    make_matching_kernels(df_images, ref_star_radec, target_sigma, nominal_size)
+    matching_kernels = df_images['MKernels']
     for (fn, mk) in zip(df_images['Filename'], matching_kernels):
         print(fn, ' min, max =', '{0:.6f}'.format(np.min(mk)), '{0:.6f}'.format(np.max(mk)))
 
@@ -540,29 +760,65 @@ def background_subtract_array(array):
     return copy - median
 
 
-def get_ref_star_kernel(image, ref_star_radec, size):
-    """ Get a size x size array centered on the ref_star, background-subtracted, suitable as psf kernel.
-    :param image: the image (with wcs) in which to find the ref_star. [CCDData object]
-    :param ref_star_radec: RA,Dec of reference star in degrees. [2-list of floats]
-    :param size: number of pixels on (square) kernel's side; should be odd, will be made so if not. [int]
-    :return: small array centered on ref-star, suitable as psf kernel. [numpy array]
-    """
-    x, y = tuple(image.wcs.all_world2pix(ref_star_radec, 0, ra_dec_order=True)[0])
-    half_size = int(size / 2.0)
-    x_center, y_center = int(round(x)), int(round(y))
-    x_min = x_center - half_size
-    x_max = x_center + half_size + 1
-    y_min = y_center - half_size
-    y_max = y_center + half_size + 1
-    array = image.data[y_min:y_max, x_min:x_max].copy()
-    _, median, _ = sigma_clipped_stats(array, sigma=3.0)
-    array -= median
-    return array
-
-
 DETRITUS________________________________________ = 0
 
-# This stuff just no longer needed.
+# The following stuff is just no longer needed.
+
+
+#
+# def make_matching_kernels(df_images, ref_star_radec, target_sigma, nominal_size=80):
+#     """ Make matching kernels to render subimages' ref_star Gaussian with target_sigma.
+#         Use mid-images rather than subimages, to minimize risk of bumping into image boundaries.
+#     :param df_images:
+#     :param ref_star_radec:
+#     :param target_sigma: in pixels. [float]
+#     :param nominal_size: size of kernel, each edge. Could be incremented by 1 to make it odd. [int]
+#     :return: df_images with new column 'MKernel' with needed matching kernels. [numpy ndarray]
+#     """
+#     kernels = [get_ref_star_kernel(im, ref_star_radec, nominal_size) for im in df_images['Mid_image']]
+#     shape = kernels[0].shape
+#     size = shape[0]
+#     window = (SplitCosineBellWindow(alpha=0.5, beta=0.25))(shape)  # window fn of same shape as kernels.
+#     kernels = [k * window for k in kernels]   # taper to zero all fluxes far from center.
+#     kernels = [k / np.sum(k) for k in kernels]   # normalize.
+#
+#     center = int(size / 2)
+#     y, x = np.mgrid[0:size, 0:size]
+#     gaussian = Gaussian2D(1, center, center, target_sigma, target_sigma)
+#     target_kernel = gaussian(x, y)
+#     target_kernel /= np.sum(target_kernel)  # ensure normalized.
+#     window = CosineBellWindow(alpha=0.35)
+#     matching_kernels = [create_matching_kernel(k, target_kernel, window=window) for k in kernels]
+#     df_images['MKernel'] = matching_kernels
+#     return df_images
+#
+# (We're no longer planning to align full images.)
+# def align_images(df_images, ref_star_radec):
+#     """ Align (reposition images, update WCS) the full-sized images. OVERWRITE column 'Image'.
+#     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
+#     :param ref_star_radec:
+#     :return: dataframe with 'Image' column OVERWRITTEN by newly aligned images. [pandas DataFrame]
+#     """
+#     # Align all images to first image:
+#     first_image_wcs = (df_images.iloc[0])['Image'].wcs
+#     for i, im in zip(df_images.index, df_images['Image']):
+#         print('    Aligning', i)
+#         df_images.loc[i, 'Image'] = wcs_project(im, first_image_wcs)
+#         # There's no benefit to saving these files, as they're not standard header.
+#         # df_images.loc[i, 'Image'].data = df_images.loc[i, 'Image'].data.astype(np.int32)
+#         # df_images.loc[i, 'Image'].write(os.path.join(TEST_FITS_DIR,
+#         #                                            'Aligned_' + df_images.loc[i, 'Filename']))
+#
+#     # Print a summary (testing):
+#     print("Post-alignment pix position of ref star (positions should be uniform):")
+#     print("Ref Star RA,Dec:", str(ref_star_radec))
+#     for i in df_images.index:
+#         pix = df_images.loc[i, 'Image'].wcs.all_world2pix(ref_star_radec, 1,
+#                                                           ra_dec_order=True)[0]
+#         print('   ', df_images.loc[i, 'Filename'], str(pix))  # should be uniform, all images.
+#     print('align_mid_images() done.')
+#     return df_images
+
 
 # df_averaged_image_sources = find_sources_in_averaged_subimage(averaged_image, df_images)
 # df_sources = find_sources_in_all_subimages(df_images)
@@ -572,6 +828,25 @@ DETRITUS________________________________________ = 0
 # anchor_filename, df_anchor = select_anchor_subimage(df_qualified_sources, df_images)
 # normalized_relative_fluxes = calc_normalized_relative_fluxes(df_qualified_sources, df_anchor, df_images)
 # df_images = make_best_background_subimages(normalized_relative_fluxes, averaged_image, df_images)
+
+# def get_ref_star_kernel(image, ref_star_radec, size):
+#     """ Get a size x size array centered on the ref_star, background-subtracted, suitable as psf kernel.
+#     :param image: the image (with wcs) in which to find the ref_star. [CCDData object]
+#     :param ref_star_radec: RA,Dec of reference star in degrees. [2-list of floats]
+#     :param size: number of pixels on (square) kernel's side; should be odd, will be made so if not. [int]
+#     :return: small array centered on ref-star, suitable as psf kernel. [numpy array]
+#     """
+#     x, y = tuple(image.wcs.all_world2pix(ref_star_radec, 0, ra_dec_order=True)[0])
+#     half_size = int(size / 2.0)
+#     x_center, y_center = int(round(x)), int(round(y))
+#     x_min = x_center - half_size
+#     x_max = x_center + half_size + 1
+#     y_min = y_center - half_size
+#     y_max = y_center + half_size + 1
+#     array = image.data[y_min:y_max, x_min:x_max].copy()
+#     _, median, _ = sigma_clipped_stats(array, sigma=3.0)
+#     array -= median
+#     return array
 
 
 # def find_sources_in_averaged_subimage(averaged_subimage, df_images):
@@ -618,7 +893,8 @@ DETRITUS________________________________________ = 0
 # def keep_only_matching_sources(df_subimage_sources, df_averaged_subimage_sources):
 #     """ Try to match sources found in all subimages to those found in averaged subimage,
 #         keep only those sources that match, discard the rest.
-#     :param df_subimage_sources: dataframe of source info from all subimages, one row per source. [pandas DataFrame]
+#     :param df_subimage_sources: dataframe of source info from all subimages,
+#     one row per source. [pandas DataFrame]
 #     :param df_averaged_subimage_sources: source info, averaged subimage,
 #                one row per source. [pandas DataFrame]
 #     :return: df_subimage_sources, now with only matching sources retained. [pandas DataFrame]
@@ -640,7 +916,8 @@ DETRITUS________________________________________ = 0
 #
 # def do_subimage_source_aperture_photometry(df_subimage_sources, df_images):
 #     """ Do aperture photometry on each kept source in each subimage, write results to dataframe.
-#     :param df_subimage_sources: dataframe of source info from all subimages, one row per source. [pandas DataFrame]
+#     :param df_subimage_sources: dataframe of source info from all subimages,
+#     one row per source. [pandas DataFrame]
 #     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
 #     :return: df_subimage_sources with added columns of aperture photometry results. [pandas DataFrame]
 #     """
@@ -677,7 +954,8 @@ DETRITUS________________________________________ = 0
 # def qualify_subimage_sources(df_subimage_sources):
 #     """ Keep only subimage sources having median flux at least 10% of highest median flux.
 #     :param df_subimage_sources: source info from all subimages, one row per source. [pandas DataFrame]
-#     :return: df_qualified_subimage_sources, keeping only rows for sources with substantial flux. [pandas DataFrame]
+#     :return: df_qualified_subimage_sources,
+#     keeping only rows for sources with substantial flux. [pandas DataFrame]
 #     """
 #     source_ids = df_subimage_sources['SourceID'].drop_duplicates()
 #     median_fluxes = []  # will be in same order as source_ids
@@ -697,7 +975,8 @@ DETRITUS________________________________________ = 0
 # def select_anchor_subimage(df_qualified_subimage_sources, df_images):
 #     """ Find an image (or the first one if several) with a flux entry for every qualified source,
 #         label this the "anchor image" for use in finding relative source strengths between images.
-#     :param df_qualified_subimage_sources: data for qualified sources, one row per source x image. [pandas DataFrame]
+#     :param df_qualified_subimage_sources: data for qualified sources,
+#     one row per source x image. [pandas DataFrame]
 #     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
 #     :return: anchor_subimage_filename, df_anchor_subimage. [2-tuple of string, pandas DataFrame]
 #     """
@@ -720,13 +999,15 @@ DETRITUS________________________________________ = 0
 # def calc_normalized_relative_fluxes(df_qualified_subimage_sources, df_anchor_subimage, df_images):
 #     """ Calculate normalized relative flux for each subimage, which will be used to scale averaged
 #         image to subtract source images from subimages.
-#     :param df_qualified_subimage_sources: qualified sources, one row per source x image. [pandas DataFrame]
+#     :param df_qualified_subimage_sources: qualified sources,
+#     one row per source x image. [pandas DataFrame]
 #     :param df_anchor_subimage: data for anchor subimage & sources. [pandas DataFrame]
 #     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
 #     :return: dictionary of normalized relative fluxes for each subimage. [python dict]
 #     """
 #     qualified_source_ids = df_qualified_subimage_sources['SourceID'].drop_duplicates()
-#     anchor_flux_dict = {id: df_anchor_subimage.loc[id, 'FluxADU'] for id in qualified_source_ids}  # lookup.
+#     anchor_flux_dict = {id: df_anchor_subimage.loc[id, 'FluxADU']
+#     for id in qualified_source_ids}  # lookup.
 #
 #     # Calculate normlized relative fluxes, for use in scaling background for each subimage:
 #     relative_fluxes_dict = {fn: [] for fn in df_images.index}  # to be populated below.
@@ -778,4 +1059,3 @@ DETRITUS________________________________________ = 0
 #                   origin='upper', interpolation='none', cmap='Greys')
 #     fig.tight_layout()
 #     plt.show()
-
