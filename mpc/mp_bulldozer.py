@@ -71,7 +71,7 @@ KERNEL_NOMINAL_SIZE = 80  # edge length in pixels
 MID_IMAGE_PADDING = 25  # extra padding around bounding box, in pixels.
 SUBIMAGE_PADDING = 80   # "
 # TODO: need to make equal the MP and comp-star radii for aperture photometry.
-R_MP_MASK = 15      # radius in pixels
+MP_MASK_RADIUS_PER_SIGMA = 3.5
 R_APERTURE = 9      # "
 R_ANNULUS_IN = 15   # "
 R_ANNULUS_OUT = 20  # "
@@ -131,8 +131,6 @@ def bulldozer(directory_path, filter,
 
     df_images = recrop_mid_images(df_images)
 
-    return df_images
-
     df_images = make_ref_star_psfs(df_images, ref_star_radec)
 
     target_sigma = calc_target_kernel_sigma(df_images, ref_star_radec)
@@ -144,11 +142,11 @@ def bulldozer(directory_path, filter,
     # ###################################################################################
     # Make subimages (already aligned and convolved) & a few derivatives:  ##############
 
-    df_images = crop_to_subimages(df_images)
+    df_images = crop_to_subimages(df_images, ref_star_radec)
 
     df_images = calc_mp_pixel_positions(df_images)
 
-    df_images = mask_mp_from_subimages(df_images)
+    df_images = mask_mp_from_subimages(df_images, target_sigma)
 
     df_images = calc_background_statistics(df_images)
 
@@ -156,7 +154,9 @@ def bulldozer(directory_path, filter,
 
     averaged_image = make_averaged_subimage(df_images)
 
-    # ###################################################################################
+    return df_images
+
+     # ###################################################################################
     # Get best MP fluxes from all subimages: ############################################
 
     # OLS each MP-masked image to a + b*sources (does a ~= above bkgd?)
@@ -330,27 +330,57 @@ def align_mid_images(df_images):
         mp_pix_ref = df_images.loc[i, 'Mid_image'].wcs.all_world2pix([[mp_ra_ref, mp_dec_ref]], 0,
                                                                      ra_dec_order=True)[0]
         print('   ', df_images.loc[i, 'Filename'], str(mp_pix_ref))  # should be uniform across all images.
-    plot_images('Aligned mid-images', df_images['Filename'], df_images['Mid_image'])
+    # plot_images('Aligned mid-images', df_images['Filename'], df_images['Mid_image'])
     print('align_mid_images() done.')
     return df_images
 
 
 def recrop_mid_images(df_images):
-    """ Find largest bounding box with no masked or NaN values, crop all (aligned) mid-values to that bb.
+    """ Find largest rectangle of pixels  with no masked or NaN values,
+        crop all (aligned) mid-values to that.
     :param df_images:
-    :return:
+    :return: df_images with mid-images trimmed to contain no NaN values.
     """
-    pixel_sum = np.sum([im.data] for im in df_images['Mid_image'])  # NaN if any images has NaN at that pix.
-    nan_or_zero = pixel_sum * np.zeros_like(pixel_sum)  # array of only NaN or zeroes.
-    x0_index, y0_index = np.meshgrid(range(nan_or_zero.shape[0]), range(nan_or_zero.shape[1]))
-    x0_grid = nan_or_zero * x0_index
-    y0_grid = nan_or_zero * y0_index
-    x0_min, x0_max = np.min(x0_grid), np.max(x0_grid)
-    y0_min, y0_max = np.min(y0_grid), np.max(y0_grid)
-    recropped_mid_images = [trim_image(im[y0_min:y0_max, x0_min:x0_min]) for im in df_images['Mid_image']]
+    # Establish and write initial situation:
+    pixel_sum = np.sum(im.data for im in df_images['Mid_image'])  # NaN if any images has NaN at that pix.
+    print('    Pre-recrop:', str(np.sum(np.isnan(pixel_sum))),
+          'nan pixels of', str(pixel_sum.shape[1]), 'x', str(pixel_sum.shape[0]))
+
+    # Set initial (prob. too large) x- and y-limits from prev. calculated offsets:
+    ref_mid_image = df_images.iloc[0]['Mid_image']
+    x0_min = max(0, int(floor(0 - min(df_images['X_offset']))) - 5)
+    x0_max = min(ref_mid_image.shape[1], int(ceil(ref_mid_image.shape[1] - max(df_images['X_offset']))) + 5)
+    y0_min = max(0, int(floor(0 + min(df_images['Y_offset']))) - 5)
+    y0_max = min(ref_mid_image.shape[0], int(ceil(ref_mid_image.shape[0] - max(df_images['Y_offset']))) + 5)
+    print('    Rough recrop:', str(np.sum(np.isnan(pixel_sum[y0_min:y0_max, x0_min:x0_max]))),
+          'nan pixels of', str(x0_max-x0_min), 'x', str(y0_max-y0_min))
+
+    # Repeat a spiral trim, until proposed trimmed image has no more NaNs:
+    while min(x0_max - x0_min, y0_max - y0_min) > 2 * KERNEL_NOMINAL_SIZE:
+        before_limits = (x0_min, x0_max, y0_min, y0_max)
+        if np.any(np.isnan(pixel_sum[y0_min:y0_min+1, x0_min:x0_max])):  # if top row has any NaN.
+            y0_min += 1
+        if np.any(np.isnan(pixel_sum[y0_max-1:y0_max, x0_min:x0_max])):  # if bottom row has any NaN.
+            y0_max -= 1
+        if np.any(np.isnan(pixel_sum[y0_min:y0_max, x0_min:x0_min+1])):  # if leftmost column has any NaN.
+            x0_min += 1
+        if np.any(np.isnan(pixel_sum[y0_min:y0_max, x0_max-1:x0_max])):  # if rightmost column has any NaN.
+            x0_max -= 1
+        after_limits = (x0_min, x0_max, y0_min, y0_max)
+        # print('    Loop recrop:', str(np.sum(np.isnan(pixel_sum[y0_min:y0_max, x0_min:x0_max]))),
+        #       'nan pixels of', str(x0_max-x0_min), 'x', str(y0_max-y0_min))
+        if after_limits == before_limits:  # if no trims made in this iteration.
+            break
+    if np.any(np.isnan(pixel_sum[y0_min:y0_max, x0_min:x0_max])):
+        print(' >>>>> ERROR: recrop_mid_images() did not succeed in removing all NaNs.')
+    else:
+        print('    Final recrop:', str(np.sum(np.isnan(pixel_sum[y0_min:y0_max, x0_min:x0_max]))),
+              'nan pixels of', str(x0_max-x0_min), 'x', str(y0_max-y0_min))
+
+    # Do mid-image trims, based on the best limits found:
+    recropped_mid_images = [trim_image(im[y0_min:y0_max, x0_min:x0_max]) for im in df_images['Mid_image']]
     df_images['Mid_image'] = recropped_mid_images
-    print('Mid_image recrop:    x: ', str(x0_min), str(x0_min), '      y: ', str(y0_min), str(y0_max))
-    plot_images('Recropped mid-images', df_images['Filename'], df_images['Mid_image'])
+    # plot_images('Recropped mid-images', df_images['Filename'], df_images['Mid_image'])
     print('recrop_mid_images() done.')
     return df_images
 
@@ -402,7 +432,7 @@ def calc_target_kernel_sigma(df_images, ref_star_radec):
               '{:.2f}'.format(dps.ycentroid.value),
               '{:.3f}'.format(dps.semimajor_axis_sigma.value))
     max_sigma = max(sigma_list)
-    target_sigma = 1.15 * max_sigma
+    target_sigma = 1.05 * max_sigma
     print('Target sigma:', '{:.3f}'.format(target_sigma))
     return target_sigma
 
@@ -442,12 +472,20 @@ def convolve_mid_images(df_images):
     """
     # Note that astropy convolve() operates on NDData arrays, not on CCDData objects.
     # So we operate on im.data, not on im itself.
-    # boundary is set to 'extend' because the background is not necessarily near zero.
-    df_images['Mid_image_convolved'] = df_images['Mid_image'].copy()
-    for im in df_images['Mid_image_convolved']:
-        im.data = [convolve(im.data, kernel, boundary='extend')
-                   for (im, kernel) in zip(df_images['Mid_image'], df_images['MatchingKernel'])]
-    plot_images('Convolved mid-images', df_images['Filename'], df_images['Mid_image_convolved'])
+    # Use a loop because I'm not entirely sure a list comprehension will get the job done:
+    convolved_images = []
+    for (im, kernel) in zip(df_images['Mid_image'], df_images['MatchingKernel']):
+        print('Starting convolve.')
+        mid_image_copy = im.copy()
+        convolved_array = convolve(mid_image_copy.data, kernel, boundary='extend')
+        mid_image_copy.data = convolved_array
+        convolved_images.append(mid_image_copy)
+    df_images['Mid_image_convolved'] = convolved_images
+    # plot_images('Convolved mid-images', df_images['Filename'], df_images['Mid_image_convolved'])
+    # diffs = [CCDData.subtract(conv, mid)
+    #          for (conv, mid) in zip(df_images.iloc[0:4]['Mid_image_convolved'],
+    #                                 df_images.iloc[8:12]['Mid_image_convolved'])]
+    # plot_images('Diffs', df_images['Filename'], diffs)
     return df_images
 
 
@@ -461,16 +499,16 @@ def crop_to_subimages(df_images, ref_star_radec):
     """
     # Find bounding box based on first and last mid-images, regardless of direction of MP motion:
     # Mid-images are aligned, so first and last mid-image will suffice.
-    mid_image_first = (df_images.iloc[0])['Mid_image']
-    mid_image_last = (df_images.iloc[-1])['Mid_image']
+    mid_image_first = (df_images.iloc[0])['Mid_image_convolved']
+    mid_image_last = (df_images.iloc[-1])['Mid_image_convolved']
     mp_ra_first, mp_dec_first = (df_images.iloc[0])['MP_RA'], (df_images.iloc[0])['MP_Dec']
     mp_ra_last, mp_dec_last = (df_images.iloc[-1])['MP_RA'], (df_images.iloc[-1])['MP_Dec']
     mp_xy0_first = mid_image_first.wcs.all_world2pix([[mp_ra_first, mp_dec_first]], 0,
                                                      ra_dec_order=True)[0]
     mp_xy0_last = mid_image_last.wcs.all_world2pix([[mp_ra_last, mp_dec_last]], 0,
                                                    ra_dec_order=True)[0]
-    ref_star_xy0 = df_images.iloc[0]['Image'].wcs.all_world2pix(ref_star_radec, 0,
-                                                                ra_dec_order=True)[0]
+    ref_star_xy0 = df_images.iloc[0]['Mid_image_convolved'].wcs.all_world2pix(ref_star_radec, 0,
+                                                                              ra_dec_order=True)[0]
     bb_x0_min = int(round(min(mp_xy0_first[0], mp_xy0_last[0], ref_star_xy0[0]) - SUBIMAGE_PADDING))
     bb_x0_max = int(round(max(mp_xy0_first[0], mp_xy0_last[0], ref_star_xy0[0]) + SUBIMAGE_PADDING))
     bb_y0_min = int(round(min(mp_xy0_first[1], mp_xy0_last[1], ref_star_xy0[1]) - SUBIMAGE_PADDING))
@@ -480,12 +518,12 @@ def crop_to_subimages(df_images, ref_star_radec):
 
     # Perform the trims, save to new 'Subimage' column:
     df_images['Subimage'] = None
-    for i, im in zip(df_images.index, df_images['Mid_image']):
+    for i, im in zip(df_images.index, df_images['Mid_image_convolved']):
         # Must reverse the two axes when using np arrays directly:
         df_images.loc[i, 'Subimage'] = trim_image(im[bb_y0_min:bb_y0_max, bb_x0_min:bb_x0_max])
     print((df_images.iloc[0])['Subimage'].wcs.printwcs())
 
-    plot_images('Raw subimages', df_images['Filename'], df_images['Subimage'])
+    # plot_images('Raw subimages', df_images['Filename'], df_images['Subimage'])
     print('crop_to_subimages() done.')
     return df_images
 
@@ -509,26 +547,30 @@ def calc_mp_pixel_positions(df_images):
     return df_images
 
 
-def mask_mp_from_subimages(df_images):
+def mask_mp_from_subimages(df_images, target_sigma):
     """ Make MP-masked subimages; not yet background-subtracted. Save in new column 'Subimage_masked'.
         (We do this before calculating background statistics, to make them just a bit more accurate.)
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
+    :param target_sigma: Gaussian sigma to which all images have previously been convolved. [float]
     :return: same dataframe with new 'Subimage_masked' column. [pandas DataFrame]
     """
+    mp_mask_radius = MP_MASK_RADIUS_PER_SIGMA * target_sigma
     mp_masked_subimages = []
     for i, im in enumerate(df_images['Subimage']):
         mp_masked_subimage = im.copy()
-        mp_masked_subimage.data = mp_masked_subimage.data - df_images.iloc[i]['Bkgd_median']
+        # mp_masked_subimage.data = mp_masked_subimage.data - (df_images.iloc[i]['Bkgd_median']).data
         radec_mp = [df_images.iloc[i]['MP_RA'], df_images.iloc[i]['MP_Dec']]
 
         # Origin is zero here, to address numpy array cells rather than FITS pixels.
         x_mp, y_mp = tuple(mp_masked_subimage.wcs.all_world2pix([radec_mp], 0, ra_dec_order=True)[0])
         # Arrays are addressed y-first:
         mp_masked_subimage.mask = np.fromfunction(lambda i, j: (j - x_mp)**2 +
-                                                               (i - y_mp)**2 <= R_MP_MASK**2,
+                                                               (i - y_mp)**2 <= mp_mask_radius**2,
                                                   shape=mp_masked_subimage.data.shape, dtype=int)
         mp_masked_subimages.append(mp_masked_subimage)
     df_images['Subimage_masked'] = mp_masked_subimages
+    # plot_images('Subimage masks', df_images['Filename'], [im.mask for im in df_images['Subimage_masked']])
+    # plot_mp_masks(df_images)
     print('mask_mp_from_subimages() done.')
     return df_images
 
@@ -541,12 +583,20 @@ def calc_background_statistics(df_images):
     :return: dataframe with new 'Bkgd_mean', 'Bkgd_median', and 'Bkgd_std' columns. [pandas DataFrame]
     """
     source_masks = [make_source_mask(im.data, nsigma=2, npixels=5, filter_fwhm=2, dilate_size=11)
-                    for im in df_images['Subimage_masked']]  # very aggressive mask: ok.
-    mp_and_source_masks = [(im.mask and source_mask)
-                           for (im, source_mask) in zip(df_images['Subimage_masked'], source_masks)]
+                    for im in df_images['Subimage_masked']]  # nsigma=2 is very aggressive mask: ok.
+    # Logical-or masks each pixel masked by *either* mask:
+    mp_source_masks = [np.logical_or(im.mask, source_mask)
+                       for (im, source_mask) in zip(df_images['Subimage_masked'], source_masks)]
     stats = [sigma_clipped_stats(im.data, sigma=3.0, mask=b_mask)
-             for (im, b_mask) in zip(df_images['Subimage_masked'], mp_and_source_masks)]
+             for (im, b_mask) in zip(df_images['Subimage_masked'], mp_source_masks)]
     df_images['Bkgd_mean'], df_images['Bkgd_median'], df_images['Bkgd_std'] = tuple(zip(*stats))
+    # fig, (ax1, ax2) = plt.subplots(2, 1)
+    # ax1.set_title('MP+Source mask: ' + df_images.iloc[0]['Filename'])
+    # ax1.imshow(mp_source_masks[0], origin='upper')
+    # ax2.set_title('MP+Source mask: ' + df_images.iloc[-1]['Filename'])
+    # ax2.imshow(mp_source_masks[-1], origin='upper')
+    # plt.tight_layout()
+    # plt.show()
     print('calc_background_statistics() done.')
     return df_images
 
@@ -557,9 +607,17 @@ def subtract_background_from_subimages(df_images):
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
     :return: same dataframe with new 'Subimage_bkgd_subtr' column. [pandas DataFrame]
     """
-    df_images['Subimage_bkgd_subtr'] = [(im.copy() - bkgd_median)
-                                        for (im, bkgd_median) in zip(df_images['Subimage_masked'],
-                                                                     df_images['Bkgd_median'])]
+    # Use a loop because I'm not entirely sure a list comprehension will get the job done:
+    subimages_bkgd_subtr = []
+    for (im, bkgd_median) in zip(df_images['Subimage_masked'], df_images['Bkgd_median']):
+        im_copy = im.copy()
+        array = im_copy.data
+        bkgd_array = np.full_like(array, bkgd_median)
+        im_copy.data = array - bkgd_array
+        subimages_bkgd_subtr.append(im_copy)
+    df_images['Subimage_bkgd_subtr'] = subimages_bkgd_subtr
+
+    plot_images('Subimages, bkgd-subtr', df_images['Filename'], df_images['Subimage_bkgd_subtr'])
     print('subtract_background_from_subimages() done.')
     return df_images
 
@@ -739,9 +797,11 @@ def plot_mp_masks(df_images):
 def plot_averaged_subimage(df_images, averaged_subimage):
     fig, (ax1, ax2) = plt.subplots(2, 1)
     ax1.set_title('Subimage ' + df_images.iloc[-1]['Filename'])
-    ax1.imshow(do_gamma(df_images.iloc[-1]['Subimage']), origin='upper', interpolation='none', cmap='Greys')
-    ax2.set_title('Averaged subimage')
-    ax2.imshow(do_gamma(averaged_subimage), origin='upper', interpolation='none', cmap='Greys')
+    im, norm = imshow_norm(df_images.iloc[-1]['Subimage'], ax1, origin='upper', cmap='Greys',
+                           interval=MinMaxInterval(), stretch=LogStretch(250.0))
+    ax2.set_title('AVERAGED subimage')
+    im, norm = imshow_norm(averaged_subimage, ax2, origin='upper', cmap='Greys',
+                           interval=MinMaxInterval(), stretch=LogStretch(250.0))
     plt.tight_layout()
     plt.show()
 
