@@ -77,6 +77,7 @@ MP_MASK_RADIUS_PER_SIGMA = 3.5
 R_APERTURE = 9      # "
 R_ANNULUS_IN = 15   # "
 R_ANNULUS_OUT = 20  # "
+MAX_LOOP_ITERATIONS = 3
 
 # SOURCE_MATCH_TOLERANCE = 2  # distance in pixels
 
@@ -148,28 +149,41 @@ def bulldozer(directory_path, filter,
 
     df_images = crop_to_subimages(df_images, ref_star_radec)
 
-    df_images = hard_align_on_ref_star_centroids(df_images, ref_star_radec)
+    df_images = calc_first_ref_star_xy0(df_images, ref_star_radec)
 
-    df_images = calc_mp_pixel_positions(df_images)
+    df_images = calc_first_mp_xy0(df_images)
 
-    df_images = mask_mp_from_subimages(df_images, target_sigma)
-
-    df_images = calc_background_statistics(df_images)
-
-    df_images = subtract_background_from_subimages(df_images)
-
-    averaged_image = make_averaged_subimage(df_images)
-
-     # ###################################################################################
-    # Get best MP fluxes from all subimages: ############################################
-
-    # OLS each MP-masked image to a + b*sources (does a ~= above bkgd?)
-    df_images = decompose_subimages(df_images, averaged_image)
-
-    # make best unmasked images from OLS (i.e., ~ MP-only on ~zero bkgd)
-    df_images = make_mp_only_subimages(df_images, averaged_image)
+    df_images = extract_first_subarrays(df_images)
 
     return df_images
+
+    df_images = estimate_misalignments(df_images)
+
+    df_images = convolve_on_ref_star(df_images)
+
+    df_images = calc_current_mp_xy0(df_images)
+
+    df_images = mask_mp_from_current_subarrays(df_images, target_sigma)
+
+    df_images = calc_subarray_backgrounds(df_images)
+
+    df_images = subtract_background_from_subarrays(df_images)
+
+    averaged_subarray = make_averaged_subarray(df_images)
+
+     # ###################################################################################
+    # Get best MP-only subimages : #######################################################
+
+    # OLS each MP-masked image to a + b*sources (does a ~= above bkgd?)
+    df_images = decompose_subarrays(df_images, averaged_subarray)
+
+    # make best unmasked images from OLS (i.e., ~ MP-only on ~zero bkgd)
+    df_images = make_mp_only_subarrays(df_images, averaged_subarray)
+
+    return df_images
+
+     # ###################################################################################
+    # Get best MP-only fluxes from aperture photometry: ##################################
 
     # aperture photometry to get best MP fluxes (do we even need sky annulae?)
     df_images = do_mp_aperture_photometry(df_images)
@@ -328,12 +342,12 @@ def align_mid_images(df_images):
     for i, im in zip(df_images.index, df_images['Mid_image']):
         df_images.loc[i, 'Mid_image'] = wcs_project(im, first_image_wcs)
 
-    # print("Post-alignment pix position of first image's MP RaDec (should be uniform):")
-    mp_ra_ref, mp_dec_ref = (df_images.iloc[0])['MP_RA'], (df_images.iloc[0])['MP_Dec']
-    for i in df_images.index:
-        mp_pix_ref = df_images.loc[i, 'Mid_image'].wcs.all_world2pix([[mp_ra_ref, mp_dec_ref]], 0,
-                                                                     ra_dec_order=True)[0]
-        # print('   ', df_images.loc[i, 'Filename'], str(mp_pix_ref))  # should be uniform across all images.
+    # # print("Post-alignment pix position of first image's MP RaDec (should be uniform):")
+    # mp_ra_ref, mp_dec_ref = (df_images.iloc[0])['MP_RA'], (df_images.iloc[0])['MP_Dec']
+    # for i in df_images.index:
+    #     mp_pix_ref = df_images.loc[i, 'Mid_image'].wcs.all_world2pix([[mp_ra_ref, mp_dec_ref]], 0,
+    #                                                                  ra_dec_order=True)[0]
+        # print('   ', df_images.loc[i, 'Filename'], str(mp_pix_ref))  # s/be uniform across all images.
     # plot_images('Aligned mid-images', df_images['Filename'], df_images['Mid_image'])
     print('align_mid_images() done.')
     return df_images
@@ -549,120 +563,170 @@ def crop_to_subimages(df_images, ref_star_radec):
     (df_images.iloc[0])['Subimage'].wcs.printwcs()
     print('\n\nLast subimage WCS:\n')
     (df_images.iloc[-1])['Subimage'].wcs.printwcs()
-    plot_images('Raw subimages', df_images['Filename'], df_images['Subimage'])
+    # plot_images('Raw subimages', df_images['Filename'], df_images['Subimage'])
     print('crop_to_subimages() done.')
     return df_images
 
 
-def hard_align_on_ref_star_centroids(df_images, ref_star_radec):
-    """ Get rough ref star (x,y), refine via local centroid, convolve to make tiny shifts.
+def calc_first_ref_star_xy0(df_images, ref_star_radec):
+    """ Calculate first reference star position in pixels, using ref star RA,Dec, for each image.
+        This will be the reference position to which misalignment corrections are added in the loop.
     :param df_images:
     :param ref_star_radec:
     :return:
     """
-    # Calculate and print (very small) pre-existing ref star offset for each image:
-    print('Start of hard_align_on_ref_star_centroids():')
-    x0_image0, y0_image0 = (df_images.iloc[0])['Subimage'].wcs.all_world2pix(ref_star_radec,
-                                                                             0, ra_dec_order=True)[0]
-    x0_image0, y0_image0 = int(x0_image0), int(y0_image0)
-    ref_star_offsets = []
-    centroid_cell_half_size = 20
-    for i, im in enumerate(df_images['Subimage']):
-        x0, y0 = im.wcs.all_world2pix(ref_star_radec, 0, ra_dec_order=True)[0]
-        tiny_array = im[y0_image0-centroid_cell_half_size: y0_image0+centroid_cell_half_size,
-                        x0_image0-centroid_cell_half_size: x0_image0+centroid_cell_half_size].data
-        x_refstar, y_refstar = centroid_com(tiny_array)
-        ref_star_offsets.append((x_refstar - centroid_cell_half_size,
-                                 y_refstar - centroid_cell_half_size))
-        print('   ', df_images.iloc[i]['Filename'],
-              '   ref star at world2pix:', '{:.3f}'.format(x0), '{:.3f}'.format(y0),
-              '   at centroid:', '{:.3f}'.format(x_refstar + (x0_image0-centroid_cell_half_size)),
-              '{:.3f}'.format(y_refstar + (y0_image0-centroid_cell_half_size)))
+    xy0_list = [tuple(im.wcs.all_world2pix(ref_star_radec, 0, ra_dec_order=True)[0])
+                for im in df_images['Subimage']]
+    df_images['FirstRefStar_XY0'] = xy0_list
+    print('calc_first_ref_star_xy0() done.')
+    return df_images
 
-    # Convolve each image to make an array in which its ref star offset has been reversed:
-    half_size = 10
-    edge_pixels = 2 * half_size + 1
-    y, x = np.mgrid[0:edge_pixels, 0:edge_pixels]
-    print('After hard_align_on_ref_star_centroids():')
+
+def calc_first_mp_xy0(df_images):
+    """ Calculate first MP positions in pixels, using each image's MP RA,Dec, for each image.
+        This will be the reference position to which misalighment corrections are added to mask MPs.
+    :param df_images:
+    :return:
+    """
+    xy0_list = []
     for i, im in enumerate(df_images['Subimage']):
-        x_offset, y_offset = ref_star_offsets[i]
-        gaussian = Gaussian2D(1, half_size - x_offset, half_size - y_offset, 0.7, 0.7)
+        x0, y0 = tuple(im.wcs.all_world2pix([[df_images.iloc[i]['MP_RA'],
+                                              df_images.iloc[i]['MP_Dec']]], 0, ra_dec_order=True)[0])
+        xy0_list.append((x0, y0))
+    df_images['FirstMP_XY0'] = xy0_list
+    print('calc_first_mp_xy0() done.')
+    return df_images
+
+
+def extract_first_subarrays(df_images):
+    """ Extract masked data array from each CCDData object; from now on we use only masked ndarrays,
+        as we have no more use for WCS information. We will have to be clever about getting pixel positions.
+    :param df_images:
+    :return:
+    """
+    df_images['Subarray_first'] = [im.data.copy() for im in df_images['Subimage']]     # immutable.
+    df_images['Subarray_current'] = [sf.copy() for sf in df_images['Subarray_first']]  # to start the loop.
+    df_images['Shift_current'] = len(df_images) * [(0, 0)]  # overwritten, each loop.
+    df_images['MisalignmentHistory'] = None                 # overwritten, each loop.
+    print('extract_first_subarrays() done.')
+    return df_images
+
+
+def estimate_misalignments(df_images):
+    """ Calculate best estimate (for each image) of vector (dx,dy in pixels, to be used in convolution
+        of first_subarray) to put image's ref-star centroid directly on first_subarray's average ref star
+        pixel position.
+    :param df_images:
+    :return:
+    """
+    first_x0_list = [xy0[0] for xy0 in df_images['FirstRefStar_XY0']]
+    first_y0_list = [xy0[1] for xy0 in df_images['FirstRefStar_XY0']]
+
+    # Calculate ref star centroid position for each current subarray:
+    ref_star_xy0_list = []
+    centroid_cell_half_size = 20
+    for i, ar in enumerate(df_images['Subarray_current']):
+        first_x0 = first_x0_list[i]
+        first_y0 = first_y0_list[i]
+        shift_x = df_images.iloc[i]['Shift_current'][0]
+        shift_y = df_images.iloc[i]['Shift_current'][1]
+        current_ref_star_x0 = first_x0 + shift_x
+        current_ref_star_y0 = first_y0 + shift_y
+        centroid_cell = ar[int(current_ref_star_y0) - centroid_cell_half_size:
+                           int(current_ref_star_y0) + centroid_cell_half_size,
+                           int(current_ref_star_x0) - centroid_cell_half_size:
+                           int(current_ref_star_x0) + centroid_cell_half_size]  # v.small ndarray.
+        cell_x0, cell_y0 = centroid_com(centroid_cell)
+        ref_star_x0 = cell_x0 + (int(current_ref_star_x0) - centroid_cell_half_size)
+        ref_star_y0 = cell_x0 + (int(current_ref_star_y0) - centroid_cell_half_size)
+        ref_star_xy0_list.append((ref_star_x0, ref_star_y0))  # tuple.
+
+    # Calculate misalignment (x,y: true - target) for each image:
+    target_x0, target_y0 = calc_average_starting_ref_star_position(df_images)
+    x_misalignments = [rspp[0] - tx0 for rspp, tx0 in zip(ref_star_xy0_list, target_x0)]
+    y_misalignments = [rspp[1] - ty0 for rspp, ty0 in zip(ref_star_xy0_list, target_y0)]
+    df_images['Misalignment'] = [xy for xy in zip(x_misalignments, y_misalignments)]
+    print('estimate_misalignments() done.')
+    return df_images
+
+
+def convolve_on_ref_star(df_images):
+    """ Do convolution of first
+
+    :param df_images:
+    :return:
+    """
+    ALIGNMENT_KERNEL_EDGE_SIZE = 21  # should be odd
+    half_size = ALIGNMENT_KERNEL_EDGE_SIZE // 2
+    y, x = np.mgrid[0:ALIGNMENT_KERNEL_EDGE_SIZE, 0:ALIGNMENT_KERNEL_EDGE_SIZE]
+    convolved_subarrays, new_shifts = [], []
+    for ar, mis, sc in zip(df_images['Subarray_first'], df_images['Misalignment'],
+                           df_images['Shift_current']):
+        new_shift_x = sc[0] - mis[0]
+        new_shift_y = sc[1] - mis[1]
+        gaussian = Gaussian2D(1, half_size + new_shift_x, half_size - new_shift_y, 0.7, 0.7)
         kernel = gaussian(x, y)
         kernel /= np.sum(kernel)
-        hard_aligned_array = convolve(im.data, kernel)
-        im.data = hard_aligned_array
-        x0, y0 = im.wcs.all_world2pix(ref_star_radec, 0, ra_dec_order=True)[0]
-        tiny_array = im[y0_image0-centroid_cell_half_size: y0_image0+centroid_cell_half_size,
-                        x0_image0-centroid_cell_half_size: x0_image0+centroid_cell_half_size].data
-        x_refstar, y_refstar = centroid_com(tiny_array)
-        print('   ', df_images.iloc[i]['Filename'],
-              '   ref star at world2pix:', '{:.3f}'.format(x0), '{:.3f}'.format(y0),
-              '   at centroid:', '{:.3f}'.format(x_refstar + (x0_image0-centroid_cell_half_size)),
-              '{:.3f}'.format(y_refstar + (y0_image0-centroid_cell_half_size)))
+        convolved_subarrays.append(convolve(ar, kernel))
+        new_shifts.append((new_shift_x, new_shift_y))
+    df_images['Subarray_current'] = convolved_subarrays
+    df_images['Shift_current'] = new_shifts
+    print('convolve_on_ref_star() done.')
     return df_images
 
 
-def calc_mp_pixel_positions(df_images):
-    """ Calculate MP (x,y) pixel position for each subimage, save in dataframe as new columns.
+def calc_current_mp_xy0(df_images):
+    """ Calculate MP (x,y) pixel position for each subarray, save in dataframe as new columns.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: dataframe with new 'MP_x' and 'MP_y' columns. [pandas DataFrame]
+    :return: dataframe with new 'MP_XY0_current' columns. [pandas DataFrame]
     """
-    # TODO: sort out how ref star-based hard alignment affects Subimage column, and mp positions too.
-    mp_pix_list = [im.wcs.all_world2pix([[mp_ra, mp_dec]], 0, ra_dec_order=True)[0]  # origin ZERO, arrays.
-                   for (im, mp_ra, mp_dec) in zip(df_images['Subimage'],
-                                                  df_images['MP_RA'],
-                                                  df_images['MP_Dec'])]
-    df_images['MP_x'] = [x for (x, y) in mp_pix_list]  # zero-origin
-    df_images['MP_y'] = [y for (x, y) in mp_pix_list]  #
-    # print('MP pixel positions in subimages:')
-    # for fn, pix in zip(df_images['Filename'], mp_pix_list):
-    #     print('   ', fn, str(pix))
-    print('calc_mp_pixel_positions() done.')
+    new_mp_xy_list = []
+    for f, sc in zip(df_images['FirstMP_XY0'], df_images['Shift_current']):
+        new_mp_x = f[0] + sc[0]
+        new_mp_y = f[1] + sc[1]
+        new_mp_xy_list.append((new_mp_x, new_mp_y))
+    df_images['MP_XY0_current'] = new_mp_xy_list
+    print('calc_current_mp_xy0() done.')
     return df_images
 
 
-def mask_mp_from_subimages(df_images, target_sigma):
-    """ Make MP-masked subimages; not yet background-subtracted. Save in new column 'Subimage_masked'.
+def mask_mp_from_current_subarrays(df_images, target_sigma):
+    """ Make MP-masked subarrays; not yet background-subtracted. Save in new column 'Subarray_masked'.
         (We do this before calculating background statistics, to make them just a bit more accurate.)
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :param target_sigma: Gaussian sigma to which all images have previously been convolved. [float]
-    :return: same dataframe with new 'Subimage_masked' column. [pandas DataFrame]
+    :param target_sigma: Gaussian sigma to which all subarrays have previously been convolved. [float]
+    :return: same dataframe with new 'Subarray_masked' column. [pandas DataFrame]
     """
     mp_mask_radius = MP_MASK_RADIUS_PER_SIGMA * target_sigma
-    mp_masked_subimages = []
-    for i, im in enumerate(df_images['Subimage']):
-        mp_masked_subimage = im.copy()
-        # mp_masked_subimage.data = mp_masked_subimage.data - (df_images.iloc[i]['Bkgd_median']).data
-        radec_mp = [df_images.iloc[i]['MP_RA'], df_images.iloc[i]['MP_Dec']]
-
-        # Origin is zero here, to address numpy array cells rather than FITS pixels.
-        x_mp, y_mp = tuple(mp_masked_subimage.wcs.all_world2pix([radec_mp], 0, ra_dec_order=True)[0])
-        # Arrays are addressed y-first:
-        mp_masked_subimage.mask = np.fromfunction(lambda i, j: (j - x_mp)**2 +
-                                                               (i - y_mp)**2 <= mp_mask_radius**2,
-                                                  shape=mp_masked_subimage.data.shape, dtype=int)
-        mp_masked_subimages.append(mp_masked_subimage)
-    df_images['Subimage_masked'] = mp_masked_subimages
-    # plot_images('Subimage masks', df_images['Filename'], [im.mask for im in df_images['Subimage_masked']])
-    # plot_mp_masks(df_images)
-    print('mask_mp_from_subimages() done.')
+    mp_masked_subarrays = []
+    for i, ar in enumerate(df_images['Subarray_current']):
+        mp_masked_subarray = np.ma.array(data=ar, mask=False, copy=True)
+        mp_x0, mp_y0 = df_images.iloc[i]['MP_XY0_current']
+        mp_masked_subarray = np.fromfunction(lambda i, j:
+                                             ((j - mp_x0)**2 + (i - mp_y0)**2) <= mp_mask_radius**2,
+                                             shape=mp_masked_subarray.data.shape, dtype=bool)
+        mp_masked_subarrays.append(mp_masked_subarray)
+    df_images['Subarray_masked'] = mp_masked_subarrays
+    # plot_images('Subarray masks', df_images['Filename'], [ar.mask for ar in df_images['Subarray_masked']])
+    plot_mp_masks(df_images)
+    print('mask_mp_from_current_subarrays() done.')
     return df_images
 
 
-def calc_background_statistics(df_images):
-    """ For each subimage, calculate sigma-clipped mean, median background ADU levels & std. deviation;
+def calc_subarray_backgrounds(df_images):
+    """ For each subarray, calculate sigma-clipped mean, median background ADU levels & std. deviation;
         write to dataframe as new columns. We will use the sigma-clipped median as background ADUs.
-        This all assumes constant background across this small subimage...go to 2-D later if really needed.
+        This all assumes constant background across this small subarray...go to 2-D later if really needed.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
     :return: dataframe with new 'Bkgd_mean', 'Bkgd_median', and 'Bkgd_std' columns. [pandas DataFrame]
     """
-    source_masks = [make_source_mask(im.data, nsigma=2, npixels=5, filter_fwhm=2, dilate_size=11)
-                    for im in df_images['Subimage_masked']]  # nsigma=2 is very aggressive mask: ok.
-    # Logical-or masks each pixel masked by *either* mask:
-    mp_source_masks = [np.logical_or(im.mask, source_mask)
-                       for (im, source_mask) in zip(df_images['Subimage_masked'], source_masks)]
-    stats = [sigma_clipped_stats(im.data, sigma=3.0, mask=b_mask)
-             for (im, b_mask) in zip(df_images['Subimage_masked'], mp_source_masks)]
+    source_masks = [make_source_mask(ar.data, nsigma=2, npixels=5, filter_fwhm=2, dilate_size=11)
+                    for ar in df_images['Subarray_masked']]  # nsigma=2 is very aggressive mask: ok.
+    # Logical-or masks each pixel masked by *either* mask (MP mask or source-ADU mask):
+    mp_source_masks = [np.logical_or(ar.mask, source_mask)
+                       for (ar, source_mask) in zip(df_images['Subarray_masked'], source_masks)]
+    stats = [sigma_clipped_stats(ar.data, sigma=3.0, mask=b_mask)
+             for (ar, b_mask) in zip(df_images['Subarray_masked'], mp_source_masks)]
     df_images['Bkgd_mean'], df_images['Bkgd_median'], df_images['Bkgd_std'] = tuple(zip(*stats))
     # fig, (ax1, ax2) = plt.subplots(2, 1)
     # ax1.set_title('MP+Source mask: ' + df_images.iloc[0]['Filename'])
@@ -671,59 +735,59 @@ def calc_background_statistics(df_images):
     # ax2.imshow(mp_source_masks[-1], origin='upper')
     # plt.tight_layout()
     # plt.show()
-    print('calc_background_statistics() done.')
+    print('calc_subarray_backgrounds() done.')
     return df_images
 
 
-def subtract_background_from_subimages(df_images):
-    """ Make background-subtracted (still MP-masked) sub images ready for use in our actual photometry.
-        Add separate, new column 'Subimage_bkgd_subtr'; does not alter other image columns.
+def subtract_background_from_subarrays(df_images):
+    """ Make background-subtracted (still MP-masked) subarrays ready for use in our actual photometry.
+        Add separate, new column 'Subarray_bkgd_subtr'; does not alter other df_image columns.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: same dataframe with new 'Subimage_bkgd_subtr' column. [pandas DataFrame]
+    :return: same dataframe with new 'Subarrray_bkgd_subtr' column. [pandas DataFrame]
     """
     # Use a loop because I'm not entirely sure a list comprehension will get the job done:
-    subimages_bkgd_subtr = []
-    for (im, bkgd_median) in zip(df_images['Subimage_masked'], df_images['Bkgd_median']):
-        im_copy = im.copy()
-        array = im_copy.data
+    subarrays_bkgd_subtr = []
+    for (ar, bkgd_median) in zip(df_images['Subarray_masked'], df_images['Bkgd_median']):
+        ar_copy = ar.copy()
+        array = ar_copy.data
         bkgd_array = np.full_like(array, bkgd_median)
-        im_copy.data = array - bkgd_array
-        subimages_bkgd_subtr.append(im_copy)
-    df_images['Subimage_bkgd_subtr'] = subimages_bkgd_subtr
+        ar_copy.data = array - bkgd_array
+        subarrays_bkgd_subtr.append(ar_copy)
+    df_images['Subarray_bkgd_subtr'] = subarrays_bkgd_subtr
 
-    # plot_images('Subimages, bkgd-subtr', df_images['Filename'], df_images['Subimage_bkgd_subtr'])
-    print('subtract_background_from_subimages() done.')
+    # plot_images('Subimages, bkgd-subtr', df_images['Filename'], df_images['Subarray_bkgd_subtr'])
+    print('subtract_background_from_subarrays() done.')
     return df_images
 
 
-def make_averaged_subimage(df_images):
-    """ Make and return reference (background-subtracted, MP-masked) average subimage.
+def make_averaged_subarray(df_images):
+    """ Make and return reference (background-subtracted, MP-masked) averaged subarray.
         This is what this sliver of sky would look like, on average, if the MP were not there.
     :param df_images: dataframe, one row per session image in photometric filter. [pandas DataFrame]
-    :return: one averaged, MP-masked subimage. [one astropy CCDData object]
+    :return: one averaged, MP-masked subarray. [one numpy Masked Array]
     """
-    combiner = Combiner(df_images['Subimage_bkgd_subtr'])
-    averaged_subimage = combiner.average_combine()
-    plot_averaged_subimage(df_images, averaged_subimage)
-    print('make_averaged_subimage() done.')
-    return averaged_subimage
+    combiner = Combiner(df_images['Subarray_bkgd_subtr'])
+    averaged_subarray = combiner.average_combine()
+    plot_averaged_subarray(df_images, averaged_subarray)
+    print('make_averaged_subarray() done.')
+    return averaged_subarray
 
 
-def decompose_subimages(df_images, averaged_image):
-    """ For each background-subtracted, MP-masked subimage, find:
-        source_factor, relative to averaged subimage source fluxes, and
-        background_offset, relative to averaged subimage background.
+def decompose_subarrays(df_images, averaged_subarray):
+    """ For each background-subtracted, MP-masked subarray, find:
+        source_factor, relative to averaged subarray source fluxes, and
+        background_offset, relative to averaged subarray background.
     :param df_images:
-    :param averaged_image:
+    :param averaged_subarray:
     :return:
     """
     fit = fitting.LinearLSQFitter()
     line_init = models.Linear1D()
-    x_raw = np.ravel(averaged_image.data)
+    x_raw = np.ravel(averaged_subarray.data)
     source_factors, background_offsets = [], []
-    for i, im in enumerate(df_images['Subimage_bkgd_subtr']):
-        y_raw = np.ravel(im.data)
-        to_keep = ~np.ravel(im.mask)
+    for i, ar in enumerate(df_images['Subarray_bkgd_subtr']):
+        y_raw = np.ravel(ar.data)
+        to_keep = ~np.ravel(ar.mask)
         x = x_raw[to_keep]
         y = y_raw[to_keep]
         fitted_line = fit(line_init, x, y)
@@ -735,30 +799,42 @@ def decompose_subimages(df_images, averaged_image):
         #     plt.show()
     df_images['SourceFactor'] = source_factors
     df_images['BackgroundOffset'] = background_offsets
-    print('decompose_subimages() done.')
+    print('decompose_subarrays() done.')
     return df_images
 
 
-def make_mp_only_subimages(df_images, averaged_image):
-    """ Make best estimated of MP-less image by using averaged image, source_factor, and background-offset.
+def make_mp_only_subarrays(df_images, averaged_subarray):
+    """ Make best-estimated of MP-only subarray by using aligned subarray,
+            averaged subarray, source_factor, and background-offset.
     :param df_images:
-    :param averaged_image:
+    :param averaged_subarray:
     :return:
     """
-    mp_only_subimages = []
+    mp_only_subarrays = []
     for (fs, bo, si, bk) in zip(df_images['SourceFactor'],
                                 df_images['BackgroundOffset'],
-                                df_images['Subimage'],
+                                df_images['Subarray'],
                                 df_images['Bkgd_median']):
-        best_background_array = averaged_image.data * fs + bo
-        mp_only_subimage_array = si - best_background_array
-        mp_only_subimage = si.copy()
-        mp_only_subimage.data = mp_only_subimage_array - bk
-        mp_only_subimages.append(mp_only_subimage)
-    df_images['Subimage_mp_only'] = mp_only_subimages
-    plot_images('MP-only subimages', df_images['Filename'], df_images['Subimage_mp_only'])
-    print('make_mp_only_subimages() done.')
+        best_background_subarray = averaged_subarray * fs + bo
+        mp_only_subarray = si - best_background_subarray
+        mp_only_subarray = si.copy() - bk
+        mp_only_subarrays.append(mp_only_subarray)
+    df_images['Subarray_mp_only'] = mp_only_subarrays
+    plot_images('MP-only subarrays', df_images['Filename'], df_images['Subarray_mp_only'])
+    print('make_mp_only_subarrays() done.')
     return df_images
+
+
+def evaluate_convergence(df_images):
+
+    n_loop_iterations_done = len(df_images.iloc[0]['MisalignmentHistory'])
+    if n_loop_iterations_done > MAX_LOOP_ITERATIONS:
+        return True
+    # TODO: Return True if decrease in RMS <= 10% of prev RMS.
+    # TODO: Return True if RMS < convergence RMS.
+    return False
+
+
 
 
 def do_mp_aperture_photometry(df_images):
@@ -911,7 +987,7 @@ def plot_mp_masks(df_images):
     plt.show()
 
 
-def plot_averaged_subimage(df_images, averaged_subimage):
+def plot_averaged_subarray(df_images, averaged_subimage):
     fig, (ax1, ax2) = plt.subplots(2, 1)
     ax1.set_title('Subimage ' + df_images.iloc[-1]['Filename'])
     im, norm = imshow_norm(df_images.iloc[-1]['Subimage'], ax1, origin='upper', cmap='Greys',
@@ -924,6 +1000,16 @@ def plot_averaged_subimage(df_images, averaged_subimage):
 
 
 SUPPORT_FUNCTIONS_______________________________ = 0
+
+def calc_average_starting_ref_star_position(df_images):
+    # These are the individual ref star pixel positions:
+    first_x0 = [xy0[0] for xy0 in df_images['FirstRefStar_XY0']]
+    first_y0 = [xy0[1] for xy0 in df_images['FirstRefStar_XY0']]
+    # This is *exactly* where we want all ref star centroids to fall. (Same for every loop iteration.)
+    # Target is the average of initial ref star pixel positions over all images.
+    target_x0 = sum(first_x0) / len(df_images)
+    target_y0 = sum(first_y0) / len(df_images)
+    return target_x0, target_y0
 
 
 def background_subtract_array(array):
@@ -997,14 +1083,14 @@ DETRITUS________________________________________ = 0
 #     return df_images
 
 
-# df_averaged_image_sources = find_sources_in_averaged_subimage(averaged_image, df_images)
+# df_averaged_image_sources = find_sources_in_averaged_subimage(averaged_subarray, df_images)
 # df_sources = find_sources_in_all_subimages(df_images)
 # df_sources = keep_only_matching_sources(df_sources, df_averaged_image_sources)
 # df_sources = do_subimage_source_aperture_photometry(df_sources, df_images)
 # df_qualified_sources = qualify_subimage_sources(df_sources)
 # anchor_filename, df_anchor = select_anchor_subimage(df_qualified_sources, df_images)
 # normalized_relative_fluxes = calc_normalized_relative_fluxes(df_qualified_sources, df_anchor, df_images)
-# df_images = make_best_background_subimages(normalized_relative_fluxes, averaged_image, df_images)
+# df_images = make_best_background_subimages(normalized_relative_fluxes, averaged_subarray, df_images)
 
 # def get_ref_star_kernel(image, ref_star_radec, size):
 #     """ Get a size x size array centered on the ref_star, background-subtracted, suitable as psf kernel.
@@ -1236,3 +1322,51 @@ DETRITUS________________________________________ = 0
 #                   origin='upper', interpolation='none', cmap='Greys')
 #     fig.tight_layout()
 #     plt.show()
+
+
+# def hard_align_on_ref_star_centroids(df_images, ref_star_radec):
+#     """ Get rough ref star (x,y), refine via local centroid, convolve to make tiny shifts.
+#     :param df_images:
+#     :param ref_star_radec:
+#     :return:
+#     """
+#     # Calculate and print (very small) pre-existing ref star offset for each image:
+#     print('Start of hard_align_on_ref_star_centroids():')
+#     x0_image0, y0_image0 = (df_images.iloc[0])['Subimage'].wcs.all_world2pix(ref_star_radec,
+#                                                                              0, ra_dec_order=True)[0]
+#     x0_image0, y0_image0 = int(x0_image0), int(y0_image0)
+#     ref_star_offsets = []
+#     centroid_cell_half_size = 20
+#     for i, im in enumerate(df_images['Subimage']):
+#         x0, y0 = im.wcs.all_world2pix(ref_star_radec, 0, ra_dec_order=True)[0]
+#         tiny_array = im[y0_image0-centroid_cell_half_size: y0_image0+centroid_cell_half_size,
+#                         x0_image0-centroid_cell_half_size: x0_image0+centroid_cell_half_size].data
+#         x_refstar, y_refstar = centroid_com(tiny_array)
+#         ref_star_offsets.append((x_refstar - centroid_cell_half_size,
+#                                  y_refstar - centroid_cell_half_size))
+#         print('   ', df_images.iloc[i]['Filename'],
+#               '   ref star at world2pix:', '{:.3f}'.format(x0), '{:.3f}'.format(y0),
+#               '   at centroid:', '{:.3f}'.format(x_refstar + (x0_image0-centroid_cell_half_size)),
+#               '{:.3f}'.format(y_refstar + (y0_image0-centroid_cell_half_size)))
+#
+#     # Convolve each image to make an array in which its ref star offset has been reversed:
+#     half_size = 10
+#     edge_pixels = 2 * half_size + 1
+#     y, x = np.mgrid[0:edge_pixels, 0:edge_pixels]
+#     print('After hard_align_on_ref_star_centroids():')
+#     for i, im in enumerate(df_images['Subimage']):
+#         x_offset, y_offset = ref_star_offsets[i]
+#         gaussian = Gaussian2D(1, half_size - x_offset, half_size - y_offset, 0.7, 0.7)
+#         kernel = gaussian(x, y)
+#         kernel /= np.sum(kernel)
+#         hard_aligned_array = convolve(im.data, kernel)
+#         im.data = hard_aligned_array
+#         x0, y0 = im.wcs.all_world2pix(ref_star_radec, 0, ra_dec_order=True)[0]
+#         tiny_array = im[y0_image0-centroid_cell_half_size: y0_image0+centroid_cell_half_size,
+#                         x0_image0-centroid_cell_half_size: x0_image0+centroid_cell_half_size].data
+#         x_refstar, y_refstar = centroid_com(tiny_array)
+#         print('   ', df_images.iloc[i]['Filename'],
+#               '   ref star at world2pix:', '{:.3f}'.format(x0), '{:.3f}'.format(y0),
+#               '   at centroid:', '{:.3f}'.format(x_refstar + (x0_image0-centroid_cell_half_size)),
+#               '{:.3f}'.format(y_refstar + (y0_image0-centroid_cell_half_size)))
+#     return df_images
