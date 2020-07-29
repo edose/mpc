@@ -46,7 +46,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# import astropy.io.fits as fits
+import astropy.io.fits as fits
 # import astropy.wcs as wcs
 from astropy.stats import sigma_clipped_stats
 from astropy.nddata import CCDData
@@ -73,26 +73,53 @@ KERNEL_NOMINAL_SIZE = 80  # edge length in pixels
 MID_IMAGE_PADDING = 25  # extra padding around bounding box, in pixels.
 SUBIMAGE_PADDING = 80   # "
 # TODO: need to make equal the MP and comp-star radii for aperture photometry.
-MP_MASK_RADIUS_PER_SIGMA = 3.5
-R_APERTURE = 9      # "
-R_ANNULUS_IN = 15   # "
-R_ANNULUS_OUT = 20  # "
+MP_MASK_RADIUS_PER_SIGMA = 6
+AP_PHOT_RADIUS_PER_SIGMA = 3
+# R_APERTURE = 9      # "
+# R_ANNULUS_IN = 15   # "
+# R_ANNULUS_OUT = 20  # "
+EDGE_PIXELS_REGRESSION = 5
 MAX_LOOP_ITERATIONS = 3
 MAX_FOR_CONVERGENCE = 0.025  # in pixels, root-mean-square-deviation.
+CCD_GAIN = 1.57  # electrons per pixel
 
 # SOURCE_MATCH_TOLERANCE = 2  # distance in pixels
 
 
 def try_bulldozer():
-    """ Dummy calling fn. """
+    """ Dummy calling fn, using original FITS files."""
     directory_path = TEST_FITS_DIR
-    filter='Clear'
+    filter = 'Clear'
     mp_file_early = 'MP_191-0001-Clear.fts'
     mp_file_late = 'MP_191-0028-Clear.fts'
     mp_pix_early = (826.4, 1077.4)
     mp_pix_late = (1144.3, 1099.3)
     ref_star_file = 'MP_191-0001-Clear.fts'
     ref_star_pix = (957.2, 1125.0)
+
+    whatever = bulldozer(directory_path, filter,
+                         mp_file_early, mp_file_late, mp_pix_early, mp_pix_late,
+                         ref_star_file, ref_star_pix)
+    return whatever
+
+
+def try_bd_added(i_mp):
+    """ Dummy calling fn, using '_Added' FITS files previously prepared.
+    :param i_mp: number (0, 1, ...) of MP to measure.\
+      """
+    directory_path = os.path.join(TEST_FITS_DIR, 'Added')
+    filter = 'Clear'
+    mp_file_early = 'MP_191-0001-Clear_Added.fts'
+    mp_file_late = 'MP_191-0028-Clear_Added.fts'
+    sources = [{'name': 'Sparse_bkgd',  'xy1_early': (1510, 698),  'xy1_late': (1746, 646)},
+               {'name': 'Dense_bkgd',   'xy1_early': (1899, 990),  'xy1_late': (2234, 1142)},
+               {'name': 'One brt star', 'xy1_early': (1367.0, 1543.0), 'xy1_late': (1586.0, 1532.0)}]
+    mp_pix_early = sources[i_mp]['xy1_early']
+    mp_pix_late = sources[i_mp]['xy1_late']
+
+    ref_star_file = 'MP_191-0001-Clear_Added.fts'
+    ref_star_pix = [(1585.2, 587.2), (2006.8, 1337.2), (1461.6, 1370.0)][i_mp]
+
     whatever = bulldozer(directory_path, filter,
                          mp_file_early, mp_file_late, mp_pix_early, mp_pix_late,
                          ref_star_file, ref_star_pix)
@@ -198,7 +225,9 @@ def bulldozer(directory_path, filter,
     # Get best MP-only fluxes from aperture photometry: ##################################
 
     # aperture photometry to get best MP fluxes (do we even need sky annulae?)
-    df_images = do_mp_aperture_photometry(df_images)
+    df_images = do_mp_aperture_photometry(df_images, target_sigma)
+
+    return df_images
 
 
 BULLDOZER_SUBFUNCTIONS_______________________________ = 0
@@ -215,7 +244,7 @@ def start_df_images(directory_path, filter):
     """
     # Get all FITS filenames in directory, and read them into list of CCDData objects:
     filenames = [fn for fn in get_fits_filenames(directory_path) if fn.startswith('MP_')]
-    images = [CCDData.read(os.path.join(TEST_FITS_DIR, fn), unit='adu') for fn in filenames]
+    images = [CCDData.read(os.path.join(directory_path, fn), unit='adu') for fn in filenames]
 
     # Keep only filenames and images in chosen filter:
     keep_image = [(im.meta['Filter'] == filter) for im in images]
@@ -468,10 +497,10 @@ def calc_target_kernel_sigma(df_images):
     for i, im in enumerate(df_images['RefStarPSF']):
         dps = data_properties(im)  # photutils.segmentation.SourceProperties object.
         sigma_list.append(dps.semimajor_axis_sigma.value)
-        # print('   ', df_images.iloc[i]['Filename'],
-        #       '{:.2f}'.format(dps.xcentroid.value),
-        #       '{:.2f}'.format(dps.ycentroid.value),
-        #       '{:.3f}'.format(dps.semimajor_axis_sigma.value))
+        print('   ', df_images.iloc[i]['Filename'],
+              '{:.2f}'.format(dps.xcentroid.value),
+              '{:.2f}'.format(dps.ycentroid.value),
+              '{:.3f}'.format(dps.semimajor_axis_sigma.value))
     max_sigma = max(sigma_list)
     target_sigma = 1.05 * max_sigma
     print('calc_target_kernel_sigma() done. Target sigma:', '{:.3f}'.format(target_sigma))
@@ -823,19 +852,27 @@ def decompose_subarrays(df_images, averaged_subarray):
     """
     fit = fitting.LinearLSQFitter()
     line_init = models.Linear1D()
-    x_raw = np.ravel(averaged_subarray.data)
+
+    # Crop out edge pixels (~ 5 from each border) from x & y (avgd_sa has edge pixels masked out).
+    x_cropped = averaged_subarray[EDGE_PIXELS_REGRESSION:-EDGE_PIXELS_REGRESSION,
+                                  EDGE_PIXELS_REGRESSION:-EDGE_PIXELS_REGRESSION]
+    x_raveled = np.ravel(x_cropped.data)
     source_factors, background_offsets = [], []
     for i, ar in enumerate(df_images['Subarray_bkgd_subtr']):
-        y_raw = np.ravel(ar.data)
-        to_keep = ~np.ravel(ar.mask)
-        x = x_raw[to_keep]
-        y = y_raw[to_keep]
-        fitted_line = fit(line_init, x, y)
+        y_cropped = ar[EDGE_PIXELS_REGRESSION:-EDGE_PIXELS_REGRESSION,
+                       EDGE_PIXELS_REGRESSION:-EDGE_PIXELS_REGRESSION]
+        y_raveled = np.ravel(y_cropped.data)
+        to_keep = ~np.ravel(y_cropped.mask)
+        x_fit = x_raveled[to_keep]
+        y_fit = y_raveled[to_keep]
+        # TODO: consider adding backgrounds' x- and y-gradients as fit parameters.
+        # TODO: when done with above, also add plots & ADU sigma from the 2 different fits (per image).
+        fitted_line = fit(line_init, x_fit, y_fit)
         source_factors.append(fitted_line.slope.value)
         background_offsets.append(fitted_line.intercept.value)
         # if i in [0, 1, 2, len(df_images) - 1]:
         #     plt.figure()
-        #     plt.plot(x, y, 'ko')
+        #     plt.plot(x_fit, y_fit, 'ko')
         #     plt.show()
     df_images['SourceFactor'] = source_factors
     df_images['BackgroundOffset'] = background_offsets
@@ -851,14 +888,13 @@ def make_mp_only_subarrays(df_images, averaged_subarray):
     :return:
     """
     mp_only_subarrays = []
-    for (fs, bo, sa, bk) in zip(df_images['SourceFactor'],
+    for (sf, bo, sa, bk) in zip(df_images['SourceFactor'],
                                 df_images['BackgroundOffset'],
                                 df_images['Subarray_current'],
                                 df_images['Bkgd_median']):
         sa_bg = np.ma.masked_array(data=sa.data, mask=np.ma.nomask) - bk
-        best_background_subarray = averaged_subarray * fs + bo
+        best_background_subarray = averaged_subarray * sf + bo
         mp_only_subarray = sa_bg - best_background_subarray
-        # mp_only_subarray = sa.copy() - bk
         mp_only_subarrays.append(mp_only_subarray)
     df_images['Subarray_mp_only'] = mp_only_subarrays
     plot_images('MP-only subarrays', df_images['Filename'], df_images['Subarray_mp_only'])
@@ -870,24 +906,123 @@ def evaluate_convergence(df_images):
     # Calculate root-mean-square-deviation of (new) ref star Misalignments.
     sum_square_misalignments = sum([mis[0]*mis[0] + mis[1]*mis[1] for mis in df_images['Misalignment']])
     rms_misalignment = sqrt(sum_square_misalignments / len(df_images))
-    # Return True iff RMS <= convergence RMS.
-    if rms_misalignment <= MAX_FOR_CONVERGENCE:
+    if rms_misalignment <= MAX_FOR_CONVERGENCE:  # Return True iff RMS <= convergence RMS.
         return True
-    # Could add more criteria here.
+    # Could add more criteria (either True or False) here.
     return False
 
 
-def do_mp_aperture_photometry(df_images):
-    pass
+def do_mp_aperture_photometry(df_images, target_sigma):
+    """ Get MP net flux for each image.
+    :param df_images:
+    :param target_sigma: in pixels. [float]
+    :return: df_images with 2 new columns of floatsL 'FluxMP' and 'FluxSigmaMP'.
+    """
+    mp_xy0_list = list(df_images['MP_XY0_current'])
+    r_aperture = AP_PHOT_RADIUS_PER_SIGMA * target_sigma
+    r_inner = r_aperture + 5.0
+    r_outer = r_inner + 5.0
+    print('aperture radii:', '{:.3f}'.format(r_aperture),
+          '{:.3f}'.format(r_inner), '{:.3f}'.format(r_outer))
+    apertures = CircularAperture(mp_xy0_list, r=r_aperture)
+
+    # Aperture (MP flux) loop: unusual, as we use only one aperture per image:
+    raw_flux_list = []
+    for im, ap in zip(df_images['Subarray_mp_only'], apertures):
+        phot = aperture_photometry(im, ap)
+        raw_flux = phot[0]['aperture_sum']
+        raw_flux_list.append(raw_flux)
+
+    # Annulus (background) loop: also one annulus per image:
+    annulae = CircularAnnulus(mp_xy0_list, r_in=r_inner, r_out=r_outer)
+    annulus_masks = annulae.to_mask(method='center')
+    bkgd_adu_list, ann_sigma_list = [], []
+    for im, mask in zip(df_images['Subarray_mp_only'], annulus_masks):
+        annulus_data = mask.multiply(im)
+        annulus_data_1d = annulus_data[mask.data > 0]
+        _, ann_median, ann_sigma = sigma_clipped_stats(annulus_data_1d)
+        bkgd_adu_list.append(ann_median)
+        ann_sigma_list.append(ann_sigma)
+
+    # Calculate and return flux and flux sigma values, each image:
+    net_flux_list = [raw_flux - ap.area * bkgd_adu
+                     for raw_flux, ap, bkgd_adu in zip(raw_flux_list, apertures, bkgd_adu_list)]
+    sigma2_ap_list = [CCD_GAIN * (raw_flux + ap.area * bkgd_median)
+                      for (raw_flux, ap, bkgd_median)
+                      in zip(raw_flux_list, apertures, df_images['Bkgd_median'])]
+    sigma2_ann_list = [ap.area * ann_sigma for ap, ann_sigma in zip(apertures, ann_sigma_list)]
+    flux_sigma_list = [sqrt(sigma2_ap + sigma2_ann)
+                       for sigma2_ap, sigma2_ann in zip(sigma2_ap_list, sigma2_ann_list)]
+    df_images['FluxMP'] = net_flux_list
+    df_images['FluxSigmaMP'] = flux_sigma_list
+
+    # Now do the same for 'Image', to compare unbulldozed results with the above:
+    mp_xy0_list = [im.wcs.all_world2pix([[mp_ra, mp_dec]], 0, ra_dec_order=True)[0]
+                   for (im, mp_ra, mp_dec) in zip(df_images['Image'],
+                                                  df_images['MP_RA'],
+                                                  df_images['MP_Dec'])]
+    r_aperture = MP_MASK_RADIUS_PER_SIGMA * target_sigma
+    r_inner = r_aperture + 5.0
+    r_outer = r_inner + 5.0
+    apertures = CircularAperture(mp_xy0_list, r=r_aperture)
+
+    # Aperture (MP flux) loop: unusual, as we use only one aperture per image:
+    raw_flux_list = []
+    for im, ap in zip(df_images['Image'], apertures):
+        phot = aperture_photometry(im, ap)
+        raw_flux = phot[0]['aperture_sum']
+        raw_flux_list.append(raw_flux)
+
+    # Annulus (background) loop: also one annulus per image:
+    annulae = CircularAnnulus(mp_xy0_list, r_in=r_inner, r_out=r_outer)
+    annulus_masks = annulae.to_mask(method='center')
+    bkgd_adu_list, ann_sigma_list = [], []
+    for im, mask in zip(df_images['Image'], annulus_masks):
+        annulus_data = mask.multiply(im)
+        annulus_data_1d = annulus_data[mask.data > 0]
+        _, ann_median, ann_sigma = sigma_clipped_stats(annulus_data_1d)
+        bkgd_adu_list.append(ann_median)
+        ann_sigma_list.append(ann_sigma)
+    net_flux_list = [raw_flux.value - ap.area * bkgd_adu
+                     for raw_flux, ap, bkgd_adu in zip(raw_flux_list, apertures, bkgd_adu_list)]
+    sigma2_ap_list = [CCD_GAIN * (raw_flux.value + ap.area * bkgd_median)
+                      for (raw_flux, ap, bkgd_median)
+                      in zip(raw_flux_list, apertures, df_images['Bkgd_median'])]
+    sigma2_ann_list = [ap.area * ann_sigma for ap, ann_sigma in zip(apertures, ann_sigma_list)]
+    flux_sigma_list = [sqrt(sigma2_ap + sigma2_ann)
+                       for sigma2_ap, sigma2_ann in zip(sigma2_ap_list, sigma2_ann_list)]
+    df_images['FluxMP_raw'] = net_flux_list
+    df_images['FluxSigmaMP_raw'] = flux_sigma_list
+
+    # TODO: Add plots doing the comparison.
+    x = df_images['JD_mid'] - floor(min(df_images['JD_mid']))
+    y1 = df_images['FluxMP']
+    err1 = df_images['FluxSigmaMP']
+    y2 = df_images['FluxMP_raw']
+    err2 = df_images['FluxSigmaMP_raw']
+
+    # Plot both lightcurves (from bulldozer vs from images directly):
+    def make_subplot(ax, x, y, y_err, title):
+        ax.plot(x, y)
+        ax.errorbar(x=x, y=y, yerr=y_err, fmt='none', color='black',
+                    linewidth=0.5, capsize=3, capthick=0.5, zorder=-100)
+        ax.set_title(title)
+        ax.set_xlabel('JD_fract', labelpad=0)  # labelpad in points
+        ax.set_ylabel('flux', labelpad=0)      # "
+    fig, (ax1, ax2) = plt.subplots(ncols=2, nrows=1, figsize=(10, 5))  # (w, h)
+    make_subplot(ax1, x, y1, err1, 'Flux from bulldozer')
+    make_subplot(ax2, x, y2, err2, 'Flux directly from images')
+    y_min = min([min(yy) for yy in [y1, y2]])
+    y_max = max([max(yy) for yy in [y1, y2]])
+    y_min -= 0.04 * (y_max - y_min)
+    y_max += 0.04 * (y_max - y_min)
+    ax1.set_ylim(y_min, y_max)
+    ax2.set_ylim(y_min, y_max)
+    plt.tight_layout(h_pad=20)
+    plt.show()
+
     print('do_mp_aperture_photometry() done.')
     return df_images
-
-
-
-
-
-
-
 
 
 PLOTTING_ETC_FUNCTIONS__________________________ = 0
@@ -904,8 +1039,12 @@ def plot_images(figtitle, name_list, image_list):
     plots_per_figure = 4
     plots_per_row = 2
     rows_per_figure = plots_per_figure // plots_per_row
-    norm = ImageNormalize(stretch=LogStretch(250.0))
     axes = None  # keep IDE happy.
+    plot_minimum = np.median([np.min(im) for im in image_list])
+    plot_maximum = max([np.max(im) for im in image_list])
+    # norm = ImageNormalize(vmin=plot_minimum, vmax=plot_maximum, stretch=LogStretch(1000.0))
+    norm = ImageNormalize(vmin=plot_minimum, vmax=plot_maximum, stretch=LogStretch(200.0))
+    print('Plot (' + figtitle + '):', '{:.3f}'.format(plot_minimum), '{:.3f}'.format(plot_maximum))
     for i, im in enumerate(image_list):
         _, i_plot_this_figure = divmod(i, plots_per_figure)
         i_row, i_col = divmod(i_plot_this_figure, plots_per_row)
@@ -915,8 +1054,8 @@ def plot_images(figtitle, name_list, image_list):
             fig.suptitle(figtitle)
         ax = axes[i_row, i_col]
         ax.set_title(name_list.iloc[i])
-        im, norm = imshow_norm(im, ax, origin='upper', cmap='Greys',
-                               interval=MinMaxInterval(), stretch=LogStretch(250.0))
+        im_plot = im.copy()
+        ax.imshow(im_plot, origin='upper', cmap='Greys', norm=norm)
         if i_plot_this_figure == plots_per_figure - 1:
             plt.show()
 
@@ -1029,12 +1168,23 @@ def plot_mp_masks(df_images):
 
 def plot_averaged_subarray(df_images, averaged_subarray):
     fig, (ax1, ax2) = plt.subplots(2, 1)
+
+    im = df_images.iloc[-1]['Subarray_first']
+    source_mask = make_source_mask(im, nsigma=2, npixels=5, filter_fwhm=2, dilate_size=11)
+    _, median, _ = sigma_clipped_stats(im, sigma=3.0, mask=source_mask)
+    plot_minimum = median
+    plot_maximum = np.max(im)
+    norm = ImageNormalize(vmin=plot_minimum, vmax=plot_maximum, stretch=LogStretch(250.0))
     ax1.set_title('Subimage ' + df_images.iloc[-1]['Filename'])
-    im, norm = imshow_norm(df_images.iloc[-1]['Subarray_first'], ax1, origin='upper', cmap='Greys',
-                           interval=MinMaxInterval(), stretch=LogStretch(250.0))
+    ax1.imshow(im, origin='upper', cmap='Greys', norm=norm)
+
+    source_mask = make_source_mask(averaged_subarray, nsigma=2, npixels=5, filter_fwhm=2, dilate_size=11)
+    _, median, _ = sigma_clipped_stats(averaged_subarray, sigma=3.0, mask=source_mask)
+    plot_minimum = median
+    plot_maximum = np.max(averaged_subarray)
+    norm = ImageNormalize(vmin=plot_minimum, vmax=plot_maximum, stretch=LogStretch(250.0))
     ax2.set_title('AVERAGED subimage')
-    im, norm = imshow_norm(averaged_subarray, ax2, origin='upper', cmap='Greys',
-                           interval=MinMaxInterval(), stretch=LogStretch(250.0))
+    ax2.imshow(averaged_subarray, origin='upper', cmap='Greys', norm=norm)
     plt.tight_layout()
     plt.show()
 
@@ -1062,6 +1212,53 @@ def background_subtract_array(array):
     bkgd_mask = make_source_mask(copy, nsigma=2, npixels=5, filter_fwhm=2, dilate_size=11)
     _, median, _ = sigma_clipped_stats(copy, sigma=3.0, mask=bkgd_mask)
     return copy - median
+
+
+def add_test_mps(directory_path=TEST_FITS_DIR, filter='Clear', flux=100000, sigma=5):
+    """ Add constant-flux, constant-shape, moving MP-like sources to all FITS files in a path.
+        To each filename, add '_Added', so e.g., 'MP_191-0001-Clear_Added.fts'.
+    :param directory_path:
+    :param filter:
+    :param flux:
+    :param sigma:
+    :return:
+    """
+    mp_file_early = 'MP_191-0001-Clear.fts'
+    mp_file_late = 'MP_191-0028-Clear.fts'
+    sources = [{'name': 'Sparse_bkgd',  'xy1_early': (1510, 698),  'xy1_late': (1746, 646)},
+               {'name': 'Dense_bkgd',   'xy1_early': (1897.9, 989.1),  'xy1_late': (2233.0, 1141.0)},
+               {'name': 'One brt star', 'xy1_early': (1368, 1544), 'xy1_late': (1587, 1533)}]
+    half_size = int(floor(4 * sigma))
+    edge_length = 2 * half_size + 1
+    y, x = np.mgrid[0:edge_length, 0:edge_length]
+    gaussian = Gaussian2D(1, half_size, half_size, sigma, sigma)
+    source_psf = gaussian(x, y)
+    source_psf *= (flux / np.sum(source_psf))  # set total area to desired flux.
+
+    # To each image, add requested MP-like sources:
+    df = start_df_images(directory_path, filter)
+    hdu_list = [fits.open(os.path.join(TEST_FITS_DIR, fn))[0] for fn in df['Filename']]
+    for source in sources:
+        df = calc_mp_radecs(df, mp_file_early, mp_file_late, source['xy1_early'], source['xy1_late'])
+        for i, ccddata in enumerate(df['Image']):
+            x0, y0 = tuple(ccddata.wcs.all_world2pix([[df.iloc[i]['MP_RA'],
+                                                       df.iloc[i]['MP_Dec']]], 0, ra_dec_order=True)[0])
+            x_base = int(floor(x0)) - half_size  # position in image of PSF's (0,0) origin.
+            y_base = int(floor(y0)) - half_size  # "
+            x_psf_center = x0 - x_base  # offset from PSF's origin of Gaussian's center.
+            y_psf_center = y0 - y_base  # offset from PSF's origin of Gaussian's center.
+            gaussian = Gaussian2D(1, x_psf_center, y_psf_center, sigma, sigma)
+            source_psf = gaussian(x, y)
+            source_psf *= (flux / np.sum(source_psf))  # set total area to desired flux.
+            source_psf_uint16 = np.round(source_psf).astype(np.uint16)
+            hdu_list[i].data[y_base:y_base + edge_length,
+                             x_base:x_base + edge_length] += source_psf_uint16  # np ndarray: [y,x].
+
+    # Save updated image data to otherwise identical FITS files with new names:
+    for i, filename in enumerate(df['Filename']):
+        fn, ext = os.path.splitext(filename)
+        fn_new = fn + '_Added' + ext  # e.g., 'MP_191-0001-Clear_Added.fts'
+        hdu_list[i].writeto(os.path.join(TEST_FITS_DIR, fn_new))
 
 
 DETRITUS________________________________________ = 0
