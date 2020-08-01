@@ -79,6 +79,7 @@ def first_crop(top_directory=DEFAULT_TOP_DIRECTORY, mp_xy1=None, mp_xy2=None,
 
 
 def align_maxim(df_fits):
+    # TODO: replace this with some astropy alignment, in 2 stages: (1) approx w/WCS, (2) refine w/centroids.
     import win32com.client
     app = win32com.client.Dispatch('MaxIm.Application')
     fullpaths = [os.path.join(DEFAULT_TOP_DIRECTORY, CROPPED_FITS_SUBDIRECTORY, name)
