@@ -1,6 +1,6 @@
 # Python core packages:
 import os
-from math import cos, pi, log10, log, floor, ceil, sqrt
+from math import cos, pi, log10, log, floor, ceil, sqrt, sin
 from collections import Counter
 from datetime import datetime, timezone
 # from statistics import pstdev, mean
@@ -13,6 +13,12 @@ import matplotlib.ticker as ticker
 import statsmodels.formula.api as smf
 # import statsmodels.api as sm
 from scipy.stats import norm
+from astropy.nddata import CCDData  # TODO: for temporary testing only / 20200812.
+from astropy.coordinates import SkyCoord
+from astropy.time import Time
+from astropy import units as u
+from astroplan import Observer, FixedTarget
+# import ephem
 
 # From this (mpc) package:
 from mpc.catalogs import Refcat2, get_bounding_ra_dec
@@ -344,6 +350,14 @@ def make_dfs():
     log_file.write('\n===== make_dfs()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
+    # Read user's MP *pixel* location in each of 2 images, from control file:
+    # (Putting this near top of fn, to save time if something wrong with control.txt.)
+    mp_location_filenames, x_pixels, y_pixels = read_mp_locations()
+    if mp_location_filenames is None:
+        print(' >>>>> ' + CONTROL_FILENAME + ': something wrong with #MP lines. Stopping.')
+        log_file.write(' >>>>> ' + CONTROL_FILENAME + ': something wrong with #MP lines. Stopping.\n')
+        return None
+
     # Get all relevant FITS filenames, make lists of FITS objects and Image objects:
     fits_names = get_fits_filenames(this_directory)
     fits_list = [FITS(this_directory, '', fits_name) for fits_name in fits_names]  # list of FITS objects
@@ -391,20 +405,12 @@ def make_dfs():
     # Add apertures for all comps within all Image objects:
     df_radec = refcat2.selected_columns(['RA_deg', 'Dec_deg'])
     for image in image_list:
-        # if image.fits.filter in [MP_PHOTOMETRY_FILTER] + list(DEFAULT_FILTERS_FOR_MP_COLOR_INDEX):
         for i_comp in df_radec.index:
             ra = df_radec.loc[i_comp, 'RA_deg']
             dec = df_radec.loc[i_comp, 'Dec_deg']
             x0, y0 = image.fits.xy_from_radec(RaDec(ra, dec))
             image.add_aperture(str(i_comp), x0, y0)
         print(image.fits.filename + ':', str(len(image.apertures)), 'comp apertures.')
-
-    # Read user's MP *pixel* location in each of 2 images, from control file:
-    mp_location_filenames, x_pixels, y_pixels = read_mp_locations()
-    if mp_location_filenames is None:
-        print(' >>>>> ' + CONTROL_FILENAME + ': something wrong with #MP lines. Stopping.')
-        log_file.write(' >>>>> ' + CONTROL_FILENAME + ': something wrong with #MP lines. Stopping.\n')
-        exit(1)
 
     # Extract MP *RA,Dec* positions from the 2 images:
     # FITS objects in next line are temporary only.
@@ -535,6 +541,34 @@ def make_dfs():
     df_images.sort_values(by='JD_mid')
     df_images = reorder_df_columns(df_images, ['FITSfile', 'JD_mid', 'Filter', 'Exposure', 'Airmass'])
     print('   ' + str(len(df_images)) + ' images retained.')
+
+    # Calculate *per-observation* airmass, add column ObsAirmass to df_obs:
+    site_data = DSW_SITE_DATA
+    observer = Observer(longitude=site_data['longitude'] * u.deg,
+                        latitude=site_data['latitude'] * u.deg,
+                        elevation=2210 * u.m, name='DSW')
+    df_obs['ObsAirmass'] = None
+    for im in df_images.index:
+        time = Time(df_images.loc[im, 'JD_mid'], format='jd')
+        altaz_frame = observer.altaz(time)
+        indices = list(df_obs.loc[df_obs['FITSfile'] == im].index)
+        # >>> Add ObsAirmass for this image's comp stars:
+        comp_indices = [idx for idx in indices if df_obs.loc[idx, 'Type'] == 'Comp']
+        source_ids = df_obs.loc[comp_indices, 'SourceID']
+        ra_list = df_comps.loc[source_ids, 'RA_deg']
+        dec_list = df_comps.loc[source_ids, 'Dec_deg']
+        skycoord_list = [make_skycoord(ra, dec) for (ra, dec) in zip(ra_list, dec_list)]
+        alt_list = [skycoord.transform_to(altaz_frame).alt.value for skycoord in skycoord_list]
+        airmass_list = [1.0 / sin(alt / DEGREES_PER_RADIAN) for alt in alt_list]
+        df_obs.loc[comp_indices, 'ObsAirmass'] = airmass_list
+        # >>> Add ObsAirmass for this image's MP:
+        ra, dec = mp_radec_dict[im]
+        skycoord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg)
+        alt = skycoord.transform_to(altaz_frame).alt.value
+        airmass = 1.0 / sin(alt / DEGREES_PER_RADIAN)
+        mp_index = [idx for idx in indices if df_obs.loc[idx, 'Type'] == 'MP'][0]
+        df_obs.loc[mp_index, 'ObsAirmass'] = airmass
+        print('ObsAirmass done for', im)
 
     # Write df_obs to CSV file (rather than returning the df):
     fullpath_df_obs_all = os.path.join(this_directory, DF_OBS_ALL_FILENAME)
@@ -921,13 +955,20 @@ class SessionModel:
             print(' >>>>> WARNING: _prep_and_do_regression() cannot interpret #FIT_TRANSFORM choice.')
 
         # Build all other fixed-effect (x) variable lists and dep-var offsets:
-        if self.fit_extinction:
-            fixed_effect_var_list.append('Airmass')
+        if self.fit_extinction == True:
+            fixed_effect_var_list.append('ObsAirmass')
         else:
             extinction = self.state['extinction'][self.fits_filter]
-            dep_var_offset += extinction * self.df_used_comps_only['Airmass']
-            print(' Extinction (Airmass) not fit: value fixed at',
+            dep_var_offset += extinction * self.df_used_comps_only['ObsAirmass']
+            print(' Extinction (ObsAirmass) not fit: value fixed at',
                   '{0:.3f}'.format(extinction))
+        # if self.fit_extinction:
+        #     fixed_effect_var_list.append('Airmass')
+        # else:
+        #     extinction = self.state['extinction'][self.fits_filter]
+        #     dep_var_offset += extinction * self.df_used_comps_only['Airmass']
+        #     print(' Extinction (Airmass) not fit: value fixed at',
+        #           '{0:.3f}'.format(extinction))
         if self.fit_vignette:
             fixed_effect_var_list.append('Vignette')
         if self.fit_xy:
@@ -980,7 +1021,8 @@ class SessionModel:
         if self.fit_transform is False:
             dep_var_offsets += self.transform_fixed * self.df_used_mps_only['CI']
         if self.fit_extinction is False:
-            dep_var_offsets += self.state['extinction'][self.fits_filter] * self.df_used_mps_only['Airmass']
+            dep_var_offsets += self.state['extinction'][self.fits_filter] * \
+                               self.df_used_mps_only['ObsAirmass']
 
         # Extract best MP mag (in Sloan r):
         mp_mags = self.df_used_mps_only['InstMag'] \
@@ -1126,10 +1168,10 @@ def make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_sele
                    x_data=df_plot_comp_obs['JD_fract'], y_data=1000.0 * df_plot_comp_obs['InstMagSigma'],
                    jd_locators=True)
 
-    # Airmass plot (comps only, one point per obs; x=JD_fract, y=Airmass):
+    # Obs.Airmass plot (comps only, one point per obs; x=JD_fract, y=Airmass):
     ax = axes[2, 1]
-    make_9_subplot(ax, 'Airmass vs time', xlabel_jd, 'Airmass', '', False,
-                   x_data=df_plot_comp_obs['JD_fract'], y_data=df_plot_comp_obs['Airmass'],
+    make_9_subplot(ax, 'Obs.Airmass vs time', xlabel_jd, 'Obs.Airmass', '', False,
+                   x_data=df_plot_comp_obs['JD_fract'], y_data=df_plot_comp_obs['ObsAirmass'],
                    jd_locators=True)
 
     # Session Lightcurve plot (comps only, one point per obs; x=JD_fract, y=MP best magnitude):
@@ -1537,9 +1579,9 @@ def read_regression_options(filename):
             if content.startswith(target_key):
                 value = content[len(target_key):].strip().lower()
                 this_value = None
-                if value == 'yes':
+                if value in ['yes', 'true']:
                     this_value = True
-                if value in 'no':
+                if value in ['no', 'false']:
                     this_value = False
                 if target_key == '#FIT_TRANSFORM':  # extra options for FIT_TRANSFORM.
                     if value in ['fit=1', 'fit=2']:
@@ -2077,6 +2119,58 @@ def apply_do_phot_selections(df_model, user_selections):
                            | deselect_for_low_sloan_ri_color | deselect_for_high_sloan_ri_color)
     df_model['UseInModel'] = True
     df_model.loc[obs_to_deselect, ['UseInModel']] = False
+
+
+    # def az_alt_at_datetime_utc(longitude, latitude, target_radec, datetime_utc):
+    #     obs = ephem.Observer()  # for local use.
+    #     if isinstance(longitude, str):
+    #         obs.lon = longitude
+    #     else:
+    #         # next line wrong?: if string should be in deg not radians?? (masked by long passed as hex string?)
+    #         obs.lon = str(longitude * pi / 180)
+    #     if isinstance(latitude, str):
+    #         obs.lat = latitude
+    #     else:
+    #         # next line wrong?: if string should be in deg not radians?? (masked by long passed as hex string?)
+    #         obs.lat = str(latitude * pi / 180)
+    #     obs.date = datetime_utc
+    #     target_ephem = ephem.FixedBody()  # so named to suggest restricting its use to ephem.
+    #     target_ephem._epoch = '2000'
+    #     target_ephem._ra, target_ephem._dec = target_radec.as_hex  # text: RA in hours, Dec in deg
+    #     target_ephem.compute(obs)
+    #     return target_ephem.az * 180 / pi, target_ephem.alt * 180 / pi
+
+
+from functools import lru_cache
+@lru_cache(maxsize=800)
+def make_skycoord(ra_deg, dec_deg):
+    return SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+
+
+_____TEST_AND_PROTOTYPE_temporary______________________________________ = 0
+
+
+def t():
+    """ Try astroplan package. """
+    from astropy.coordinates import SkyCoord
+    from astropy.time import Time
+    from astropy import units as u
+    from astroplan import Observer, FixedTarget
+
+    dsw = Observer(longitude=DSW_SITE_DATA['longitude'] * u.deg,
+                   latitude=DSW_SITE_DATA['latitude'] * u.deg,
+                   elevation=2210 * u.m, name='DSW')
+
+    jd = 2459018.676703 + 67 / 24 / 3600  # end JD!
+    utc = datetime_utc_from_jd(jd)
+    time = Time(jd, format='jd')
+
+    coord = SkyCoord(ra=267.529167 * u.deg, dec=-6.953611 * u.deg)
+    target = FixedTarget(name='6077', coord=coord)
+
+    altaz = dsw.altaz(time, coord)
+    airmass = 1.0 / sin(altaz.alt.value / DEGREES_PER_RADIAN)
+    iiii = 4
 
 
 # def sync_comps_and_images(df_all_columns, df_comps, df_images):

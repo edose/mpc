@@ -9,6 +9,9 @@ import pandas as pd
 # from astroquery.mpc import MPC
 import requests
 from bs4 import BeautifulSoup
+
+import matplotlib
+# matplotlib.use('Agg')  # Place before importing matplotlib.pyplot or pylab.
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import matplotlib.patches as patches
@@ -36,6 +39,7 @@ EXP_TIME_TABLE_PHOTOMETRY = [(13, 60), (14, 80), (15, 160), (16, 300), (17, 600)
 EXP_OVERHEAD = 20  # Nominal exposure overhead, in seconds.
 COV_RESOLUTION_MINUTES = 5  # min. coverage plot resolution, in minutes.
 MAX_V_MAGNITUDE_DEFAULT = 18  # to ensure ridiculously faint MPs don't get into planning & plots.
+MAX_EXP_TIME_NO_GUIDING = 119
 
 MPFILE_DIRECTORY = 'C:/Dev/Photometry/MPfile'
 ACP_PLANNING_TOP_DIRECTORY = 'C:/Astro/ACP'
@@ -47,7 +51,8 @@ FOR_PLANNING_____________________________________________________________ = 0
 
 
 def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
-                   min_hours=MIN_HOURS_OBSERVABLE, max_vmag=MAX_V_MAGNITUDE_DEFAULT):
+                   min_hours=MIN_HOURS_OBSERVABLE, max_vmag=MAX_V_MAGNITUDE_DEFAULT,
+                   plots_to_console=False):
     """ Main planning workflow for MP photometry. Requires a
     :param an_string: Astronight, e.g. 20200201 [string or int]
     :param site_name: name of site for Site object. [string]
@@ -68,9 +73,21 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
                                    ' ' + df_an_table.loc[i, 'MPname'] +
                                    ' has gone low in the west, probably should archive the MPfile.')
 
-    # Remove too-faint MPs:
+    # Warn of, then remove too-faint MPs:
     bright_enough = [vmag <= max_vmag for vmag in df_an_table['V_mag']]
     mps_to_keep = bright_enough
+    mps_too_faint = df_an_table.loc[[not be for be in bright_enough], :]
+    if len(mps_too_faint) > 0:
+        print(' >>>>> WARNING: MPs fainter than V', str(max_vmag), 'and thus excluded:')
+        for i in mps_too_faint.index:
+            transitUTC = df_an_table.loc[i, 'TransitUTC']
+            if not np.isnan(transitUTC.day):
+                print('      ',
+                      'V=' + '{:5.2f}'.format(df_an_table.loc[i, 'V_mag']),
+                      'transit=' + hhmm_from_datetime_utc(transitUTC),
+                      df_an_table.loc[i, 'MPnumber'].rjust(7),
+                      df_an_table.loc[i, 'MPname'])
+        print()
     df_an_table = df_an_table.loc[mps_to_keep, :]
     if df_an_table is None:
         print('No MPs observable for AN', an_string + '.')
@@ -99,13 +116,25 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
                                duty_cycle_string,
                                period_string,
                                '  ' + df.loc[i, 'PhotrixPlanning']]
+        if df.loc[i, 'ExpTime'] <= MAX_EXP_TIME_NO_GUIDING:
+            table_line_elements.append(' AG+')
         table_lines.append(' '.join(table_line_elements))
     print('\n'.join(table_lines))
     print('\n'.join(gone_west_lines))
 
-    # Make ACP AN directory if doesn't exist, write text file to it:
+    # Make ACP AN directory if doesn't exist:
     text_file_directory = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string)
     os.makedirs(text_file_directory, exist_ok=True)
+
+    # Delete previous plot and text files, if any:
+    image_filenames = [f for f in os.listdir(text_file_directory) if f.endswith('.png')]
+    for f in image_filenames:
+        os.remove(os.path.join(text_file_directory, f))
+    table_filenames = [f for f in os.listdir(text_file_directory) if f.startswith('MP_table_')]
+    for f in table_filenames:
+        os.remove(os.path.join(text_file_directory, f))
+
+    # Write text file:
     text_filename = 'MP_table_' + an_string + '.txt'
     text_file_fullpath = os.path.join(text_file_directory, text_filename)
     with open(text_file_fullpath, 'w') as this_file:
@@ -115,7 +144,7 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
     # Display plots; also write to PNG files:
     is_to_plot = [status.lower() == 'ok' for status in df_an_table['Status']]
     df_for_plots = df_an_table.loc[is_to_plot]
-    make_coverage_plots(an_string, site_name, df_for_plots)
+    make_coverage_plots(an_string, site_name, df_for_plots, plots_to_console)
 
 
 def make_roster_one_class(month_string='202007', mp_family='MC'):
@@ -288,11 +317,12 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
     return df_an_table
 
 
-def make_coverage_plots(an_string, site_name, df_an_table):
+def make_coverage_plots(an_string, site_name, df_an_table, plots_to_console):
     """ Make Nobs-vs-UTC plots, one per MP, i.e., plots of phase coverage by previous nights' observations.
     :param an_string: Astronight, e.g. 20200201 [string or int]
     :param site_name: name of site for Site object. [string]
     :param df_an_table: the master planning table for one Astronight [pandas DataFrame].
+    :param plots_to_console: True iff plots desired to be sent to console, False for file safe only. [bool]
     :return: [None] (makes plots 3 x 3 per Figure/page).
     """
     # Nested functions:
@@ -455,7 +485,7 @@ def make_coverage_plots(an_string, site_name, df_an_table):
                 ax.remove()
                 ax_p = axes_p[i_row, i_col]
                 ax_p.remove()
-            plt.show()
+                # plt.show()
 
             # Save HOURLY coverage plots:
             filename = 'MP_hourly_coverage_' + an_string + '_{0:02d}'.format(i_figure + 1) + '.png'

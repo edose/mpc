@@ -43,7 +43,15 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 #          Going well.
 #
 # ##############################################################################
-
+#
+# August 3: WORK IS STOPPING ON THIS FILE.
+#           This is good news. Everything is being ported and rewritten in
+#           an entirely new repository "mp_phot" (private now, public later),
+#           planned to be a better implementation of this Bulldozer algorithm.
+#           Hope is that this will become my ONLY MP photometry workflow
+#           by October 2020. Cheers!
+#
+# ##############################################################################
 import os
 from math import sqrt, log, floor, ceil
 
@@ -86,7 +94,8 @@ AP_PHOT_RADIUS_PER_SIGMA = 3
 EDGE_PIXELS_REGRESSION = 5
 MAX_LOOP_ITERATIONS = 3
 MAX_FOR_CONVERGENCE = 0.025  # in pixels, root-mean-square-deviation.
-CCD_GAIN = 1.57  # electrons per pixel
+CCD_GAIN = 1.57  # electrons per ADU
+
 
 # SOURCE_MATCH_TOLERANCE = 2  # distance in pixels
 
@@ -775,7 +784,7 @@ def mask_mp_from_current_subarrays(df_bd, target_sigma):
         mp_x0, mp_y0 = df_bd.iloc[i]['MP_XY0_current']
         mp_masked_subarray.mask = np.fromfunction(lambda i, j:
                                                   ((j - mp_x0)**2 + (i - mp_y0)**2) <= mp_mask_radius**2,
-                                                  shape=mp_masked_subarray.data.shape)
+                                                  shape=mp_masked_subarray.data.shape)  # True masks out px.
         mp_masked_subarrays.append(mp_masked_subarray)
     df_bd['Subarray_masked'] = mp_masked_subarrays
     # plot_images('Subarray masks', df_bd['Filename'], [ar.mask for ar in df_bd['Subarray_masked']])
