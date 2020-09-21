@@ -474,6 +474,9 @@ def make_dfs():
                                      'sky_bias': 'SkyBias'},
                             inplace=True)
 
+        if image.fits.filename == 'MP_424-0038-Clear.fts':
+            iiii = 4
+
         # Remove apertures with no flux or with saturated pixel(s):
         has_positive_flux = df_apertures['net_flux'] > 0.0
         df_apertures = df_apertures.loc[has_positive_flux, :]
@@ -542,6 +545,30 @@ def make_dfs():
     df_images = reorder_df_columns(df_images, ['FITSfile', 'JD_mid', 'Filter', 'Exposure', 'Airmass'])
     print('   ' + str(len(df_images)) + ' images retained.')
 
+    # Remove from all 3 dataframes all reference to images with: missing MP flux, or no comps:
+    # Nested function:
+    def remove_image_rows(filename, df_images, df_obs):
+        df_images_rows_to_keep = list(df_images.index != filename)
+        df_images = df_images.loc[df_images_rows_to_keep, :]
+        df_obs_rows_to_keep = [(fn != filename) for fn in df_obs['FITSfile']]
+        df_obs = df_obs.loc[df_obs_rows_to_keep, :]
+        return df_images, df_obs
+    # Do the removal:
+    for im in df_images.index:
+        indices = list(df_obs.loc[df_obs['FITSfile'] == im].index)
+        try:
+            mp_index = [idx for idx in indices if df_obs.loc[idx, 'Type'] == 'MP'][0]
+        except IndexError:
+            mp_index = None
+            df_images, df_obs = remove_image_rows(im, df_images, df_obs)
+            print(' >>>>> WARNING: image', im, 'removed for absence of valid MP.')
+            continue  # that's all we do for this image.
+        im_comps = [idx for idx in indices if df_obs.loc[idx, 'Type'] == 'Comp']
+        if len(im_comps) <= 0:
+            df_images, df_obs = remove_image_rows(im, df_images, df_obs)
+            print(' >>>>> WARNING: image', im, 'removed for absence of any valid comps.')
+            continue
+
     # Calculate *per-observation* airmass, add column ObsAirmass to df_obs:
     site_data = DSW_SITE_DATA
     observer = Observer(longitude=site_data['longitude'] * u.deg,
@@ -566,7 +593,10 @@ def make_dfs():
         skycoord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg)
         alt = skycoord.transform_to(altaz_frame).alt.value
         airmass = 1.0 / sin(alt / DEGREES_PER_RADIAN)
-        mp_index = [idx for idx in indices if df_obs.loc[idx, 'Type'] == 'MP'][0]
+        try:
+            mp_index = [idx for idx in indices if df_obs.loc[idx, 'Type'] == 'MP'][0]
+        except IndexError:
+            iiii = 4
         df_obs.loc[mp_index, 'ObsAirmass'] = airmass
         print('ObsAirmass done for', im)
 
@@ -860,7 +890,8 @@ def do_mp_phot(fits_filter='Clear'):
 
     write_canopus_file(model)
     write_alcdef_file(model, mp_color_ri, source_string_ri)
-    model_jds = df_model['JD_mid']
+    # model_jds = df_model['JD_mid']
+    model_jds = model.df_mp_mags['JD_mid']
     print(' >>>>> Please add this line to MPfile', mp_string + ':',
           '  #OBS', '{0:.5f}'.format(model_jds.min()), ' {0:.5f}'.format(model_jds.max()),
           ' ;', an_string)
@@ -926,12 +957,14 @@ class SessionModel:
 
         fixed_effect_var_list = []
 
-        # Handle transform options separately here:
+        # Handle transform (Color Index) options separately here:
+        fit_transform_handled = False  # default, to be set to True when handled.
         if self.fit_transform == True:
             self.fit_transform = 'fit=1'  # convert True to first-order fit.
+            fit_transform_handled = True
         elif self.fit_transform == False:
             self.fit_transform = ['use', '0', '0']  # convert False to exclusion of color index (rare).
-        fit_transform_handled = False  # default to be overwritten when handled.
+            fit_transform_handled = True
         if self.fit_transform == 'fit=1':
             fixed_effect_var_list.append('CI')
             fit_transform_handled = True
@@ -945,7 +978,7 @@ class SessionModel:
                     transform_1 = float(self.fit_transform[1])
                     transform_2 = float(self.fit_transform[2])
                 except ValueError:
-                    raise ValueError('#FIT_TRANSFORM use values cannot be converted to float values.')
+                    raise ValueError('#FIT_TRANSFORM use value(s) cannot be converted to float value(s).')
                 dep_var_offset += transform_1 * self.df_used_comps_only['CI'] +\
                     transform_2 * self.df_used_comps_only['CI2']
                 print(' Transform (Color Index) not fit: 1st, 2nd order values fixed at',
@@ -954,21 +987,31 @@ class SessionModel:
         if not fit_transform_handled:
             print(' >>>>> WARNING: _prep_and_do_regression() cannot interpret #FIT_TRANSFORM choice.')
 
-        # Build all other fixed-effect (x) variable lists and dep-var offsets:
+        # Handle extinction (ObsAirmass) options separately here:
+        fit_extinction_handled = False    # default, to be set to True when handled.
         if self.fit_extinction == True:
             fixed_effect_var_list.append('ObsAirmass')
-        else:
+            fit_extinction_handled = True
+        if self.fit_extinction == False:
             extinction = self.state['extinction'][self.fits_filter]
             dep_var_offset += extinction * self.df_used_comps_only['ObsAirmass']
-            print(' Extinction (ObsAirmass) not fit: value fixed at',
+            print(' Extinction (ObsAirmass) not fit: value fixed at default of',
                   '{0:.3f}'.format(extinction))
-        # if self.fit_extinction:
-        #     fixed_effect_var_list.append('Airmass')
-        # else:
-        #     extinction = self.state['extinction'][self.fits_filter]
-        #     dep_var_offset += extinction * self.df_used_comps_only['Airmass']
-        #     print(' Extinction (Airmass) not fit: value fixed at',
-        #           '{0:.3f}'.format(extinction))
+            fit_extinction_handled = True
+        if isinstance(self.fit_extinction, list):
+            if self.fit_extinction[0] == 'use':
+                try:
+                    extinction = float(self.fit_extinction[1])
+                except ValueError:
+                    raise ValueError('#FIT_EXTINCTION use value cannot be converted to float value.')
+                dep_var_offset += extinction * self.df_used_comps_only['ObsAirmass']
+                print(' Extinction (ObsAirmass) not fit: value fixed at control.txt value of',
+                      '{0:.3f}'.format(extinction))
+                fit_extinction_handled = True
+        if not fit_extinction_handled:
+            print(' >>>>> WARNING: _prep_and_do_regression() cannot interpret #FIT_EXTINCTION choice.')
+
+        # Build all other fixed-effect (x) variable lists and dep-var offsets:
         if self.fit_vignette:
             fixed_effect_var_list.append('Vignette')
         if self.fit_xy:
@@ -1005,6 +1048,10 @@ class SessionModel:
                                     fixed_vars=fixed_effect_var_list,
                                     group_var=random_effect_var_name)
         print(self.mm_fit.statsmodels_object.summary())
+        write_text_file('fit_summary.txt',
+                        'Regression for directory ' + get_context()[0] + '\n\n' +
+                        self.mm_fit.statsmodels_object.summary().as_text() +
+                        '\n\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
         print('sigma =', '{0:.1f}'.format(1000.0 * self.mm_fit.sigma), 'mMag.')
         if not self.mm_fit.converged:
             print(' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.')
@@ -1267,6 +1314,13 @@ def make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_sele
     # Make df_offsets (one row per obs, at first with only raw offsets):
     make_comp_variability_plots(df_plot_comp_obs, xlabel_jd, transform, sigma,
                                 image_prefix=SESSION_IMAGE_PREFIX)
+
+
+def write_text_file(filename, lines):
+    this_directory, mp_string, an_string = get_context()
+    fullpath = os.path.join(this_directory, filename)
+    with open(fullpath, 'w') as f:
+        f.write(lines)
 
 
 def write_canopus_file(model):
@@ -1583,11 +1637,17 @@ def read_regression_options(filename):
                     this_value = True
                 if value in ['no', 'false']:
                     this_value = False
-                if target_key == '#FIT_TRANSFORM':  # extra options for FIT_TRANSFORM.
+                # Extended options for FIT_TRANSFORM (esp. 'Use'):
+                if target_key == '#FIT_TRANSFORM':
                     if value in ['fit=1', 'fit=2']:
                         this_value = value
                     if value.startswith('use '):
                         if len(value.split()) == 3:
+                            this_value = value.split()
+                # Extended options for FIT_EXTINCTION (i.e., 'Use'):
+                if target_key == '#FIT_EXTINCTION':
+                    if value.startswith('use '):
+                        if len(value.split()) == 2:
                             this_value = value.split()
                 if this_value is None:
                     print(' >>>>> WARNING:', filename, target_key, 'value not understood.')
@@ -1949,14 +2009,18 @@ def write_control_txt_stub(this_directory, log_file, df):
              ';',
              ';===== REGRESSION OPTIONS BLOCK =====================================',
              ';===== Enter before do_mp_phot(): ===================================',
-             ';----- OPTIONS for regression model, rarely used:',
+             ';----- OPTIONS for regression model:',
 
              ';Choices for #FIT_TRANSFORM: Fit=1; '
              + 'Fit=2; Use 0.2 0.4 [=tr1 & tr2 values]; Yes->Fit=1; No->Use 0 0',
              ';#FIT_TRANSFORM  Fit=2'.ljust(30) + '; default= Fit=2',
+
+             ';Choices for #FIT_EXTINCTION: Yes->do fit; No->use default extinction;'
+             + ' Use +0.34-> use this value ',
              (';#FIT_EXTINCTION ' + yes_no(DEFAULT_MODEL_OPTIONS['fit_extinction'])).ljust(30) +
              '; default='
              + yes_no(DEFAULT_MODEL_OPTIONS['fit_extinction']) + ' // choose Yes or No  (case-insensitive)',
+
              (';#FIT_VIGNETTE ' + yes_no(DEFAULT_MODEL_OPTIONS['fit_vignette'])).ljust(30) + '; default='
              + yes_no(DEFAULT_MODEL_OPTIONS['fit_vignette']) + ' // choose Yes or No  (case-insensitive)',
              (';#FIT_XY ' + yes_no(DEFAULT_MODEL_OPTIONS['fit_xy'])).ljust(30) + '; default='
@@ -2150,27 +2214,27 @@ def make_skycoord(ra_deg, dec_deg):
 _____TEST_AND_PROTOTYPE_temporary______________________________________ = 0
 
 
-def t():
-    """ Try astroplan package. """
-    from astropy.coordinates import SkyCoord
-    from astropy.time import Time
-    from astropy import units as u
-    from astroplan import Observer, FixedTarget
-
-    dsw = Observer(longitude=DSW_SITE_DATA['longitude'] * u.deg,
-                   latitude=DSW_SITE_DATA['latitude'] * u.deg,
-                   elevation=2210 * u.m, name='DSW')
-
-    jd = 2459018.676703 + 67 / 24 / 3600  # end JD!
-    utc = datetime_utc_from_jd(jd)
-    time = Time(jd, format='jd')
-
-    coord = SkyCoord(ra=267.529167 * u.deg, dec=-6.953611 * u.deg)
-    target = FixedTarget(name='6077', coord=coord)
-
-    altaz = dsw.altaz(time, coord)
-    airmass = 1.0 / sin(altaz.alt.value / DEGREES_PER_RADIAN)
-    iiii = 4
+# def t():
+#     """ Try astroplan package. """
+#     from astropy.coordinates import SkyCoord
+#     from astropy.time import Time
+#     from astropy import units as u
+#     from astroplan import Observer, FixedTarget
+#
+#     dsw = Observer(longitude=DSW_SITE_DATA['longitude'] * u.deg,
+#                    latitude=DSW_SITE_DATA['latitude'] * u.deg,
+#                    elevation=2210 * u.m, name='DSW')
+#
+#     jd = 2459018.676703 + 67 / 24 / 3600  # end JD!
+#     utc = datetime_utc_from_jd(jd)
+#     time = Time(jd, format='jd')
+#
+#     coord = SkyCoord(ra=267.529167 * u.deg, dec=-6.953611 * u.deg)
+#     target = FixedTarget(name='6077', coord=coord)
+#
+#     altaz = dsw.altaz(time, coord)
+#     airmass = 1.0 / sin(altaz.alt.value / DEGREES_PER_RADIAN)
+#     iiii = 4
 
 
 # def sync_comps_and_images(df_all_columns, df_comps, df_images):
