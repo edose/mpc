@@ -1,5 +1,8 @@
 __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
+# THIS ENDED UP GETTING SUPERSEDED summer 2020 BY the BULLDOZER APPROACH.
+# THIS FILE NOW OF DOUBTFUL VALUE.
+
 import os
 import shutil
 from datetime import datetime, timezone, timedelta

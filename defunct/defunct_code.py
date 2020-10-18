@@ -1,4 +1,361 @@
-__author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"# _____TRANSFORM_DETERMINATION_______________________________________________ = 0
+__author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"# *********************************************************************************************
+# *********************************************************************************************
+# *********************************************************************************************
+# ***********  the following comprises EXAMPLE WORKFLOW (which works fine) from early Nov 2019:
+#
+# class DataCamera:
+#     def __init__(self):
+#         # All transforms use V-I as color index.
+#         self.filter_dict = \
+#             {'V': {'z': -20.50, 'extinction': 0.18, 'transform': {'passband': 'V', 'value': -0.0149}},
+#              'R': {'z': -20.35, 'extinction': 0.12, 'transform': {'passband': 'R', 'value': +0.0513}},
+#              'I': {'z': -20.15, 'extinction': 0.09, 'transform': {'passband': 'I', 'value' : 0.0494}},
+#              'Clear': {'z': -21.5, 'extinction': 0.14, 'transform': {'passband': 'R', 'value': +0.133}}
+#              }
+#
+#     def instmag(self, target, image):
+#         """
+#         Returns instrument magnitude for one source in one image.
+#         :param target: astronomical photon source (star or MP) [DataStandard object].
+#         :param image: represents one image and its assoc. data [DataImage object].
+#         :return:
+#         """
+#         passband = self.filter_dict[image.filter]['transform']['passband']
+#         catalog_mag = target.mag(passband)
+#         zero_point = self.filter_dict[image.filter]['z']
+#         corrections = self.calc_corrections(target, image)
+#         instrument_magnitude = catalog_mag + zero_point + corrections
+#         return instrument_magnitude
+#
+#     def solve_for_z(self, instmag, target, image):
+#         # Requires catalog data. Not for unknowns.
+#         corrections = self.calc_corrections(target, image)
+#         z = instmag - target.mag(image.filter) - corrections
+#         return z
+#
+#     def solve_for_best_mag(self, instmag, target, image):
+#         # Requires catalog data. Not for unknowns.
+#         corrections = self.calc_corrections(target, image)
+#         zero_point = self.filter_dict[image.filter]['z']
+#         best_mag = instmag - corrections - zero_point
+#         return best_mag
+#
+#     def calc_corrections(self, target, image):
+#         """ Includes corrections from cat mag to experimental image, *excluding* zero-point. """
+#         # Requires catalog data. Not for unknowns.
+#         filter_info = self.filter_dict[image.filter]
+#         transform_value = filter_info['transform']['value']
+#         extinction = filter_info['extinction']
+#         color_index = target.mag(passband='V') - target.mag(passband='I')  # color index always in V-I
+#         corrections = image.delta + extinction * image.airmass + transform_value * color_index
+#         return corrections
+#
+#     def make_image(self, filter, target_list, airmass, delta=0.0):
+#         # Factory method for DataImage object. Includes no catalog data (thus OK for unknowns).
+#         image = DataImage(self, filter, airmass, delta)
+#         for target in target_list:
+#             image.obs_dict[target.name] = self.instmag(target, image)
+#         return image
+#
+#     def extract_color_index_value(self, untransformed_best_mag_v, untransformed_best_mag_i):
+#         color_index_value = (untransformed_best_mag_v - untransformed_best_mag_i) / \
+#                             (1.0 + self.filter_dict['V']['transform']['value'] -
+#                              self.filter_dict['I']['transform']['value'])
+#         return color_index_value
+#
+#     def __str__(self):
+#         return 'DataCamera object'
+#
+#     def __repr__(self):
+#         return 'DataCamera object'
+#
+#
+# class DataStandard:
+#     def __init__(self, name, mag_dict):
+#         self.name = name
+#         self.mag_dict = mag_dict
+#
+#     def mag(self, passband):
+#         return self.mag_dict.get(passband)
+#
+#     def __str__(self):
+#         return 'DataStandard ' + self.name
+#
+#     def __repr__(self):
+#         return 'DataStandard ' + self.name
+#
+#
+# class DataTarget:
+#     def __init__(self, name, mag_dict):
+#         self.name = name
+#         self.mag_dict = mag_dict
+#
+#     def mag(self, passband):
+#         return self.mag_dict.get(passband)
+#
+#     def __str__(self):
+#         return 'DataTarget ' + self.name
+#
+#     def __repr__(self):
+#         return 'DataTarget ' + self.name
+#
+#
+# class DataImage:
+#     # Includes NO catalog data (thus OK for unknowns).
+#     def __init__(self, camera, filter, airmass, delta=0.0):
+#         self.camera = camera
+#         self.filter = filter
+#         self.airmass = airmass
+#         self.delta = delta
+#         self.obs_dict = dict()  # {target_name: instmag, ...}
+#
+#     def untransformed_best_mag(self, target_name, delta=None):
+#         instmag = self.obs_dict[target_name]
+#         zero_point = self.camera.filter_dict[self.filter]['z']
+#         if delta is None:
+#             this_delta = self.delta  # for constructing and testing images.
+#         else:
+#             this_delta = delta  # set to zero if delta is unknown (obs images).
+#         extinction = self.camera.filter_dict[self.filter]['extinction']
+#         airmass = self.airmass
+#         this_mag = instmag - zero_point - this_delta - extinction * airmass
+#         return this_mag
+#
+#     def __str__(self):
+#         return 'DataImage object'
+#
+#     def __repr__(self):
+#         return 'DataImage object'
+#
+
+
+# def example_workflow():
+#     """ Try out new MP photometric reduction process. """
+#     cam = DataCamera()
+#
+#     # ============= DataStandard images: =============
+#     stds = [DataStandard('std1', {'V': 12.2, 'R': 12.6, 'I': 12.95}),
+#             DataStandard('std2', {'V': 12.5, 'R': 12.7, 'I': 12.9}),
+#             DataStandard('std3', {'V': 12.88, 'R': 13.22, 'I': 13.5})]
+#     std_instmags = dict()
+#     std_images = {'V': cam.make_image('V', stds, 1.5, 0),
+#                   'R': cam.make_image('R', stds, 1.52, 0),
+#                   'I': cam.make_image('I', stds, 1.538, 0)}
+#
+#     for this_filter in std_images.keys():
+#         std_instmags[this_filter] = [cam.instmag(std, std_images[this_filter]) for std in stds]
+#
+#     # Test for consistency:
+#     # for this_filter in std_instmags.keys():
+#     #     instmag_list = std_instmags[this_filter]
+#     #     for instmag, std in zip(instmag_list, stds):
+#     #         print(cam.solve_for_z(instmag, std, std_images[this_filter]),
+#     #         cam.filter_dict[this_filter]['z'])
+#
+#     # Test by back-calculating best (catalog) mags:
+#     # for this_filter in std_instmags.keys():
+#     #     instmag_list = std_instmags[this_filter]
+#     #     for instmag, std in zip(instmag_list, stds):
+#     #         print(std.name, this_filter, cam.solve_for_best_mag(instmag, std, std_images[this_filter]))
+#
+#     # Test untransformed and transformed best mags from images (no ref to catalog mags):
+#     # for this_filter in std_instmags.keys():
+#     #     std_image = std_images[this_filter]
+#     #     for this_std in stds:
+#     #         cat_mag = this_std.mag(this_filter)
+#     #         std_name = this_std.name
+#     #         untr_best_mag = std_image.untransformed_best_mag(std_name)
+#     #         print(std_name, this_filter, cat_mag, untr_best_mag)
+#
+#     # Test extraction of color index values & transformation of untransformed mags:
+#     # print()
+#     # for this_std in stds:
+#     #     image_v = std_images['V']
+#     #     image_i = std_images['I']
+#     #     cat_mag_v = this_std.mag('V')  # to test against.
+#     #     cat_mag_i = this_std.mag('I')  # "
+#     #     std_name = this_std.name
+#     #     untr_best_mag_v = image_v.untransformed_best_mag(std_name)
+#     #     untr_best_mag_i = image_i.untransformed_best_mag(std_name)
+#     #     best_color_index = cam.extract_color_index_value(untr_best_mag_v, untr_best_mag_i)
+#     #     print(std_name, cat_mag_v, cat_mag_i, cat_mag_v - cat_mag_i, best_color_index)
+#
+#     # ============= Comp initial images (V & I): =============
+#     comps = [DataTarget('comp1', {'V': 13.32, 'R': 12.44, 'I': 11.74}),
+#              DataTarget('comp2', {'V': 12.52, 'R': 12.21, 'I': 12.01}),
+#              DataTarget('comp3', {'V': 11.89, 'R': 11.23, 'I': 11.52})]
+#     mp = [DataTarget('MP', {'V': 13.5, 'R': 14.02, 'I': 14.49})]
+#     targets = comps + mp
+#     pre_v_image = cam.make_image('V', targets, 1.61, 0)
+#     pre_i_image = cam.make_image('I', targets, 1.61, 0)
+#
+#     # Measure comps' best color index values without knowing passband mags (i.e., to target obj at all):
+#     comps_color_index = [cam.extract_color_index_value(pre_v_image.untransformed_best_mag(comp.name),
+#                                                        pre_i_image.untransformed_best_mag(comp.name))
+#                          for comp in comps]
+#     # for i, comp in enumerate(comps):
+#     #     print(comp.name, comp.mag('V') - comp.mag('I'),  comps_color_index[i])
+#
+#     mp_color_index = cam.extract_color_index_value(pre_v_image.untransformed_best_mag(mp[0].name),
+#                                                    pre_i_image.untransformed_best_mag(mp[0].name))
+#     # print(mp[0].name, mp[0].mag('V') - mp[0].mag('I'),  mp_color_index)
+#
+#     # Last prep step: take an image in R, derive best R comp mags (do not use catalog mags at all):
+#     pre_r_image = cam.make_image('R', comps, 1.61, 0)
+#     this_transform = cam.filter_dict['R']['transform']['value']
+#     comp_r_mags = []
+#     for comp, color_index in zip(comps, comps_color_index):
+#         untr_best_mag_r = pre_r_image.untransformed_best_mag(comp.name)
+#         best_mag_r = untr_best_mag_r - this_transform * color_index
+#         comp_r_mags.append(best_mag_r)
+#     # for comp, r_mag in zip(comps, comp_r_mags):
+#     #     print(comp.name, r_mag)
+#
+#     # ============= We're now ready to make obs images in Clear filter, then back-calc best R mags for MP.
+#     obs_images = [cam.make_image('Clear', targets, 1.610, +0.01),
+#                   cam.make_image('Clear', targets, 1.620, -0.015),
+#                   cam.make_image('Clear', targets, 1.633, +0.014)]
+#     this_transform = cam.filter_dict['Clear']['transform']['value']
+#     for im in obs_images:
+#         derived_deltas = []
+#         for comp, mag, ci in zip(comps, comp_r_mags, comps_color_index):
+#             untr_best_mag_clear = im.untransformed_best_mag(comp.name, delta=0.0)
+#             this_mag_r = untr_best_mag_clear - this_transform * ci  # delta is yet unknown.
+#             this_derived_delta = this_mag_r - mag
+#             derived_deltas.append(this_derived_delta)
+#         print('derived_deltas: ', str(derived_deltas))
+#         mean_derived_delta = sum(derived_deltas) / float(len(derived_deltas))
+#         untr_best_mag_clear = im.untransformed_best_mag(mp[0].name, delta=mean_derived_delta)
+#         mp_mag_r = untr_best_mag_clear - this_transform * mp_color_index
+#         print('comp R mag:', mp_mag_r)  # this works...yay
+
+
+# def get_apass9_comps(ra, dec, radius):
+#     """ Get APASS 9 comps via Vizier catalog database.
+#     :param ra: RA in degrees [float].
+#     :param dec: Dec in degrees [float].
+#     :param radius: in arcminutes [float].
+#     :return:
+#     """
+#     from astroquery.vizier import Vizier
+#     # catalog_list = Vizier.find_catalogs('APASS')
+#     from astropy.coordinates import Angle
+#     import astropy.units as u
+#     import astropy.coordinates as coord
+#     result = Vizier.query_region(coord.SkyCoord(ra=299.590 * u.deg, dec=35.201 * u.deg,
+#                                                 frame='icrs'), width="30m", catalog=["APASS"])
+#     df_apass = result[0].to_pandas()
+#     return df_apass
+#
+#
+# def refine_df_apass9(df_apass, r_min=None, r_max=None):
+#     columns_to_keep = ['recno', 'RAJ2000', 'e_RAJ2000', 'DEJ2000', 'e_DEJ2000', 'nobs', 'mobs',
+#                        'BminusV', 'e_BminusV', 'Vmag', 'e_Vmag']
+#     df = df_apass[columns_to_keep]
+#     df = df[df['e_RAJ2000'] < 2.0]
+#     df = df[df['e_DEJ2000'] < 2.0]
+#     df = df[~pd.isnull(df['BminusV'])]
+#     df = df[~pd.isnull(df['e_BminusV'])]
+#     df = df[~pd.isnull(df['Vmag'])]
+#     df = df[~pd.isnull(df['e_Vmag'])]
+#     df['R_estimate'] = df['Vmag'] - 0.5 * df['BminusV']
+#     df['e_R_estimate'] = np.sqrt(df['e_Vmag'] ** 2 + 0.25 * df['e_BminusV'] ** 2)  # error in quadrature.
+#     if r_min is not None:
+#         df = df[df['R_estimate'] >= r_min]
+#     if r_max is not None:
+#         df = df[df['R_estimate'] <= r_max]
+#     df = df[df['e_R_estimate'] <= 0.04]
+#     return df
+
+
+# def try_reg():
+#     """  This was used to get R_estimate coeffs, using catalog data to predict experimental Best_R_mag.
+#     :return: [None]
+#     """
+#     df_comps_and_mp = get_df_comps_and_mp()
+#     dfc = df_comps_and_mp[df_comps_and_mp['Type'] == 'Comp']
+#     dfc = dfc[dfc['InAllImages']]
+
+# from sklearn.linear_model import LinearRegression
+# x = [[bv, v] for (bv, v) in zip(dfc['BminusV'], dfc['Vmag'])]
+# y = list(dfc['Best_R_mag'])
+# reg = LinearRegression(fit_intercept=True)
+# reg.fit(x, y)
+# print('\nsklearn: ', reg.coef_, reg.intercept_)
+#
+# xx = dfc[['BminusV', 'Vmag']]
+# yy = dfc['Best_R_mag']
+# reg.fit(xx, yy)
+# print('\nsklearn2: ', reg.coef_, reg.intercept_)
+
+# # statsmodel w/ formula api (R-style formulas) (fussy about column names):
+# import statsmodels.formula.api as sm
+# dfc['BV'] = dfc['BminusV']  # column name BminusV doesn't work in formula.
+# result = sm.ols(formula='Best_R_mag ~ BV + Vmag', data=dfc).fit()
+# print('\n' + 'sm.ols:')
+# print(result.summary())
+
+# statsmodel w/ dataframe-column api:
+# import statsmodels.api as sm
+# # make column BV as above
+# # result = sm.OLS(dfc['Best_R_mag'], dfc[['BV', 'Vmag']]).fit()  # <--- without constant term
+# result = sm.OLS(dfc['Best_R_mag'], sm.add_constant(dfc[['BminusV', 'Vmag']])).fit()
+# print('\n' + 'sm.ols:')
+# print(result.summary())
+#
+# # statsmodel w/ dataframe-column api:
+# import statsmodels.api as sm
+# # make column BV as above
+# # result = sm.OLS(dfc['Best_R_mag'], dfc[['BV', 'Vmag']]).fit()  # <--- without constant term
+# result = sm.OLS(dfc['Best_R_mag'], sm.add_constant(dfc[['R_estimate']])).fit()
+# print('\n' + 'sm.ols:')
+# print(result.summary())
+# # also available: result.params, .pvalues, .rsquared
+
+# FR
+
+__author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
+
+# FROM old Canopus.py:
+
+# import os
+#
+# MP_TOP_DIRECTORY = 'C:/Astro/MP Photometry/'
+#
+#
+# def canopus(mp_top_directory=MP_TOP_DIRECTORY, rel_directory=None):
+#     """ Read all FITS in mp_directory, rotate right, bin 2x2, invalidating plate solution.
+#     Intended for making images suitable (North Up, smaller) for photometric reduction in Canopus 10.
+#     Tests OK ~20191101.
+#     :param mp_top_directory: top path for FITS files [string]
+#     :param rel_directory: rest of path to FITS files, e.g., 'MP_768/AN20191020' [string]
+#     : return: None
+#     """
+#     this_directory = os.path.join(mp_top_directory, rel_directory)
+#     # clean_subdirectory(this_directory, 'Canopus')
+#     # output_directory = os.path.join(this_directory, 'Canopus')
+#     output_directory = this_directory
+#     import win32com.client
+#     app = win32com.client.Dispatch('MaxIm.Application')
+#     count = 0
+#     for entry in os.scandir(this_directory):
+#         if entry.is_file():
+#             fullpath = os.path.join(this_directory, entry.name)
+#             doc = win32com.client.Dispatch('MaxIm.Document')
+#             doc.Openfile(fullpath)
+#             doc.RotateRight()  # Canopus requires North-up.
+#             doc.Bin(2)  # to fit into Canopus image viewer.
+#             doc.StretchMode = 2  # = High, the better to see MP.
+#             output_filename, output_ext = os.path.splitext(entry.name)
+#             output_fullpath = os.path.join(output_directory, output_filename + '_Canopus' + output_ext)
+#             doc.SaveFile(output_fullpath, 3, False, 3, False)  # FITS, no stretch, floats, no compression.
+#             doc.Close  # no parentheses is actually correct. (weird MaxIm API)
+#             count += 1
+#             print('*', end='', flush=True)
+#     print('\n' + str(count), 'converted FITS now in', output_directory)
+
+
+# _____TRANSFORM_DETERMINATION_______________________________________________ = 0
 #
 # def calc_transform(f='Clear', pbf='r', pb1='r', pb2='i'):
 #     """ From one image in filter f, get transform for filter f-->catalog passband pbf,
@@ -640,3 +997,140 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"# _____TRANSFORM
 #     plt.show()
 #     filename = 'Image_ColorIndex.png'
 #     fig.savefig(filename)
+
+
+# FOV_and_LANDOLT_FUNCTIONS________________________________________ = 0
+#
+#
+# def get_landolt_fovs(fov_directory=FOV_DIRECTORY):
+#     """ Return list of FOV objects, one for each Landolt standard field."""
+#     all_filenames = pd.Series([e.name for e in os.scandir(fov_directory) if e.is_file()])
+#     fov_list = []
+#     for filename in all_filenames:
+#         fov_name = filename.split('.')[0]
+#         if not fov_name.startswith(('$', 'Std_NGC')):  # these are not Landolt FOVs
+#             fov_object = Fov(fov_name)
+#             if fov_object.is_valid:
+#                 fov_list.append(fov_object)
+#     return fov_list
+#
+# CATALOG_COMPARISON_TESTS________________________________________ = 0
+#
+# def regress_apass10_on_refcat2(ra_deg, dec_deg, radius_deg, apass_band, refcat2_bands, intercept=False):
+#     """ Run linear regressions on APASS 10 band vs ATLAS refcat2 bands (esp. Pan-Starrs griz).
+#     :param ra_deg:
+#     :param dec_deg:
+#     :param radius_deg:
+#     :param apass_band: band from APASS 10 to use as dependent variable [string].
+#     :param refcat2_bands: band or list of bands from refcat2 to use as indep vars [str or list of strs].
+#     :return: results [regression object from statsmodels package].
+#     """
+#     if not isinstance(refcat2_bands, list):
+#         refcat2_bands = [str(refcat2_bands)]
+#
+#     # Get ATLAS refcat2 stars (independent variables):
+#     cos_dec = cos(dec_deg / DEGREES_PER_RADIAN)
+#     ra_deg_min = (ra_deg - radius_deg / cos_dec) % 360
+#     ra_deg_max = (ra_deg + radius_deg / cos_dec) % 360
+#     dec_deg_min = (dec_deg - radius_deg)
+#     dec_deg_max = (dec_deg + radius_deg)
+#     df_refcat2 = get_refcat2(ra_deg_min=ra_deg_min, ra_deg_max=ra_deg_max,
+#                              dec_deg_min=dec_deg_min, dec_deg_max=dec_deg_max)
+#     df_refcat2 = remove_overlapping_comps(df_refcat2)
+#     r_mag_ok = pd.Series([(r >= 10.0) and (r <= 16.0) for r in df_refcat2.loc[:, 'r']])
+#     b_v_estimate = pd.Series([0.830 * g - 0.803 * r
+#                               for (g, r) in zip(df_refcat2.loc[:, 'g'], df_refcat2.loc[:, 'r'])])
+#     b_v_ok = pd.Series([(bv >= 0.5) and (bv <= 0.95) for bv in b_v_estimate])
+#     dupvar_ok = pd.Series([(d == 0 or d == 2) for d in df_refcat2['dupvar']])
+#     dgaia_ok = pd.Series([d > 0 for d in df_refcat2['dG_gaia']])
+#     dg_ok = pd.Series([dg <= 20 for dg in df_refcat2['dg']])
+#     dr_ok = pd.Series([dr <= 20 for dr in df_refcat2['dr']])
+#     di_ok = pd.Series([dg <= 20 for dg in df_refcat2['di']])
+#     rp1_ok = pd.Series([True if pd.isnull(rp1) else (rp1 >= 9) for rp1 in df_refcat2['RP1']])
+#     r1_ok = pd.Series([True if pd.isnull(r1) else (r1 >= 13) for r1 in df_refcat2['R1']])
+#     keep_rows = r_mag_ok & b_v_ok & dgaia_ok & dg_ok & dr_ok & di_ok & rp1_ok & r1_ok
+#     df_refcat2 = df_refcat2[list(keep_rows)]
+#
+#     # Get APASS 10 stars (dependent variable):
+#     df_apass = get_apass10_comps(ra_deg, dec_deg, radius_deg, mp_color_only=False)
+#     mag_ok = pd.Series([mag is not None for mag in df_apass.loc[:, apass_band]])
+#     e_sr_ok = pd.Series([(e <= 0.15) for e in df_apass.loc[:, 'e_SRmag']])
+#     e_si_ok = pd.Series([(e <= 0.25) for e in df_apass.loc[:, 'e_SImag']])
+#     keep_rows = mag_ok & e_sr_ok & e_si_ok
+#     df_apass = df_apass[list(keep_rows)]
+#
+#     # For each APASS 10 star, match a refcat2 star if possible:
+#     mag_dict_list = []
+#     for i_apass in df_apass.index:
+#         mag_dict = dict()
+#         i_refcat2 = find_matching_comp(df_refcat2, df_apass.loc[i_apass, 'degRA'],
+#                                        df_apass.loc[i_apass, 'degDec'])
+#         if i_refcat2 is not None:
+#             mag_dict['index'] = 'apass_' + str(i_apass)
+#             mag_dict['y_' + apass_band] = df_apass.loc[i_apass, apass_band]
+#             # mag_dict['y_BminusV'] = df_apass.loc[i_apass, 'Bmag'] - df_apass.loc[i_apass, 'Vmag']
+#             for band in refcat2_bands:
+#                 mag_dict[band] = df_refcat2.loc[i_refcat2, band]
+#             if all([val is not None for val in mag_dict.values()]):
+#                 mag_dict_list.append(mag_dict)
+#     this_index = [mag_dict['index'] for mag_dict in mag_dict_list]
+#     df_mags = pd.DataFrame(data=mag_dict_list, index=this_index)
+#
+#     # Perform regression; APASS band is indep var, refcat2 bands are dep vars:
+#     df_y = df_mags.loc[:, 'y_' + apass_band]
+#     # df_y = df_mags.loc[:, 'y_BminusV']
+#     df_x = df_mags.loc[:, refcat2_bands]
+#     if intercept is True:
+#         df_x.loc[:, 'intercept'] = 1.0
+#     weights = len(df_mags) * [1.0]
+#     result = sm.WLS(df_y, df_x, weights).fit()  # see bulletin2.util
+#     print(result.summary())
+#     print('mse_resid =', '{0:.4f}'.format(result.mse_resid), ' mag.')
+#     return result
+
+
+# def regress_landolt_r_mags():
+#     """ Regress Landolt R magnitudes against matching ATLAS refcat2 Pan-STARRS g, r, and i magnitudes."""
+#     # First, collect all data into dataframe df_mags:
+#     fov_list = get_landolt_fovs(FOV_DIRECTORY)
+#     mag_dict_list = []
+#     for fov in fov_list:
+#         if fov.target_type.lower() == 'standard':
+#             # Get ATLAS refcat2 stars within vicinity of FOV stars:
+#             ra_degs = [star.ra for star in fov.aavso_stars]
+#             ra_deg_min = min(ra_degs)
+#             ra_deg_max = max(ra_degs)
+#             dec_degs = [star.dec for star in fov.aavso_stars]
+#             dec_deg_min = min(dec_degs)
+#             dec_deg_max = max(dec_degs)
+#             df_refcat2 = get_refcat2(ra_deg_min=ra_deg_min, ra_deg_max=ra_deg_max,
+#                                      dec_deg_min=dec_deg_min, dec_deg_max=dec_deg_max)
+#             df_refcat2 = remove_overlapping_comps(df_refcat2)
+#
+#             for fov_star in fov.aavso_stars:
+#                 refcat2_matching = find_matching_comp(df_refcat2, fov_star.ra, fov_star.dec)
+#                 if refcat2_matching is not None:
+#                     g_mag = df_refcat2.loc[refcat2_matching, 'G']
+#                     r_mag = df_refcat2.loc[refcat2_matching, 'R']
+#                     i_mag = df_refcat2.loc[refcat2_matching, 'I']
+#                     if g_mag is not None and r_mag is not None and i_mag is not None:
+#                         try:
+#                             mag_dict = {'fov': fov.fov_name, 'fov_star': fov_star.star_id,
+#                                         'Landolt_R': fov_star.mags['R'][0],
+#                                         'g': g_mag, 'r': r_mag, 'i': i_mag}
+#                             mag_dict_list.append(mag_dict)
+#                         except KeyError:
+#                             print(' >>>>> Caution:', fov.fov_name, fov_star.star_id, 'is missing R mag.')
+#     this_index = [mag_dict['fov'] + '_' + mag_dict['fov_star'] for mag_dict in mag_dict_list]
+#     df_mags = pd.DataFrame(data=mag_dict_list, index=this_index)
+#
+#     # Perform regression; Landolt R is indep var, and dep variables are matching refcat2 g, r, and i mags:
+#     # return df_mags  # for now.
+#     df_y = df_mags[['Landolt_R']]
+#     df_x = df_mags[['r']]
+#     # df_x = df_mags[['g', 'r', 'i']]
+#     df_x.loc[:, 'intercept'] = 1.0
+#     weights = len(df_mags) * [1]
+#     result = sm.WLS(df_y, df_x, weights).fit()  # see bulletin2.util
+#     print(result.summary())
+#     return result

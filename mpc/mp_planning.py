@@ -432,9 +432,9 @@ def make_coverage_plots(an_string, site_name, df_an_table, plots_to_console):
                 infobox_mp_name = df.loc[this_mp, 'MPname']
                 if len(infobox_mp_name) > max_len_infobox_mp_name:
                     infobox_mp_name = infobox_mp_name[0:max_len_infobox_mp_name] + '...'
-                infobox_text = infobox_mp_name + '   ' + MOON_CHARACTER + ' ' +\
+                infobox_text = infobox_mp_name + '  ' + MOON_CHARACTER + ' ' +\
                     str(int(round(df.loc[this_mp, 'MoonDist']))) + u'\N{DEGREE SIGN}' +\
-                    '   ' + 'α=' + '{0:.1f}'.format(df.loc[this_mp, 'PhaseAngle']) + u'\N{DEGREE SIGN}' +\
+                    '   ' + 'α=' + '{0:.0f}'.format(df.loc[this_mp, 'PhaseAngle']) + u'\N{DEGREE SIGN}' +\
                     '   ' + df.loc[this_mp, 'Motive']
                 hours_dark = hours_dark_end - hours_dark_start
                 ax.add_patch(patches.Rectangle((hours_dark_start, 4.3), hours_dark, 0.8,
@@ -639,7 +639,7 @@ def dec_as_hex(dec_degrees):
     """
     if (dec_degrees < -90) | (dec_degrees > +90):
         return None
-    dec_string = degrees_as_hex(dec_degrees, seconds_decimal_places=2)
+    dec_string = degrees_as_hex(dec_degrees, arcseconds_decimal_places=2)
     return dec_string
 
 
@@ -1045,41 +1045,41 @@ class MPfile:
 ANCILLARY_only________________________________________________________ = 0
 
 
-class KeplerObject:
-    def __init__(self, epoch_ma, ap, long, incl, ecc, a):
-        """
-        :param epoch_ma: epoch of mean anomaly, in Terrestrial Time JD. [float]
-        :param ap: argument of perihelion, in degrees. [float]
-        :param long: longitude of ascending node, in degrees. [float]
-        :param incl: inclination, in degrees. [float]
-        :param ecc: eccentricity, dimensionless. [float]
-        :param a: semi-major axis length, in AU. [float]
-        """
-        self.epoch_ma = epoch_ma
-        self.ap = ap
-        self.long = long
-        self.incl = incl
-        self.ecc = ecc
-        self.a = a
-        self.h = None  # H-G model reduced magnitude (placeholder value).
-        self.g = 0.15  # H-G model phase factor (default value).
-        self.name = ''
-
-
-def laguerre_delta(func, funcp, funcpp):
-    """ Returns Laguerre's method estimate the nearest root of a function that is nearly quadratic.
-    Reputed to be more robust to starting estimates than simply solving quadratic formula.
-    :param func: value of function at some x.
-    :param funcp: first derivative of function at the same x.
-    :param funcpp: second derivative of function at the same x.
-    :return: Best estimate of x shift needed to get near y=0. Will probably require iteration.
-    """
-    g = funcp / func
-    h = g * g - funcpp / func
-    numerator1 = g + sqrt(2 * h - g * g)
-    numerator2 = g - sqrt(2 * h - g * g)
-    numerator = numerator1 if abs(numerator1) > abs(numerator2) else numerator2
-    return - 2.0 / numerator
+# class KeplerObject:
+#     def __init__(self, epoch_ma, ap, long, incl, ecc, a):
+#         """
+#         :param epoch_ma: epoch of mean anomaly, in Terrestrial Time JD. [float]
+#         :param ap: argument of perihelion, in degrees. [float]
+#         :param long: longitude of ascending node, in degrees. [float]
+#         :param incl: inclination, in degrees. [float]
+#         :param ecc: eccentricity, dimensionless. [float]
+#         :param a: semi-major axis length, in AU. [float]
+#         """
+#         self.epoch_ma = epoch_ma
+#         self.ap = ap
+#         self.long = long
+#         self.incl = incl
+#         self.ecc = ecc
+#         self.a = a
+#         self.h = None  # H-G model reduced magnitude (placeholder value).
+#         self.g = 0.15  # H-G model phase factor (default value).
+#         self.name = ''
+#
+#
+# def laguerre_delta(func, funcp, funcpp):
+#     """ Returns Laguerre's method estimate the nearest root of a function that is nearly quadratic.
+#     Reputed to be more robust to starting estimates than simply solving quadratic formula.
+#     :param func: value of function at some x.
+#     :param funcp: first derivative of function at the same x.
+#     :param funcpp: second derivative of function at the same x.
+#     :return: Best estimate of x shift needed to get near y=0. Will probably require iteration.
+#     """
+#     g = funcp / func
+#     h = g * g - funcpp / func
+#     numerator1 = g + sqrt(2 * h - g * g)
+#     numerator2 = g - sqrt(2 * h - g * g)
+#     numerator = numerator1 if abs(numerator1) > abs(numerator2) else numerator2
+#     return - 2.0 / numerator
 
 
 # def get_eph(mp, an, location='V28'):
