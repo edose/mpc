@@ -3,50 +3,37 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 import os
 import configparser
 
+import astropak.ini
+
 MPC_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INI_FILE_SUBDIRECTORY = 'ini'
 BOOT_INI_FILENAME = 'defaults.ini'
 
 
-def read_defaults_ini():
+def make_defaults_dict():
+    """ Reads .ini file, returns defaults_dict.
+        See defaults.template for value types and key names.
+    :return: defaults_dict. [python dict object; All keys and values are strings]
+
+    """
     fullpath = os.path.join(MPC_ROOT_DIRECTORY, INI_FILE_SUBDIRECTORY, BOOT_INI_FILENAME)
-    config = configparser.ConfigParser()
-    config.read(fullpath)
-    defaults_dict = dict()
-    defaults_dict['instrument ini'] = config.get('Other ini files', 'Instrument')
-    defaults_dict['site ini'] = config.get('Other ini files', 'Site')
-    defaults_dict['observer ini'] = config.get('Other ini files', 'Observer')
-    for key in config['Session Files']:
-        defaults_dict[key] = config.get('Session Files', key)
-    return defaults_dict
+    defaults_ini = astropak.ini.IniFile(fullpath)
+    return defaults_ini.value_dict
 
 
-def read_instrument_ini(defaults_dict):
-    """ We'll read just what we (think we) need to."""
+def make_instrument_dict(defaults_dict):
+    """ Reads .ini file, returns instrument_dict.
+        See instrument.template for value types and key names.
+    :return: instrument_dict. [python dict object, some items nested dicts]
+    """
     filename = defaults_dict['instrument ini']
     fullpath = os.path.join(MPC_ROOT_DIRECTORY, INI_FILE_SUBDIRECTORY, 'instrument', filename)
-    config = configparser.ConfigParser()
-    config.read(fullpath)
-    instrument_dict = dict()
+    instrument_ini = astropak.ini.IniFile(fullpath)
+    instrument_dict = instrument_ini.value_dict
 
-    for key in config['Limits']:
-        float_value = float_or_warn(config.get('Limits', key), filename + ' [Limits]')
-        instrument_dict[key.lower()] = float_value
-
-    for key in config['Camera']:
-        raw_value = config.get('Camera', key)
-        if key in ['x pixels', 'y pixels', 'saturation adu', 'max vignetting pct at corner']:
-            value = float_or_warn(raw_value, filename + ' [Limits]')
-        else:
-            value = raw_value
-        instrument_dict[key.lower()] = value
-
-    # [Filters] section:
-    instrument_dict['available filters'] = multiline_ini_value_to_items(config.get('Filters', 'Available'))
+    # Parse and overwrite 'mag exposures':
     mag_exposure_dict = dict()
-    value = config.get('Filters', 'Mag Exposures')
-    lines = list(filter(None, (x.strip() for x in value.splitlines())))
-    mag_exposure_lines = [line.strip() for line in lines]  # replace commas with spaces
+    mag_exposure_lines = [line.strip() for line in instrument_dict['mag exposures']]
     for line in mag_exposure_lines:
         mag_exposure_list = []
         filter_name, raw_value = tuple(line.split(maxsplit=1))
@@ -62,10 +49,12 @@ def read_instrument_ini(defaults_dict):
                 return None
         mag_exposure_dict[filter_name] = mag_exposure_list
     instrument_dict['mag exposures'] = mag_exposure_dict
+
+    # Parse and overwrite 'transforms':
     transform_dict = dict()
-    transform_lines = multiline_ini_value_to_lines(config.get('Filters', 'Transforms'))
+    transform_lines = [line.strip() for line in instrument_dict['transforms']]
     for line in transform_lines:
-        items = line.split()
+        items = line.replace(',', ' ').split()
         if len(items) in [5, 6]:
             key = tuple(items[:4])
             values = [float_or_warn(item, 'Transforms ' + line) for item in items[4:]]
@@ -73,55 +62,36 @@ def read_instrument_ini(defaults_dict):
         else:
             print(' >>>>> ERROR:', filename, 'bad transform line:', line)
     instrument_dict['transforms'] = transform_dict
-    items = config.get('Filters', 'Default Color Filters').split()
-    if len(items) == 2:
-        instrument_dict['default_color_filters'] = tuple(items)
-    else:
-        print(' >>>>> ERROR:', filename, 'bad default color filters.')
-    items = config.get('Filters', 'Default Color Index').replace('-', ' ').split()
-    if len(items) == 2:
-        instrument_dict['default_color_index'] = tuple(items)
-    else:
-        print(' >>>>> ERROR:', filename, 'bad default color index.')
-
-    for key in config['Scale']:
-        float_value = float_or_warn(config.get('Scale', key), filename + ' [Scale]')
-        instrument_dict[key.lower()] = float_value
-
-    for key in config['Timing']:
-        float_value = float_or_warn(config.get('Timing', key), filename + ' [Timing]')
-        instrument_dict[key.lower()] = float_value
-
     return instrument_dict
 
 
-def read_observer_ini(defaults_dict):
+def make_observer_dict(defaults_dict):
+    """ Reads .ini file, returns observer_dict.
+        Used mostly for ALCDEF file generation.
+    :return: observer_dict. [python dict object, all keys and values are strings]
+    See observer.template for value types and key names.
+    """
     filename = defaults_dict['observer ini']
     fullpath = os.path.join(MPC_ROOT_DIRECTORY, INI_FILE_SUBDIRECTORY, 'observer', filename)
-    config = configparser.ConfigParser()
-    config.read(fullpath)
-    observer_dict = dict()
-    for section in config.sections():
-        for key in config[section]:
-            observer_dict[key.lower()] = config.get(section, key)
+    observer_ini = astropak.ini.IniFile(fullpath)
+    observer_dict = observer_ini.value_dict
     return observer_dict
 
 
-def read_site_ini(defaults_dict):
+def make_site_dict(defaults_dict):
+    """ Reads .ini file, returns site_dict.
+    :return: site_dict. [python dict object, some values are nested dicts.]
+    See site.template for value types and key names.
+    """
     filename = defaults_dict['site ini']
     fullpath = os.path.join(MPC_ROOT_DIRECTORY, INI_FILE_SUBDIRECTORY, 'site', filename)
-    config = configparser.ConfigParser()
-    config.read(fullpath)
-    site_dict = dict()
-    site_dict['site_name'] = config.get('Site', 'Name')
-    site_dict['mpc_code'] = config.get('Site', 'MPC Code')
-    for key in config['Location']:
-        site_dict[key] = float_or_warn(config.get('Location', key), filename + ' Location:' + key)
-    site_dict['coldest_date'] = config.get('Climate', 'Coldest Date')
-    extinction_lines = multiline_ini_value_to_lines(config.get('Climate', 'Extinctions'))
+    site_ini = astropak.ini.IniFile(fullpath)
+    site_dict = site_ini.value_dict
+
+    # Parse and overwrite 'extinctions':
     extinction_dict = dict()
-    for line in extinction_lines:
-        items = line.split()
+    for line in site_dict['extinctions']:
+        items = line.replace(',', ' ').split()
         if len(items) == 3:
             filter_name = items[0]
             summer_extinction = float_or_warn(items[1], filename + '[Climate][Extinctions]')
@@ -134,6 +104,11 @@ def read_site_ini(defaults_dict):
 
 
 def read_selection_criteria_from_ini(filename):
+    """ Read ini file in session directory, return dict of comp selection criteria.
+        Generally used in do_phot() or do_color().
+    :param filename: name of control or color control ini file within session directory.
+    :return: selection criteria. [python dict object]
+    """
     config = configparser.ConfigParser()
     config.read(filename)
     comp_list, obs_list, image_list = [], [], []
@@ -176,6 +151,8 @@ def read_regression_options_from_ini(filename):
     config.read(filename)
     option_dict = dict()
 
+    value = config.get('Regression', 'MP Color Index SRI')
+    option_dict['mp color index sri'] = float_or_warn(value, filename + ' MP Color Index SRI')
     value = config.get('Regression', 'Transform')
     lines = multiline_ini_value_to_lines(value)
     transform_dict = dict()
@@ -211,7 +188,6 @@ def read_regression_options_from_ini(filename):
     fit_jd = config.getboolean('Regression', 'Fit JD')
     return {'transform': transform_dict, 'extinction': extinction_dict,
             'fit_vignette': fit_vignette, 'fit_xy': fit_xy, 'fit_jd': fit_jd}
-
 
 
 SUPPORT_FUNCTIONS__________________________________________ = 0

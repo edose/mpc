@@ -1,0 +1,36 @@
+;----- This is control.txt for directory:
+;      C:\Dev\mpc\test\$test_data_do_color\MP_426\AN20201023
+;
+;===== MP LOCATIONS BLOCK ===========================================
+;===== Enter before make_dfs() ======================================
+;      MP x,y positions for aperture photometry:
+#MP_LOCATION  MP_426-0011-R.fts  1034.4 454.3   ; early filename, change if needed
+#MP_LOCATION  MP_426-0012-I.fts  1036.0 455.4   ;  late filename, change if needed
+;
+;===== MP RI COLOR BLOCK ============================================
+;===== Enter before do_mp_phot(), get from do_color. ================
+#MP_RI_COLOR +0.220  Default MP color  ;  get by running do_color(), or leave as default=+0.220
+;
+;===== SELECTION CRITERIA BLOCK =====================================
+;===== Enter before do_mp_phot() ====================================
+;      Selection criteria for comp stars, observations, images:
+;#COMP  nnnn nn,   nnn        ; to omit comp(s) by comp ID
+;#OBS nnn,nnnn nnnn   nn      ; to omit observation(s) by Serial number
+;#IMAGE  MP_mmmm-00nn-Clear   ; to omit one FITS image (.fts at end optional)
+;#MIN_R_MAG 10                ; default=10
+;#MAX_R_MAG 16                ; default=16
+;#MAX_CATALOG_DR_MMAG 15      ; default=15
+;#MIN_SLOAN_RI_COLOR 0.0      ; default=0.0
+;#MAX_SLOAN_RI_COLOR 0.4      ; default=0.4
+;
+;===== REGRESSION OPTIONS BLOCK =====================================
+;===== Enter before do_mp_phot(): ===================================
+;----- OPTIONS for regression model:
+;Choices for #FIT_TRANSFORM: Fit=1; Fit=2; Use 0.2 0.4 [=tr1 & tr2 values]; Yes->Fit=1; No->Use 0 0
+;#FIT_TRANSFORM  Fit=2        ; default= Fit=2
+;Choices for #FIT_EXTINCTION: Yes->do fit; No->use default extinction; Use +0.34-> use this value 
+;#FIT_EXTINCTION No           ; default=No // choose Yes or No  (case-insensitive)
+;#FIT_VIGNETTE Yes            ; default=Yes // choose Yes or No  (case-insensitive)
+;#FIT_XY No                   ; default=No // choose Yes or No  (case-insensitive)
+;#FIT_JD Yes                  ; default=Yes // choose Yes or No  (case-insensitive)
+;

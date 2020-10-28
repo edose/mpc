@@ -281,34 +281,34 @@ def read_one_refcat2_sqdeg(directory=ATLAS_REFCAT2_DIRECTORY, ra_deg_min=None, d
     return df
 
 
-def find_matching_comp(df_comps, ra_deg, dec_deg):
-    """ Find ATLAS refcat2 (as df_comps) stars matching input ra_deg, dec_deg; closest if >1 matching.
-    :return: Index of matching star in df_comps.
-    """
-    tol_deg = MATCH_TOLERANCE_ARCSEC / 3600.0
-    ra_tol = abs(tol_deg / cos(dec_deg * DEGREES_PER_RADIAN))
-    dec_tol = tol_deg
-    within_ra = (abs(df_comps['RA_deg'] - ra_deg) < ra_tol) |\
-                (abs((df_comps['RA_deg'] + 360.0) - ra_deg) < ra_tol) |\
-                (abs(df_comps['RA_deg'] - (ra_deg + 360.0)) < ra_tol)
-    within_dec = abs(df_comps['Dec_deg'] - dec_deg) < dec_tol
-    within_box = within_ra & within_dec
-    if sum(within_box) == 0:
-        return None
-    elif sum(within_box) == 1:
-        return (df_comps.index[within_box])[0]
-    else:
-        # Here, we choose the *closest* df_comps comp and return its index:
-        df_sub = df_comps.loc[list(within_box), ['RA_deg', 'Dec_deg']]
-        cos2 = cos(dec_deg) ** 2
-        dist2_ra_1 = ((df_sub['RA_deg'] - ra_deg) ** 2) / cos2
-        dist2_ra_2 = (((df_sub['RA_deg'] + 360.0) - ra_deg) ** 2) / cos2
-        dist2_ra_3 = ((df_sub['RA_deg'] - (ra_deg + 360.0)) ** 2) / cos2
-        dist2_ra = [min(d1, d2, d3) for (d1, d2, d3) in zip(dist2_ra_1, dist2_ra_2, dist2_ra_3)]
-        dist2_dec = (df_sub['Dec_deg'] - dec_deg) ** 2
-        dist2 = [ra2 + dec2 for (ra2, dec2) in zip(dist2_ra, dist2_dec)]
-        i = dist2.index(min(dist2))
-        return df_sub.index.values[i]
+# def find_matching_comp(df_comps, ra_deg, dec_deg):
+#     """ Find ATLAS refcat2 (as df_comps) stars matching input ra_deg, dec_deg; closest if >1 matching.
+#     :return: Index of matching star in df_comps.
+#     """
+#     tol_deg = MATCH_TOLERANCE_ARCSEC / 3600.0
+#     ra_tol = abs(tol_deg / cos(dec_deg * DEGREES_PER_RADIAN))
+#     dec_tol = tol_deg
+#     within_ra = (abs(df_comps['RA_deg'] - ra_deg) < ra_tol) |\
+#                 (abs((df_comps['RA_deg'] + 360.0) - ra_deg) < ra_tol) |\
+#                 (abs(df_comps['RA_deg'] - (ra_deg + 360.0)) < ra_tol)
+#     within_dec = abs(df_comps['Dec_deg'] - dec_deg) < dec_tol
+#     within_box = within_ra & within_dec
+#     if sum(within_box) == 0:
+#         return None
+#     elif sum(within_box) == 1:
+#         return (df_comps.index[within_box])[0]
+#     else:
+#         # Here, we choose the *closest* df_comps comp and return its index:
+#         df_sub = df_comps.loc[list(within_box), ['RA_deg', 'Dec_deg']]
+#         cos2 = cos(dec_deg) ** 2
+#         dist2_ra_1 = ((df_sub['RA_deg'] - ra_deg) ** 2) / cos2
+#         dist2_ra_2 = (((df_sub['RA_deg'] + 360.0) - ra_deg) ** 2) / cos2
+#         dist2_ra_3 = ((df_sub['RA_deg'] - (ra_deg + 360.0)) ** 2) / cos2
+#         dist2_ra = [min(d1, d2, d3) for (d1, d2, d3) in zip(dist2_ra_1, dist2_ra_2, dist2_ra_3)]
+#         dist2_dec = (df_sub['Dec_deg'] - dec_deg) ** 2
+#         dist2 = [ra2 + dec2 for (ra2, dec2) in zip(dist2_ra, dist2_dec)]
+#         i = dist2.index(min(dist2))
+#         return df_sub.index.values[i]
 
 
 def get_bounding_ra_dec(fits_object):

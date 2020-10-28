@@ -121,3 +121,8 @@ def try_tooltips():
     fig.canvas.mpl_connect("motion_notify_event", hover)
 
     plt.show()
+
+
+
+
+

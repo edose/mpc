@@ -1,0 +1,20 @@
+#----- This is template file color_control.template
+#----- in directory C:\Dev\mpc\test\$test_data_do_color\MP_426\AN20201023
+#
+[Selection]
+Omit Comps  = string  ->  omit comps
+Omit Obs    = string  ->  omit obs
+Omit Images = string list  ->  omit images
+Min SR Mag  = float   ->  min sr mag
+Max SR Mag  = float   ->  max sr mag
+Max Catalog dSR mmag  = float  ->  max catalog dsr mmag
+Min Sloan RI Color    = float  ->  min sloan ri color
+Max Sloan RI Color    = float  ->  max sloan ri color
+
+[Regression]
+Transforms        = string list  ->  transforms
+Extinctions       = string list  ->  extinctions
+Fit Vignette      = boolean ->  fit vignette
+Fit XY            = boolean ->  fit xy
+Fit JD            = boolean ->  fit jd
+#----- end of template
