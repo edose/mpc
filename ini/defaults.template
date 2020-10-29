@@ -8,6 +8,7 @@ MP Photometry Top Directory = string -> mp photometry top directory
 Log Filename            = string -> log filename
 Control Filename        = string -> control filename
 Color Control Filename  = string -> color control filename
+Color Control Template Filename = string -> color control template filename
 df_obs filename         = string -> df_obs filename
 df_images filename      = string -> df_images filename
 df_comps filename       = string -> df_comps filename

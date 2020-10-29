@@ -2,14 +2,17 @@
 #----- in directory C:\Dev\mpc\test\$test_data_do_color\MP_426\AN20201023
 #
 [Selection]
-Omit Comps  = string  ->  omit comps
-Omit Obs    = string  ->  omit obs
-Omit Images = string list  ->  omit images
-Min SR Mag  = float   ->  min sr mag
-Max SR Mag  = float   ->  max sr mag
-Max Catalog dSR mmag  = float  ->  max catalog dsr mmag
-Min Sloan RI Color    = float  ->  min sloan ri color
-Max Sloan RI Color    = float  ->  max sloan ri color
+Max MP Obs Mag Uncertainty   = float -> max mp obs mag uncertainty
+Max Comp Obs Mag Uncertainty = float -> max comp obs mag uncertainty
+Min SR Mag           = float  ->  min sr mag
+Max SR Mag           = float  ->  max sr mag
+Max Catalog dSR mmag = float  ->  max catalog dsr mmag
+Min Sloan RI Color   = float  ->  min sloan ri color
+Max Sloan RI Color   = float  ->  max sloan ri color
+Omit Comps           = string ->  omit comps
+Omit Obs             = string ->  omit obs
+Omit Images          = string list  ->  omit images
+Min Valid Comps      = int    ->  min valid comps
 
 [Regression]
 Transforms        = string list  ->  transforms

@@ -28,7 +28,7 @@ def test_do_color():
     # mpc.mp_phot.make_dfs()
     mpc.mp_phot.do_color(filters=('R', 'I'), target_color=('SR', 'SI'),
                          color_index_passbands=('SR', 'SI'))
-    # assert True
+    assert 1 == 1
 
 
 def test_make_color_control_dict():
