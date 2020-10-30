@@ -12,7 +12,7 @@ Max Sloan RI Color   = float  ->  max sloan ri color
 Omit Comps           = string ->  omit comps
 Omit Obs             = string ->  omit obs
 Omit Images          = string list  ->  omit images
-Min Valid Comps      = int    ->  min valid comps
+Min Valid Comps Per Image  = int    ->  min valid comps per image
 
 [Regression]
 Transforms        = string list  ->  transforms

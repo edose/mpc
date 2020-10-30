@@ -776,44 +776,40 @@ def do_color(filters=None, target_color=None, color_index_passbands=None):
     df_screened_obs = df_screened_comp_obs.append(df_screened_mp_obs)
     remove_by_image = df_screened_obs['FITSfile'].isin(color_control_dict['omit images'])
     obs_to_keep = (~ remove_by_image).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :].sort_values(by=['JD_mid', 'Type', 'SourceID'])
+    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
 
     # Remove obviously bad images (number of comps less than half max number of comps in any image):
-    iiii = 4
+    comp_counts = df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', 'FITSfile'].value_counts()
+    max_comp_count = comp_counts.max()
+    fn_too_few_comps = [fn for fn in comp_counts.index if comp_counts[fn] < max_comp_count / 2.0]
+    remove_too_few_comps = df_screened_obs['FITSfile'].isin(fn_too_few_comps)
+    obs_to_keep = (~ remove_too_few_comps).to_list()
+    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
 
     # Remove comps absent from any image (so that all images have same comp set at this point):
+    image_count = len(df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', 'FITSfile'].drop_duplicates())
+    image_count_per_comp = df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', 'SourceID'].value_counts()
+    comps_not_in_every_image = [id for id in image_count_per_comp.index
+                                if image_count_per_comp[id] < image_count]
+    remove_comps_not_in_every_image = df_screened_obs['SourceID'].isin(comps_not_in_every_image)
+    obs_to_keep = (~ remove_comps_not_in_every_image).to_list()
+    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
 
-    # Apply individual observation selection criteria:
+    # Apply Omit Obs criterion (this should be done separately, and after all others):
+    remove_by_obs_id = df_screened_comp_obs['Serial'].isin(color_control_dict['omit obs'])
+    obs_to_keep = (~ remove_by_obs_id).to_list()
+    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
 
-    # Remove (with warning) images with fewer than min number of comps:
+    # Lastly: remove (with warning) images with fewer than minimum number of comps:
+    comp_count_per_image = df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', 'FITSfile'].value_counts()
+    images_too_few_comps = [fn for fn in comp_count_per_image.index
+                            if comp_count_per_image[fn] < color_control_dict['min valid comps per image']]
+    remove_too_few_comps = df_screened_obs['FITSfile'].isin(images_too_few_comps)
+    obs_to_keep = (~ remove_too_few_comps).to_list()
+    df_screened_obs = df_screened_obs.loc[obs_to_keep, :].sort_values(by=['JD_mid', 'Type', 'SourceID'])
 
+    iiii = 4
 
-
-    # # Make boolean flag Series of comps represented in every image:
-    # color_image_list = df_valid_obs['FITSfile'].drop_duplicates()
-    # df_comps = df_valid_obs.loc[df_all['Type'] == 'Comp', :]
-    # comp_id_list = df_comps['SourceID'].drop_duplicates()
-    # df_count = df_comps.groupby('SourceID')[['FITSfile', 'SourceID']].count()  # image count, each comp_id.
-    # comp_ids_in_every_image = [id for id in comp_id_list
-    #                            if df_count.loc[id, 'FITSfile'] == len(color_image_list)]
-    # rows_with_qualified_comp_ids = df_valid_obs['SourceID'].isin(comp_ids_in_every_image)
-    #
-    # # Make boolean flag Series of MP observations with comp observations:
-    # images_with_qualified_comp_ids = df_valid_obs.loc[rows_with_qualified_comp_ids,
-    #                                                   'FITSfile'].drop_duplicates()
-    # rows_with_qualified_images = df_valid_obs['FITSfile'].isin(images_with_qualified_comp_ids)
-    # rows_with_mps = (df_valid_obs['Type'] == 'MP')
-    # rows_with_qualified_mps = rows_with_qualified_images & rows_with_mps
-    #
-    # # Make union flag list of all rows to keep:
-    # rows_to_keep = rows_with_qualified_mps | rows_with_qualified_comp_ids
-    # df_model = df_valid_obs.loc[rows_to_keep, :].copy()
-
-    # Read and apply selection criteria, read regression options:
-    # color_control_filename = defaults_dict['color control filename']
-    # selection_criteria = read_selection_criteria_from_ini(color_control_filename)
-    # apply_do_phot_selections(df_model, selection_criteria)
-    # options_dict = read_regression_options_from_ini(color_control_filename)
 
     # For each filter, build and run model, then get no-CI MP mag for each image:
     df_results = None # accumulator for final mag results, both filters.
