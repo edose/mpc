@@ -47,7 +47,7 @@ def make_instrument_dict(defaults_dict):
             elif len(items) != 0:
                 print(' >>>>> ERROR: ' + filename + ' Mag Exposure not in pairs: ' + line)
                 return None
-        mag_exposure_dict[filter_name] = mag_exposure_list
+        mag_exposure_dict[filter_name] = tuple(mag_exposure_list)
     instrument_dict['mag exposures'] = mag_exposure_dict
 
     # Parse and overwrite 'transforms':
@@ -57,7 +57,7 @@ def make_instrument_dict(defaults_dict):
         items = line.replace(',', ' ').split()
         if len(items) in [5, 6]:
             key = tuple(items[:4])
-            values = [float_or_warn(item, 'Transforms ' + line) for item in items[4:]]
+            values = tuple([float_or_warn(item, 'Transforms ' + line) for item in items[4:]])
             transform_dict[key] = values
         else:
             print(' >>>>> ERROR:', filename, 'bad transform line:', line)

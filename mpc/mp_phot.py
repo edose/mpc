@@ -25,14 +25,13 @@ from mpc.catalogs import Refcat2, get_bounding_ra_dec
 from mpc.mp_planning import all_mpfile_names, MPfile
 from mpc.ini import *
 
-# From external (EVD) package photrix (deprecated import--> prefer astropak:
+# From EVD package photrix (deprecated import--> prefer astropak:
 from photrix.image import Image, FITS
 from photrix.util import RaDec, jd_from_datetime_utc, datetime_utc_from_jd, \
     MixedModelFit, ra_as_hours, dec_as_hex
 
-# From external (EVD) package astropak (preferred):
+# From EVD package astropak (preferred):
 import astropak.ini
-
 
 __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
@@ -79,7 +78,6 @@ DEFAULT_MODEL_OPTIONS = {'fit_transform': 'fit=2', 'fit_extinction': False,
                          'fit_vignette': True, 'fit_xy': False,
                          'fit_jd': True}  # defaults if not found in control file.
 TRANSFORM_IMAGE_PREFIX = 'Image_Transform_'
-COLOR_IMAGE_PREFIX = 'Image_Color_'
 SESSION_IMAGE_PREFIX = 'Image_Session_'
 
 
@@ -335,10 +333,12 @@ def assess():
         log_file.write('assess(): ' + str(n_warnings) + ' warnings.' + '\n')
 
     defaults_dict = make_defaults_dict()
+    # color_control_dict = make_color_control_dict(this_directory, defaults_dict) # TODO: why is this here?
     write_control_txt_stub(this_directory, log_file, df)        # if it doesn't already exist.
     # write_transform_control_txt_stub(this_directory, log_file)  # "
-    write_color_control_ini_stub(this_directory, log_file)      # "
-    write_color_control_ini_template(this_directory, defaults_dict, log_file)
+    # TODO: Where do defaults come from? Add lines to default_dict?
+    # _write_color_control_ini_stub(this_directory, defaults_dict, log_file)      # "
+    # _write_color_control_ini_template(this_directory, defaults_dict, log_file)
     log_file.close()
 
 
@@ -638,421 +638,6 @@ def make_dfs():
     log_file.close()
     print('\nNext: (1) enter comp selection limits and model options in ' + CONTROL_FILENAME,
           '\n      (2) run do_mp_phot()')
-
-
-_____COLOR_INDEX_PHOTOMETRY________________________________________________ = 0
-
-
-def do_color(filters=None, target_color=None, color_index_passbands=None):
-    """ Use comp-star and MP instrument mags, and comp catalog magnitudes to estimate
-        MP color index in (usually) Sloan SR-SI.
-        First run all functions, through make_dfs(), which will make the dataframes needed.
-        Ensure context is in desired directory (context), prob. by running resume().
-    :param filters: specify the two filters for which images are to be used, e.g., ('R', 'I') to
-        use Johnson R and I images. [2-tuple or 2-list of strings or None for defaults from instrument ini]
-    :param target_color: specify the two passbands defining the desired color to measure,
-        e.g., ('SG', 'SR') to measure color SG-SR ('SGR' in LCDB parlance). REQUIRED.
-        [2-tuple or 2-list of strings]
-    :param color_index_passbands: specify the two passbands defining the color index, e.g., ('SR', 'SI') to
-        define color in Sloan SR and SI (typical case). In any case, the two passbands must be
-        represented in the ATLAS refcat2 catalog (prob. as 'r' and 'i') and must be included
-        in the local catalog object. [2-tuple of strings or None for defaults from instrument ini]
-    :return: None. Only writes to screen and to log file, makes diagnostic plots.
-    """
-    # Verify that parms passed in are of correct form:
-    filters_parm_ok, target_color_parm_ok, color_index_passbands_ok = False, False, False
-    if isinstance(filters, tuple) or isinstance(filters, list):
-        filters = tuple(filters)  # ensure tuple.
-        if len(filters) == 2:
-            if all([isinstance(f, str) for f in filters]):
-                filters_parm_ok = True
-    if isinstance(target_color, tuple) or isinstance(target_color, list):
-        target_color = tuple(target_color)
-        if len(target_color) == 2:
-            if all([isinstance(pb, str) for pb in target_color]):
-                target_color_parm_ok = True
-    if isinstance(color_index_passbands, tuple) or isinstance(color_index_passbands, list):
-        color_index_passbands = tuple(color_index_passbands)
-        if len(color_index_passbands) == 2:
-            if all([isinstance(pb, str) for pb in color_index_passbands]):
-                color_index_passbands_ok = True
-    if not filters_parm_ok:
-        print(' >>>>> ERROR: filters invalid:', str(filters))
-        return
-    if not target_color_parm_ok:
-        print(' >>>>> ERROR: target_color invalid:', str(target_color))
-        return
-    if not color_index_passbands_ok:
-        print(' >>>>> ERROR: color_index_passbands invalid:', str(color_index_passbands))
-        return
-    fa, fb = filters
-    pb_a, pb_b = target_color
-    ci_a, ci_b = color_index_passbands
-    print(' >>>>> Measuring color', pb_a + '-' + pb_b, 'from filters', fa, '&', fb,
-          'using color index', ci_a + '-' + ci_b)
-
-    # ===== Get context, write log file header, load INI files to dicts:
-    context = get_context()
-    if context is None:
-        return
-    this_directory, mp_string, an_string = context
-    log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
-    mp_int = int(mp_string)  # put this in try/catch block.
-    mp_string = str(mp_int)
-    log_file.write('\n===== do_color()  ' +
-                   '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
-    defaults_dict = make_defaults_dict()
-    # instrument_dict = make_instrument_dict(defaults_dict)
-    # site_dict = make_site_dict(defaults_dict)
-    color_control_dict = make_color_control_dict(this_directory, defaults_dict)
-
-    # ===== Load and prepare session's master dataframe, and rename passband columns, e.g. 'r' -> 'SR':
-    df_all = make_df_all(filters_to_include=(fa, fb), comps_only=False, require_mp_obs_each_image=True)
-    df_all = df_all.rename(columns={'g': 'SG',   'r': 'SR',   'i': 'SI',   'z': 'SZ',
-                                    'dg': 'dSG', 'dr': 'dSR', 'di': 'dSI', 'dz': 'dSZ'})
-
-    # ===== Make list of images taken with both filters:
-    df_mps = df_all.loc[df_all['Type'] == 'MP', :]
-    fa_filenames = df_mps.loc[df_mps['Filter'] == fa, 'FITSfile'].to_list()
-    fb_filenames = df_mps.loc[df_mps['Filter'] == fb, 'FITSfile'].to_list()
-    if len(fa_filenames) <= 0 or len(fb_filenames) <= 0:
-        print(' >>>>> ERROR: no images for one or both of filters: \'' + fa + '\', \'' + fb + '\'')
-        return
-    all_filenames = fa_filenames + fb_filenames
-    del fa_filenames, fb_filenames  # at risk of invalidation during screening.
-
-    # ===== Remove obs (MP and comp) with unusable (None or NaN) instmag or instmagsigma:
-    df_screened_obs = df_all.copy().dropna(subset=['InstMag', 'InstMagSigma'])
-    # neither_is_none = [(mag is not None) and (sigma is not None)
-    #                    for (mag, sigma) in
-    #                    zip(df_screened_obs['InstMag'], df_screened_obs['InstMagSigma'])]
-    # df_screened_obs = df_screened_obs.loc[neither_is_none, :]
-    # neither_is_nan = [(not np.isnan(mag)) and (not np.isnan(sigma))
-    #                   for (mag, sigma) in
-    #                   zip(df_screened_obs['InstMag'], df_screened_obs['InstMagSigma'])]
-    # df_screened_obs = df_screened_obs.loc[neither_is_nan, :]
-
-    # ===== Identify (and keep) images having exactly one MP obs:
-    filenames_one_mp = []
-    for fn in all_filenames:
-        if (df_mps['FITSfile'] == fn).sum() == 1:
-            filenames_one_mp.append(fn)
-
-    # ===== Remove *images* whose MP obs uncertainty is too high:
-    valid_filenames = []
-    max_mp_obs_mag_sigma = color_control_dict['max mp obs mag uncertainty']
-    for fn in filenames_one_mp:
-        mp_instmagsigma = df_mps.loc[df_mps['FITSfile'] == fn, 'InstMagSigma'].iloc[0]
-        if mp_instmagsigma <= max_mp_obs_mag_sigma:
-            valid_filenames.append(fn)
-    obs_to_keep = df_screened_obs['FITSfile'].isin(valid_filenames)
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    # ===== Remove comps whose observation uncertainty is too high:
-    # TODO: ? make max uncert relative to instrumental mag (to more accurately remove true outliers) ?
-    is_comp_obs = df_screened_obs['Type'] == 'Comp'
-    uncert_too_high = df_screened_obs['InstMagSigma'] > color_control_dict['max comp obs mag uncertainty']
-    obs_to_remove = (is_comp_obs & uncert_too_high)
-    obs_to_keep = (~ obs_to_remove).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    df_screened_comp_obs = df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', :]
-    df_screened_mp_obs = df_screened_obs.loc[df_screened_obs['Type'] == 'MP', :]
-
-    # Apply selection criteria to comp obs (MP obs don't have catalog values):
-    remove_by_min_mag = (df_screened_comp_obs['SR'] < color_control_dict['min sr mag'])
-    remove_by_max_mag = (df_screened_comp_obs['SR'] > color_control_dict['max sr mag'])
-    remove_by_cat_mag_uncert = (df_screened_comp_obs['dSR'] > color_control_dict['max catalog dsr mmag'])
-    color = (df_screened_comp_obs['SR'] - df_screened_comp_obs['SI'])
-    remove_by_min_color = (color < color_control_dict['min sloan ri color'])
-    remove_by_max_color = (color > color_control_dict['max sloan ri color'])
-    remove_by_comp_id = df_screened_comp_obs['SourceID'].isin(color_control_dict['omit comps'])
-    obs_to_remove = (remove_by_min_mag | remove_by_max_mag | remove_by_cat_mag_uncert |
-                     remove_by_min_color | remove_by_max_color | remove_by_comp_id)
-    obs_to_keep = (~ obs_to_remove).to_list()
-    df_screened_comp_obs = df_screened_comp_obs.loc[obs_to_keep, :]
-
-    # Recombine screened obs of comps and MPs, remove requested image, re-sort:
-    df_screened_obs = df_screened_comp_obs.append(df_screened_mp_obs)
-    remove_by_image = df_screened_obs['FITSfile'].isin(color_control_dict['omit images'])
-    obs_to_keep = (~ remove_by_image).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    # Remove obviously bad images (number of comps less than half max number of comps in any image):
-    comp_counts = df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', 'FITSfile'].value_counts()
-    max_comp_count = comp_counts.max()
-    fn_too_few_comps = [fn for fn in comp_counts.index if comp_counts[fn] < max_comp_count / 2.0]
-    remove_too_few_comps = df_screened_obs['FITSfile'].isin(fn_too_few_comps)
-    obs_to_keep = (~ remove_too_few_comps).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    # Remove comps absent from any image (so that all images have same comp set at this point):
-    image_count = len(df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', 'FITSfile'].drop_duplicates())
-    image_count_per_comp = df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', 'SourceID'].value_counts()
-    comps_not_in_every_image = [id for id in image_count_per_comp.index
-                                if image_count_per_comp[id] < image_count]
-    remove_comps_not_in_every_image = df_screened_obs['SourceID'].isin(comps_not_in_every_image)
-    obs_to_keep = (~ remove_comps_not_in_every_image).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    # Apply Omit Obs criterion (this should be done separately, and after all others):
-    remove_by_obs_id = df_screened_comp_obs['Serial'].isin(color_control_dict['omit obs'])
-    obs_to_keep = (~ remove_by_obs_id).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    # Lastly: remove (with warning) images with fewer than minimum number of comps:
-    comp_count_per_image = df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', 'FITSfile'].value_counts()
-    images_too_few_comps = [fn for fn in comp_count_per_image.index
-                            if comp_count_per_image[fn] < color_control_dict['min valid comps per image']]
-    remove_too_few_comps = df_screened_obs['FITSfile'].isin(images_too_few_comps)
-    obs_to_keep = (~ remove_too_few_comps).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :].sort_values(by=['JD_mid', 'Type', 'SourceID'])
-
-    iiii = 4
-
-
-    # For each filter, build and run model, then get no-CI MP mag for each image:
-    df_results = None # accumulator for final mag results, both filters.
-    for (f, pb) in [(fa, pb_a), (fb, pb_b)]:
-        df_model_this_filter = df_screened_obs.loc[df_screened_obs['Filter'] == f, :].copy()
-        # Here, count MP obs in this filter, error if not at least one.
-        model = SessionModel2(df_model_this_filter, f, pb, color_index_passbands, color_control_dict)
-        if df_results is None:
-            df_results = model.df_mp_mags
-        else:
-            df_results = df_results.append(model.df_mp_mags)
-
-    # Run second (vs JD) regression, backcalculating for best CI & sigma.
-
-
-    # Generate diagnostic plots (each filter):
-
-
-    # Write to console and to log file:
-
-
-
-
-    # # Generate plot (may as well do it here rather than in another fn, as all data is already gathered):
-    # fig, axes = plt.subplots(ncols=1, nrows=1, figsize=(11, 8.5))  # (width, height) in "inches"
-    # ax = axes  # not subscripted if just one subplot in Figure
-    # page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Color Index regression'
-    # ax.set_title(page_title, color='darkblue', fontsize=20, pad=30)
-    # plot_annotation = '{0:.3f}'.format(mp_color) +\
-    #     ' ' + u'\u00B1' + ' {0:.3f}'.format(sigma_color) + ' from ' + filter_string +\
-    #     ' (' + str(n_ci_comps) + ' comps used)'
-    # fig.text(x=0.5, y=0.87, s=plot_annotation,
-    #          verticalalignment='top', horizontalalignment='center', fontsize=12)
-    # x_values = [x[1] for x in result.model.exog]  # unpack from 2-d array.
-    # y_values = result.model.endog
-    # ax.set_xlabel('Diff(instrumental magnitudes): ' + filter_string)
-    # ax.set_ylabel('Color index: ' + passband_string)
-    # ax.grid(True, color='lightgray', zorder=-1000)
-    # ax.scatter(x=x_values, y=y_values, alpha=0.7, color='black', zorder=+1000)
-    # x_mp = [mag_diff]
-    # y_mp = [mp_color]
-    # ax.scatter(x=x_mp, y=y_mp, alpha=1, s=144, marker='X', color='orangered', zorder=+1001)
-    #
-    # # Label with comp ID: (1) outlier residuals, (2) lowest and highest inst. mag diffs:
-    # is_outlier = [abs(t) > 2.5 for t in result.resid_pearson]
-    # is_highest = [x == max(x_values) for x in x_values]
-    # is_lowest = [x == min(x_values) for x in x_values]
-    # to_label = [(o or h or l) for (o, h, l) in zip(is_outlier, is_highest, is_lowest)]
-    # labels = df_fit['comp_id']
-    # for x, y, label, add_label, t in zip(x_values, y_values, labels, to_label, result.resid_pearson):
-    #     if add_label:
-    #         if t > 0:
-    #             ax.annotate(label, xy=(x, y), xytext=(-4, 4),
-    #                         textcoords='offset points', ha='right', va='bottom', rotation=-40)
-    #         else:
-    #             ax.annotate(label, xy=(x, y), xytext=(4, -4),
-    #                         textcoords='offset points', ha='left', va='top', rotation=-40)
-    # plt.show()
-    # # fig.savefig(COLOR_PLOT_FILENAME)
-    #
-    # # Write final results to screen and to log:
-    # output = 'MP color index (' + passband_string + ') = ' + '{0:.3f}'.format(mp_color) +\
-    #          ' ' + u'\u00B1' + ' {0:.3f}'.format(sigma_color) + ' from ' + filter_string +\
-    #          '  (' + str(n_ci_comps) + ' comps used)'
-    # print(output + '\n   Write this to ' + CONTROL_FILENAME + ': #MP_RI_COLOR  ' +
-    #       '{0:.3f}'.format(mp_color))
-    # log_file.write(output)
-    # log_file.close()
-
-
-class SessionModel2:
-    """ Applies to *one* filter in one session.
-        NOTE 20201021: For now we use only 1st-order (linear in Color Index) transforms.
-        [2nd-order (quadratic in CI) will be too hard to backsolve, and probably unstable.]
-    """
-    def __init__(self, df_model, filter, passband, color_index_passbands, color_control_dict):
-        """ :param df_model:
-            :param filter:
-            :param passband:
-            :param color_index_passbands:
-            :param color_control_dict:
-        """
-        self.df_model = df_model
-        self.filter = filter
-        self.passband = passband
-        self.color_index_passbands = color_index_passbands
-
-        self.transform_option = color_control_dict['Transform'][(filter, passband)]  # TODO: correct this.
-        self.extinction_option = color_control_dict['Extinction'][filter]
-        self.fit_vignette = color_control_dict['fit_extinction']
-        self.fit_xy = color_control_dict['fit_xy']
-        self.fit_jd = color_control_dict['fit_jd']
-
-        self.df_used = df_model.copy().loc[df_model['UseInModel'], :]  # only observations used in model.
-        self.df_used_comps_only = self.df_used.loc[(self.df_used['Type'] == 'Comp'), :].copy()
-        self.df_used_mps_only = self.df_used.loc[(self.df_used['Type'] == 'MP'), :].copy()
-        self.image_filenames = list(self.df_used['FITSfile'].drop_duplicates())
-        self.n_images = len(self.image_filenames)
-
-        self.dep_var_name = 'InstMag_with_offsets'
-        self.mm_fit = None      # placeholder for the fit result [photrix MixedModelFit object].
-        self.transform = None   # placeholder for this fit parameter result [scalar].
-        self.transform_fixed = None     # "
-        self.extinction = None          # "
-        self.vignette = None            # "
-        self.x = None                   # "
-        self.y = None                   # "
-        self.jd1 = None                 # "
-        self.statsmodels_object = None  # placeholder for regression model object.
-        self.df_mp_mags = None          # placeholder for results Dataframe.
-        self.is_valid = False  # will be updated to True iff everything completes normally.
-
-        if self.n_images <= 0:
-            print(' >>>>> ERROR: SessionModel2(', filter, passband, 'was passed no images.')
-        else:
-            self.regression_type = 'ols' if self.n_images == 1 else 'mixed-model'
-            self._prep_and_do_regression()
-            self._calc_mp_mags()
-
-    def _prep_and_do_regression(self):
-        fit_summary_lines = []
-        fixed_effect_var_list = []
-
-        # Initiate dependent-variable offset, which will aggregate all such offset terms:
-        dep_var_offset = self.df_used_comps_only[self.passband].copy()  # *copy* to avoid damage.
-
-        # Add columns CI and CI2 as indep variables, depending on color index used:
-        self.df_used_comps_only['CI'] = self.df_used_comps_only[self.color_index_passbands[0]] -\
-                                        self.df_used_comps_only[self.color_index_passbands[1]]
-        self.df_used_comps_only['CI2'] = [ci ** 2 for ci in self.df_used_comps_only['CI']]
-
-        # Handle transform option (transform=coeff(s), catalog CI, CI2=indep var(s)):
-        transform_handled = False
-        if self.transform_option == 'fit=1':
-            fixed_effect_var_list.append('CI')
-            transform_handled = True
-        # elif self.transform_option == 'fit=2':
-        #     fixed_effect_var_list.extend(['CI', 'CI2'])
-        #     transform_handled = True
-        elif isinstance(self.transform_option, list):
-            if self.transform_option[0] == 'use':
-                if len(self.transform_option) in [2, 3]:
-                    coeffs = (self.transform_option[1:] + [0.0])[:2]  # 2nd-order coeff -> 0 if absent.
-                    dep_var_offset += coeffs[0] * self.df_used_comps_only['CI'] +\
-                                      coeffs[1] * self.df_used_comps_only['CI2']
-                    transform_handled = True
-        if not transform_handled:
-            print(' >>>>> WARNING: _prep_and_do_regression() cannot handle transform option =',
-                  str(self.transform_option))
-            return None
-
-        # Handle extinction option (extinction=coeff, ObsAirmass=indep var):
-        extinction_handled = False
-        if self.extinction_option == 'fit':
-            fixed_effect_var_list.append()
-            extinction_handled = True
-        elif isinstance(self.extinction_option, list):
-            if self.extinction_option[0] == 'use':
-                coeff = self.extinction_option[1]
-                dep_var_offset += coeff * self.df_used_comps_only['ObsAirmass']
-                extinction_handled = True
-        if not extinction_handled:
-            print(' >>>>> WARNING: _prep_and_do_regression() cannot handle extinction option =',
-                  str(self.extinction_option))
-            return None
-
-        # Build all other fixed-effect (independent) variable lists and dep-var offsets:
-        if self.fit_vignette:
-            fixed_effect_var_list.append('Vignette')
-        if self.fit_xy:
-            fixed_effect_var_list.extend(['X1024', 'Y1024'])
-        if self.fit_jd:
-            fixed_effect_var_list.append('JD_fract')
-        if len(fixed_effect_var_list) == 0:
-            fixed_effect_var_list = ['JD_fract']  # as statsmodels requires >= 1 fixed-effect variable.
-
-        # Build dependent (y) variable:
-        self.df_used_comps_only[self.dep_var_name] = self.df_used_comps_only['InstMag'] - dep_var_offset
-
-        if self.n_images == 1:
-            # Do std OLS regression on comps (no mixed-model or random effect possible):
-            import statsmodels.api as sm
-            dep_var = self.df_used_comps_only[self.dep_var_name]
-            indep_vars = self.df_used_comps_only[fixed_effect_var_list]
-            indep_vars_with_constant = sm.add_constant(indep_vars)  # adds column 'const' of ones.
-            self.statsmodels_object = sm.OLS(dep_var, indep_vars_with_constant).fit
-        else:
-            # Do mixed-model regression (random effect = FITSfile column):
-            import warnings
-            from statsmodels.tools.sm_exceptions import ConvergenceWarning
-            warnings.simplefilter('ignore', ConvergenceWarning)
-            random_effect_var_name = 'FITSfile'  # cirrus effect is per-image.
-            self.mm_fit = MixedModelFit(data=self.df_used_comps_only,
-                                        dep_var=self.dep_var_name,
-                                        fixed_vars=fixed_effect_var_list,
-                                        group_var=random_effect_var_name)
-            self.statsmodels_object = self.mm_fit.statsmodels_object
-
-        # Print summaries, save fit summary file, exit.
-        print(60 * '*', '\nFilter', self.filter + ':', )
-        print(self.statsmodels_object.summary())
-        print('sigma =', '{0:.1f}'.format(1000.0 * self.mm_fit.sigma), 'mMag.')
-        if not self.mm_fit.converged:
-            msg = ' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.'
-            print(msg)
-            fit_summary_lines.append(msg)
-        color_index_string = self.color_index_passbands[0] + '-' + self.color_index_passbands[1]
-        filename = 'fit_summary_' + color_index_string + '_' + self.filter + '.txt'
-        write_text_file(filename,
-                        'Mixed-model Regression for directory ' + get_context()[0] + '\n\n' +
-                        'Color index ' + color_index_string + '   Filter ' + self.filter + '\n' +
-                        '\n'.join(fit_summary_lines) +
-                        self.mm_fit.statsmodels_object.summary().as_text() +
-                        '\n\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
-
-    def _calc_mp_mags(self):
-        """ Evaluate MP magnitudes, writes them into a dataframe self.mp_mags.
-        :return: [None, writes results to self.mp_mags, a Dataframe]
-        """
-        # This fn doesn't care whether model is OLS or Mixed-model.
-        # Set CI and CI2 to zero for now; we will backsolve for CI separately (later).
-        self.df_used_mps_only['CI'] = 0.0
-        self.df_used_mps_only['CI2'] = 0.0
-
-        # "Predict" inst mags but employing all catmag=0 and CI,CI2 = 0.
-        predictions_from_model_only = self.statsmodels_object.predict(self.df_used_mps_only)
-
-        # Correct for dep_var_offsets:
-        dep_var_offsets = len(self.df_used_mps_only) * [0.0]
-        if isinstance(self.extinction_option, list):
-            if self.extinction_option[0] == 'use':
-                coeff = self.extinction_option[1]
-                dep_var_offsets += coeff * self.df_used_comps_only['ObsAirmass']
-        predictions_with_offsets = predictions_from_model_only + dep_var_offsets
-
-        # Make small dataframe with columns: FITSfile, Filter, PredictedInstMag, InstMag, InstMagSigma,
-        #     Transform, JD_mid.
-        self.df_mags = self.df_used_mps_only[['FITSfile', 'Filter', 'InstMag',
-                                              'InstMagSigma', 'JD_mid']].copy()
-        self.df_mags['PredictedInstMag'] = predictions_with_offsets
-        self.df_mags['Transform'] = self.transform
-
-
 
 
 
@@ -1552,6 +1137,84 @@ def make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_sele
                                 image_prefix=SESSION_IMAGE_PREFIX)
 
 
+def write_control_txt_stub(this_directory, log_file, df):
+    fullpath = os.path.join(this_directory, CONTROL_FILENAME)
+    if os.path.exists(fullpath):
+        return
+
+    defaults = DO_PHOT_COMP_SELECTION_DEFAULTS
+    df['SecondsRelative'] = [(utc - df['UTC_mid'].min()).total_seconds() for utc in df['UTC_mid']]
+    i_earliest = df['SecondsRelative'].nsmallest(n=1).index[0]
+    i_latest = df['SecondsRelative'].nlargest(n=1).index[0]
+    earliest_filename = df.loc[i_earliest, 'Filename']
+    latest_filename = df.loc[i_latest, 'Filename']
+
+    def yes_no(true_false):
+        return 'Yes' if true_false else 'No'
+
+    lines = [';----- This is ' + CONTROL_FILENAME + ' for directory:\n;      ' + this_directory,
+             ';',
+             ';===== MP LOCATIONS BLOCK ===========================================',
+             ';===== Enter before make_dfs() ======================================',
+             ';      MP x,y positions for aperture photometry:',
+             '#MP_LOCATION  ' + earliest_filename + '  [mp_x_pixel]  [mp_y_pixel]   ; '
+             'early filename, change if needed',
+             '#MP_LOCATION  ' + latest_filename + '  [mp_x_pixel]  [mp_y_pixel]   ; '
+             ' late filename, change if needed',
+             ';',
+             ';===== MP RI COLOR BLOCK ============================================',
+             ';===== Enter before do_mp_phot(), get from do_color. ================',
+             '#MP_RI_COLOR ' + '{0:+.3f}'.format(DEFAULT_MP_RI_COLOR) +
+             '  Default MP color  ;  get by running do_color(), or leave as default=' +
+             '{0:+.3f}'.format(DEFAULT_MP_RI_COLOR),
+             ';',
+             ';===== SELECTION CRITERIA BLOCK =====================================',
+             ';===== Enter before do_mp_phot() ====================================',
+             ';      Selection criteria for comp stars, observations, images:',
+             ';#COMP  nnnn nn,   nnn        ; to omit comp(s) by comp ID',
+             ';#OBS nnn,nnnn nnnn   nn      ; to omit observation(s) by Serial number',
+             ';#IMAGE  MP_mmmm-00nn-Clear   ; to omit one FITS image (.fts at end optional)',
+             (';#MIN_R_MAG ' + str(defaults['min_catalog_r_mag'])).ljust(30) +
+             '; default=' + str(defaults['min_catalog_r_mag']),
+             (';#MAX_R_MAG ' + str(defaults['max_catalog_r_mag'])).ljust(30) +
+             '; default=' + str(defaults['max_catalog_r_mag']),
+             (';#MAX_CATALOG_DR_MMAG ' + str(defaults['max_catalog_dr_mag'])).ljust(30) +
+             '; default=' + str(defaults['max_catalog_dr_mag']),
+             (';#MIN_SLOAN_RI_COLOR ' + str(defaults['min_catalog_ri_color'])).ljust(30) +
+             '; default=' + str(defaults['min_catalog_ri_color']),
+             (';#MAX_SLOAN_RI_COLOR ' + str(defaults['max_catalog_ri_color'])).ljust(30) +
+             '; default=' + str(defaults['max_catalog_ri_color']),
+             ';',
+             ';===== REGRESSION OPTIONS BLOCK =====================================',
+             ';===== Enter before do_mp_phot(): ===================================',
+             ';----- OPTIONS for regression model:',
+
+             ';Choices for #FIT_TRANSFORM: Fit=1; '
+             + 'Fit=2; Use 0.2 0.4 [=tr1 & tr2 values]; Yes->Fit=1; No->Use 0 0',
+             ';#FIT_TRANSFORM  Fit=2'.ljust(30) + '; default= Fit=2',
+
+             ';Choices for #FIT_EXTINCTION: Yes->do fit; No->use default extinction;'
+             + ' Use +0.34-> use this value ',
+             (';#FIT_EXTINCTION ' + yes_no(DEFAULT_MODEL_OPTIONS['fit_extinction'])).ljust(30) +
+             '; default='
+             + yes_no(DEFAULT_MODEL_OPTIONS['fit_extinction']) + ' // choose Yes or No  (case-insensitive)',
+
+             (';#FIT_VIGNETTE ' + yes_no(DEFAULT_MODEL_OPTIONS['fit_vignette'])).ljust(30) + '; default='
+             + yes_no(DEFAULT_MODEL_OPTIONS['fit_vignette']) + ' // choose Yes or No  (case-insensitive)',
+             (';#FIT_XY ' + yes_no(DEFAULT_MODEL_OPTIONS['fit_xy'])).ljust(30) + '; default='
+             + yes_no(DEFAULT_MODEL_OPTIONS['fit_xy']) + ' // choose Yes or No  (case-insensitive)',
+             (';#FIT_JD ' + yes_no(DEFAULT_MODEL_OPTIONS['fit_jd'])).ljust(30) + '; default='
+             + yes_no(DEFAULT_MODEL_OPTIONS['fit_jd']) + ' // choose Yes or No  (case-insensitive)',
+             ';'
+             ]
+    lines = [line + '\n' for line in lines]
+    fullpath = os.path.join(this_directory, CONTROL_FILENAME)
+    if not os.path.exists(fullpath):
+        with open(fullpath, 'w') as f:
+            f.writelines(lines)
+            log_file.write('New ' + CONTROL_FILENAME + ' file written.\n')
+
+
 def write_text_file(filename, lines):
     this_directory, mp_string, an_string = get_context()
     fullpath = os.path.join(this_directory, filename)
@@ -1893,65 +1556,6 @@ def read_regression_options(filename):
     return option_dict
 
 
-def make_color_control_dict(this_directory, defaults_dict):
-    color_control_ini = astropak.ini.IniFile(os.path.join(this_directory,
-                                                          defaults_dict['color control filename']))
-    color_control_dict = color_control_ini.value_dict
-
-    # Parse and overwrite 'omit comps', 'omit obs', and 'omit images':
-    comps_to_omit = color_control_dict['omit comps'].replace(',', ' ').split()
-    color_control_dict['omit comps'] = tuple(comps_to_omit)
-    obs_to_omit = color_control_dict['omit obs'].replace(',', ' ').split()
-    color_control_dict['omit obs'] = tuple(obs_to_omit)
-    color_control_dict['omit images'] = tuple(color_control_dict['omit images'])
-
-    # Parse and overwrite 'transforms':
-    transform_dict = dict()
-    transform_lines = [line.strip() for line in color_control_dict['transforms']]
-    for line in transform_lines:
-        items = line.replace(',', ' ').split()
-        if len(items) in [5, 6]:
-            key = tuple(items[:4])
-            command = items[4].lower().strip()
-            if command == 'fit':
-                values = tuple(['fit'])
-            elif command == 'use' and len(items) >= 6:
-                values = tuple(['use', float_or_warn(items[5], 'Transforms ' + line)])
-            else:
-                values = None
-            transform_dict[key] = values
-        else:
-            print(' >>>>> ERROR:', COLOR_CONTROL_FILENAME, 'bad transform line:', line)
-    color_control_dict['transforms'] = transform_dict
-
-    # Parse and overwrite 'extinctions':
-    extinction_dict = dict()
-    extinction_lines = [line.strip() for line in color_control_dict['extinctions']]
-    for line in extinction_lines:
-        items = line.replace(',', ' ').split()
-        if len(items) in [2, 3]:
-            key = items[0]
-            command = items[1].lower().strip()
-            value = None
-            if command == 'fit':
-                value = tuple(['fit'])
-            elif command == 'use':
-                if len(items) >= 3:
-                    value = tuple(['use', float_or_warn(items[2], 'Extinctions ' + line)])
-                else:
-                    print(' >>>>> ERROR:', COLOR_CONTROL_FILENAME, 'bad extinction line:', line)
-            else:
-                print(' >>>>> ERROR:', COLOR_CONTROL_FILENAME, 'bad extinction line:', line)
-            extinction_dict[key] = value
-        else:
-            print(' >>>>> ERROR:', COLOR_CONTROL_FILENAME, 'bad extinction line:', line)
-    color_control_dict['extinctions'] = extinction_dict
-    return color_control_dict
-
-
-
-
-
 _____READING_DATA_FILES_____________________________________ = 0
 
 
@@ -2257,155 +1861,6 @@ def draw_x_line(ax, x_value, color='lightgray'):
 
 _____SUPPORT________________________________________________ = 0
 
-
-def write_control_txt_stub(this_directory, log_file, df):
-    defaults = DO_PHOT_COMP_SELECTION_DEFAULTS
-    df['SecondsRelative'] = [(utc - df['UTC_mid'].min()).total_seconds() for utc in df['UTC_mid']]
-    i_earliest = df['SecondsRelative'].nsmallest(n=1).index[0]
-    i_latest = df['SecondsRelative'].nlargest(n=1).index[0]
-    earliest_filename = df.loc[i_earliest, 'Filename']
-    latest_filename = df.loc[i_latest, 'Filename']
-
-    def yes_no(true_false):
-        return 'Yes' if true_false else 'No'
-
-    lines = [';----- This is ' + CONTROL_FILENAME + ' for directory:\n;      ' + this_directory,
-             ';',
-             ';===== MP LOCATIONS BLOCK ===========================================',
-             ';===== Enter before make_dfs() ======================================',
-             ';      MP x,y positions for aperture photometry:',
-             '#MP_LOCATION  ' + earliest_filename + '  [mp_x_pixel]  [mp_y_pixel]   ; '
-             'early filename, change if needed',
-             '#MP_LOCATION  ' + latest_filename + '  [mp_x_pixel]  [mp_y_pixel]   ; '
-             ' late filename, change if needed',
-             ';',
-             ';===== MP RI COLOR BLOCK ============================================',
-             ';===== Enter before do_mp_phot(), get from do_color. ================',
-             '#MP_RI_COLOR ' + '{0:+.3f}'.format(DEFAULT_MP_RI_COLOR) +
-             '  Default MP color  ;  get by running do_color(), or leave as default=' +
-             '{0:+.3f}'.format(DEFAULT_MP_RI_COLOR),
-             ';',
-             ';===== SELECTION CRITERIA BLOCK =====================================',
-             ';===== Enter before do_mp_phot() ====================================',
-             ';      Selection criteria for comp stars, observations, images:',
-             ';#COMP  nnnn nn,   nnn        ; to omit comp(s) by comp ID',
-             ';#OBS nnn,nnnn nnnn   nn      ; to omit observation(s) by Serial number',
-             ';#IMAGE  MP_mmmm-00nn-Clear   ; to omit one FITS image (.fts at end optional)',
-             (';#MIN_R_MAG ' + str(defaults['min_catalog_r_mag'])).ljust(30) +
-             '; default=' + str(defaults['min_catalog_r_mag']),
-             (';#MAX_R_MAG ' + str(defaults['max_catalog_r_mag'])).ljust(30) +
-             '; default=' + str(defaults['max_catalog_r_mag']),
-             (';#MAX_CATALOG_DR_MMAG ' + str(defaults['max_catalog_dr_mag'])).ljust(30) +
-             '; default=' + str(defaults['max_catalog_dr_mag']),
-             (';#MIN_SLOAN_RI_COLOR ' + str(defaults['min_catalog_ri_color'])).ljust(30) +
-             '; default=' + str(defaults['min_catalog_ri_color']),
-             (';#MAX_SLOAN_RI_COLOR ' + str(defaults['max_catalog_ri_color'])).ljust(30) +
-             '; default=' + str(defaults['max_catalog_ri_color']),
-             ';',
-             ';===== REGRESSION OPTIONS BLOCK =====================================',
-             ';===== Enter before do_mp_phot(): ===================================',
-             ';----- OPTIONS for regression model:',
-
-             ';Choices for #FIT_TRANSFORM: Fit=1; '
-             + 'Fit=2; Use 0.2 0.4 [=tr1 & tr2 values]; Yes->Fit=1; No->Use 0 0',
-             ';#FIT_TRANSFORM  Fit=2'.ljust(30) + '; default= Fit=2',
-
-             ';Choices for #FIT_EXTINCTION: Yes->do fit; No->use default extinction;'
-             + ' Use +0.34-> use this value ',
-             (';#FIT_EXTINCTION ' + yes_no(DEFAULT_MODEL_OPTIONS['fit_extinction'])).ljust(30) +
-             '; default='
-             + yes_no(DEFAULT_MODEL_OPTIONS['fit_extinction']) + ' // choose Yes or No  (case-insensitive)',
-
-             (';#FIT_VIGNETTE ' + yes_no(DEFAULT_MODEL_OPTIONS['fit_vignette'])).ljust(30) + '; default='
-             + yes_no(DEFAULT_MODEL_OPTIONS['fit_vignette']) + ' // choose Yes or No  (case-insensitive)',
-             (';#FIT_XY ' + yes_no(DEFAULT_MODEL_OPTIONS['fit_xy'])).ljust(30) + '; default='
-             + yes_no(DEFAULT_MODEL_OPTIONS['fit_xy']) + ' // choose Yes or No  (case-insensitive)',
-             (';#FIT_JD ' + yes_no(DEFAULT_MODEL_OPTIONS['fit_jd'])).ljust(30) + '; default='
-             + yes_no(DEFAULT_MODEL_OPTIONS['fit_jd']) + ' // choose Yes or No  (case-insensitive)',
-             ';'
-             ]
-    lines = [line + '\n' for line in lines]
-    fullpath = os.path.join(this_directory, CONTROL_FILENAME)
-    if not os.path.exists(fullpath):
-        with open(fullpath, 'w') as f:
-            f.writelines(lines)
-            log_file.write('New ' + CONTROL_FILENAME + ' file written.\n')
-
-
-def write_color_control_ini_stub(this_directory, defaults_dict, log_file):
-    this_filename = defaults_dict['color control filename']
-    template_filename = defaults_dict['color control template filename']
-    lines = ['#----- This is ' + COLOR_CONTROL_FILENAME + ' for directory:',
-             '#-----    ' + this_directory,
-             '#',
-             '[Ini Template]',
-             'Filename = ' + template_filename,
-             '',
-             '[Selection]',
-             '# Omit Comps & Omit Obs: values may extend to multiple lines if necessary.',
-             'Omit Comps = ',
-             'Omit Obs = ',
-             '# Omit Images: give filename, (with or) without .fts at end.',
-             'Omit Images = ',
-             'Max MP Mag Uncertainty = ' + str(defaults_dict['max mp mag uncertainty']),
-             'Min SR Mag = ' + str(defaults_dict['min sr mag']),
-             'Max SR Mag = ' + str(defaults_dict['max sr mag']),
-             'Max Catalog dSR mmag = ' + str(defaults_dict['max catalog dsr mmag']),
-             'Min Sloan RI Color = ' + str(defaults_dict['min sloan ri color']),
-             'Max Sloan RI Color = ' + str(defaults_dict['max sloan ri color']),
-             '',
-             '[Regression]',
-             '# Transform = Filter Passband CI_passband1 CI_passband2  -or-',
-             '# Transform = Filter Passband Command -where- Command: Fit or Use -0.03',
-             '# One per line only. First order only for do_color() [2020-10-21].',
-             'Transform = ',
-             '# Extinction = Filter Command -where- Command: Fit -or- Use +0.16.',
-             '# One per line only. Recommend \'Use\' if at all possible.',
-             'Extinction = ',
-             'Fit Vignette = Yes',
-             'Fit XY = No',
-             '# Strongly recommend Fit JD = No for do_color().',
-             'Fit JD = No'
-             ]
-    lines = [line + '\n' for line in lines]
-    fullpath = os.path.join(this_directory, this_filename)
-    if not os.path.exists(fullpath):
-        with open(fullpath, 'w') as f:
-            f.writelines(lines)
-            log_file.write('New ' + this_filename + ' file written.\n')
-
-
-def write_color_control_ini_template(this_directory, defaults_dict, log_file):
-    this_filename = defaults_dict['color control template filename']
-    lines = ['#----- This is template file ' + this_filename,
-             '#----- in directory ' + this_directory,
-             '#',
-             '[Selection]',
-             'Omit Comps  = string  ->  omit comps',
-             'Omit Obs    = string  ->  omit obs',
-             'Omit Images = string  ->  omit images',
-             'Max MP Mag Uncertainty = string -> max mp mag uncertainty',
-             'Min SR Mag  = float   ->  min sr mag',
-             'Max SR Mag  = float   ->  max sr mag',
-             'Max Catalog dSR mmag  = float  ->  max catalog dsr mmag',
-             'Min Sloan RI Color    = float  ->  min sloan ri color',
-             'Max Sloan RI Color    = float  ->  max sloan ri color',
-             '',
-             '[Regression]',
-             'MP Sloan RI Color = float   ->  mp sloan ri color',
-             'Transform         = string  ->  transform',
-             'Extinction        = string  ->  extinction',
-             'Fit Vignette      = boolean ->  fit vignette',
-             'Fit XY            = boolean ->  fit_xy',
-             'Fit JD            = boolean ->  fit_jd',
-             '#----- end of template'
-             ]
-    lines = [line + '\n' for line in lines]
-    fullpath = os.path.join(this_directory, this_filename)
-    if not os.path.exists(fullpath):
-        with open(fullpath, 'w') as f:
-            f.writelines(lines)
-            log_file.write('New ' + this_filename + ' file written.\n')
 
 
 def get_fits_filenames(directory):
