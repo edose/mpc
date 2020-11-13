@@ -16,6 +16,7 @@ import mpc.ini
 import mpc.mp_phot
 
 # From EVD package photrix (deprecated import--> prefer astropak):
+# NO PHOTRIX IMPORTS ALLOWED in this module mp_color.py.
 # from photrix.image import Image, FITS
 
 # From EVD package astropak (preferred):
@@ -27,6 +28,7 @@ import astropak.util
 # BOOT_INI_FILENAME = 'defaults.ini'
 
 # For color handling:
+AVAILABLE_CATALOG_COLOR_INDEX_PASSBANDS = ('SG', 'SR', 'SI')
 # DEFAULT_FILTERS_FOR_MP_COLOR_INDEX = ('V', 'I')
 # COLOR_INDEX_PASSBANDS = ('r', 'i')
 # DEFAULT_MP_RI_COLOR = 0.22  # close to known Sloan mean (r-i) for MPs.
@@ -70,84 +72,51 @@ def write_control_files():
 _____COLOR_INDEX_PHOTOMETRY________________________________________________ = 0
 
 
-def do_color_SRI():
-    """ Convenience function. """
-    do_color_2filters(filters=('SR', 'SI'), target_color=('SR', 'SI'), color_index_passbands=('SR', 'SI'))
+# def do_color_SRI():
+#     """ Convenience wrapper function. """
+#     do_one_color(filters=('SR', 'SI'), result_color_index=('SR', 'SI'), catalog_color_index=('SR', 'SI'))
+#
+#
+# def do_color_SRI_from_johnson():
+#     """ Convenience wrapper function. """
+#     do_one_color(filters=('R', 'I'), result_color_index=('SR', 'SI'), catalog_color_index=('SR', 'SI'))
 
 
-def do_color_SRI_from_johnson():
-    """ Convenience function. """
-    do_color_2filters(filters=('R', 'I'), target_color=('SR', 'SI'), color_index_passbands=('SR', 'SI'))
-
-
-def do_color_2filters(filters=None, target_color=None, color_index_passbands=None):
+def do_one_color(definition=None, catalog_color_index=None):
     """ Estimate ONE MP Color Index from images in TWO FILTERS.
         First run the 3 initial mp_phot functions (start(), assess(), make_dfs()) to make the dataframes.
         Then run this to get color index.
         ALL PARAMETERS MANDATORY.
-    :param filters: specify the two filters for which images are to be used, e.g., ('SR', 'SI') to
-        use Sloan r' and i' images. [2-tuple or 2-list of strings] MANDATORY: no default.
-    :param target_color: specify the two passbands defining the desired color to measure,
-        e.g., ('SG', 'SR') to measure color SG-SR ('SGR' in LCDB parlance). MANDATORY: no default.
-        [2-tuple or 2-list of strings]
-    :param color_index_passbands: specify the two passbands defining the color index, e.g., ('SR', 'SI') to
+    :param definition: a 4-tuple (filter_a, filter_b, passband_a, passband_b), e.g., ('R', 'I', 'SR', 'SI').
+        Filters must have usable images in df_all.
+        Passbands must have transforms to one of the filters, using the catalog_color_index, that is,
+            in the above example definition, the transforms (R->SR, catalog_color_index) and
+            (I->SI, catalog_color_index) must exist in the defaults_dict.
+    :param catalog_color_index: specify the two passbands defining the color index, e.g., ('SR', 'SI') to
         define color in Sloan SR and SI (typical case). In any case, the two passbands must be
         represented in the ATLAS refcat2 catalog (prob. as 'r' and 'i') and must be included
         in the local catalog object. [2-tuple of strings] MANDATORY: no default.
     :return: None. Only writes to screen and to log file, makes diagnostic plots.
     """
-    # Verify that parms passed in are of correct form:
-    filters_parm_ok, target_color_parm_ok, color_index_passbands_ok = False, False, False
-    if isinstance(filters, tuple) or isinstance(filters, list):
-        filters = tuple(filters)  # ensure tuple.
-        if len(filters) == 2:
-            if all([isinstance(f, str) for f in filters]):
-                filters_parm_ok = True
-    if isinstance(target_color, tuple) or isinstance(target_color, list):
-        target_color = tuple(target_color)
-        if len(target_color) == 2:
-            if all([isinstance(pb, str) for pb in target_color]):
-                target_color_parm_ok = True
-    if isinstance(color_index_passbands, tuple) or isinstance(color_index_passbands, list):
-        color_index_passbands = tuple(color_index_passbands)
-        if len(color_index_passbands) == 2:
-            if all([isinstance(pb, str) for pb in color_index_passbands]):
-                color_index_passbands_ok = True
-    if not filters_parm_ok:
-        print(' >>>>> ERROR: filters invalid:', str(filters))
-    if not target_color_parm_ok:
-        print(' >>>>> ERROR: target_color invalid:', str(target_color))
-    if not color_index_passbands_ok:
-        print(' >>>>> ERROR: color_index_passbands invalid:', str(color_index_passbands))
-    if not all([filters_parm_ok, target_color_parm_ok, color_index_passbands_ok]):
-        return
-    fa, fb = filters
-    pb_a, pb_b = target_color
-    ci_a, ci_b = color_index_passbands
-    print(' >>>>> Starting do_color_2filters(): color', pb_a + '-' + pb_b, 'from filters', fa, '&', fb,
-          'using color index', ci_a + '-' + ci_b)
-
     # ===== Get context, write log file header and color control stub:
     defaults_dict = mpc.ini.make_defaults_dict()
     context = mpc.mp_phot.get_context()
     if context is None:
         return
     this_directory, mp_string, an_string = context
-    mp_int = int(mp_string)  # put this in try/catch block.
-    mp_string = str(mp_int)
+    color_control_dict = make_color_control_dict(this_directory, defaults_dict)
+    instrument_dict = mpc.ini.make_instrument_dict(defaults_dict)
     log_file = open(defaults_dict['color log filename'], mode='a')  # set up append to log file.
     log_file.write('\n===== do_color()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
-    # ===== Get needed data, verify all required data are present (e.g. extinctions, transforms):
-
-
-    color_control_dict = make_color_control_dict(this_directory, defaults_dict)
-    observer_dict = mpc.ini.make_observer_dict(defaults_dict)
-    iiii = 4
-
-
-
+    # ===== Verify parms; verify that required filters and transforms exist:
+    if not _verify_input_parms(definition, catalog_color_index, instrument_dict, color_control_dict):
+        return
+    fa, fb, result_a, result_b = definition     # convenience variables.
+    catalog_a, catalog_b = catalog_color_index  # "
+    print(' >>>>> do_one_color(): to get result color', result_a + '-' + result_b,
+          'from filters', fa, '&', fb, 'using catalog color', catalog_a + '-' + catalog_b)
 
     # ===== Load and prepare session's master dataframe, and rename passband columns, e.g. 'r' -> 'SR':
     df_all = mpc.mp_phot.make_df_all(filters_to_include=(fa, fb), comps_only=False,
@@ -155,112 +124,31 @@ def do_color_2filters(filters=None, target_color=None, color_index_passbands=Non
     df_all = df_all.rename(columns={'g': 'SG',   'r': 'SR',   'i': 'SI',   'z': 'SZ',
                                     'dg': 'dSG', 'dr': 'dSR', 'di': 'dSI', 'dz': 'dSZ'})
 
-    # ===== Make list of images taken with both filters:
-    df_mps = df_all.loc[df_all['Type'] == 'MP', :]
-    fa_filenames = df_mps.loc[df_mps['Filter'] == fa, 'FITSfile'].to_list()
-    fb_filenames = df_mps.loc[df_mps['Filter'] == fb, 'FITSfile'].to_list()
-    if len(fa_filenames) <= 0 or len(fb_filenames) <= 0:
-        print(' >>>>> ERROR: no images for one or both of filters: \'' + fa + '\', \'' + fb + '\'')
+    if not _verify_images_available(df_all, definition):
         return
-    # all_filenames = fa_filenames + fb_filenames
-    del fa_filenames, fb_filenames  # at risk of invalidation during screening.
 
-    # ===== Remove images per user request (color_control_dict):
-    df_screened_obs = df_all.copy()
-    remove_by_image = df_screened_obs['FITSfile'].isin(color_control_dict['omit images'])
-    obs_to_keep = (~ remove_by_image).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    # ===== Remove comps (from both filters) per user request (color_control_dict):
-    to_remove_by_comp_id = df_screened_obs['SourceID'].isin(color_control_dict['omit comps'])
-    is_comp = (df_screened_obs['Type'] == 'Comp')
-    obs_to_remove = (to_remove_by_comp_id & is_comp)
-    obs_to_keep = (~ obs_to_remove).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    # ===== Remove obs (MP and comp) with unusable (None or NaN) instmag or instmagsigma:
-    df_screened_obs = df_screened_obs.dropna(subset=['InstMag', 'InstMagSigma'])
-
-    # ===== Identify (and keep) images having exactly one MP obs:
-    mp_obs_by_filename = df_screened_obs.loc[df_screened_obs['Type'] == 'MP', 'FITSfile'].value_counts()
-    filenames_one_mp = [fn for fn in mp_obs_by_filename.index if mp_obs_by_filename[fn] == 1]
-    obs_to_keep = df_screened_obs['FITSfile'].isin(filenames_one_mp).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    # ===== Remove *images* whose MP obs uncertainty is too high:
-    is_mp_obs = (df_screened_obs['Type'] == 'MP')
-    obs_uncert_ok = (df_screened_obs['InstMagSigma'] <=
-                     color_control_dict['max mp obs mag uncertainty'])
-    row_is_good_mp = (is_mp_obs & obs_uncert_ok).to_list()
-    filenames_to_keep = df_screened_obs.loc[row_is_good_mp, 'FITSfile']
-    obs_to_keep = df_screened_obs['FITSfile'].isin(filenames_to_keep).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    # ===== Remove comps whose observation uncertainty is too high:
-    # TODO: ? make max uncert relative to instrumental mag (to more accurately remove true outliers) ?
-    is_comp_obs = df_screened_obs['Type'] == 'Comp'
-    uncert_too_high = df_screened_obs['InstMagSigma'] > color_control_dict['max comp obs mag uncertainty']
-    obs_to_remove = (is_comp_obs & uncert_too_high)
-    obs_to_keep = (~ obs_to_remove).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    df_screened_comp_obs = df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', :]
-    df_screened_mp_obs = df_screened_obs.loc[df_screened_obs['Type'] == 'MP', :]
-
-    # Apply selection criteria to comp obs (MP obs don't have catalog values):
-    remove_by_min_mag = (df_screened_comp_obs['SR'] < color_control_dict['min sr mag'])
-    remove_by_max_mag = (df_screened_comp_obs['SR'] > color_control_dict['max sr mag'])
-    remove_by_cat_mag_uncert = (df_screened_comp_obs['dSR'] > color_control_dict['max catalog dsr mmag'])
-    color = (df_screened_comp_obs['SR'] - df_screened_comp_obs['SI'])
-    remove_by_min_color = (color < color_control_dict['min sloan ri color'])
-    remove_by_max_color = (color > color_control_dict['max sloan ri color'])
-    obs_to_remove = (remove_by_min_mag | remove_by_max_mag | remove_by_cat_mag_uncert |
-                     remove_by_min_color | remove_by_max_color)
-    obs_to_keep = (~ obs_to_remove).to_list()
-    df_screened_comp_obs = df_screened_comp_obs.loc[obs_to_keep, :]
-
-    # Recombine screened obs of comps and MPs:
-    df_screened_obs = df_screened_comp_obs.append(df_screened_mp_obs)
-
-    # Remove obviously bad images (number of comps less than half max number of comps in any image):
-    comp_counts = df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', 'FITSfile'].value_counts()
-    max_comp_count = comp_counts.max()
-    fn_too_few_comps = [fn for fn in comp_counts.index if comp_counts[fn] < max_comp_count / 2.0]
-    remove_too_few_comps = df_screened_obs['FITSfile'].isin(fn_too_few_comps)
-    obs_to_keep = (~ remove_too_few_comps).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    # Remove comps absent from any image (so that all images have same comp set at this point):
-    image_count = len(df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', 'FITSfile'].drop_duplicates())
-    image_count_per_comp = df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', 'SourceID'].value_counts()
-    comps_not_in_every_image = [id for id in image_count_per_comp.index
-                                if image_count_per_comp[id] < image_count]
-    remove_comps_not_in_every_image = df_screened_obs['SourceID'].isin(comps_not_in_every_image)
-    obs_to_keep = (~ remove_comps_not_in_every_image).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    # Apply Omit Obs criterion (this should be done separately, and after all others):
-    remove_by_obs_id = df_screened_obs['Serial'].isin(color_control_dict['omit obs'])
-    obs_to_keep = (~ remove_by_obs_id).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
-
-    # Lastly: remove (with warning) images with fewer than minimum number of comps (extremely rare):
-    comp_count_per_image = df_screened_obs.loc[df_screened_obs['Type'] == 'Comp', 'FITSfile'].value_counts()
-    images_too_few_comps = [fn for fn in comp_count_per_image.index
-                            if comp_count_per_image[fn] < color_control_dict['min valid comps per image']]
-    remove_too_few_comps = df_screened_obs['FITSfile'].isin(images_too_few_comps)
-    obs_to_keep = (~ remove_too_few_comps).to_list()
-    df_screened_obs = df_screened_obs.loc[obs_to_keep, :].sort_values(by=['JD_mid', 'Type', 'SourceID'])
-
-    iiii = 4
-
+    df_screened_obs = _remove_images_on_user_request(df_all, color_control_dict['omit images'])
+    df_screened_obs = _remove_comps_on_user_request(df_screened_obs, color_control_dict['omit comps'])
+    df_screened_obs = _remove_obs_with_unusuable_instmag_instmagsigma(df_screened_obs)
+    df_screened_obs = _keep_images_with_one_mp_obs(df_screened_obs)
+    df_screened_obs = _keep_images_with_low_mp_obs_uncertainty(df_screened_obs,
+                                                        color_control_dict['max mp obs mag uncertainty'])
+    df_screened_obs = _remove_comps_obs_with_high_obs_uncertainty(df_screened_obs,
+                                                        color_control_dict['max comp obs mag uncertainty'])
+    df_screened_obs = _apply_selections_to_comp_obs(df_screened_obs, color_control_dict)
+    df_screened_obs = _remove_images_with_few_comps(df_screened_obs)
+    df_screened_obs = _remove_comps_absent_from_any_image(df_screened_obs)
+    df_screened_obs = _apply_omit_obs_selection_criteria(df_screened_obs, color_control_dict['omit obs'])
+    df_screened_obs = _remove_images_with_too_few_comps(df_screened_obs,
+                                                        color_control_dict['min valid comps per image'])
+    df_screened_obs = df_screened_obs.sort_values(by=['JD_mid', 'Type', 'SourceID'])
 
     # For each filter, build and run model, then get no-CI MP mag for each image:
     df_results = None # accumulator for final mag results, both filters.
-    for (f, pb) in [(fa, pb_a), (fb, pb_b)]:
+    for (f, pb) in [(fa, result_a), (fb, result_b)]:
         df_model_this_filter = df_screened_obs.loc[df_screened_obs['Filter'] == f, :].copy()
         # Here, count MP obs in this filter, error if not at least one.
-        model = SessionModel_Color(df_model_this_filter, f, pb, color_index_passbands, color_control_dict)
+        model = SessionModel_OneFilter(df_model_this_filter, f, pb, catalog_color_index, color_control_dict)
         if df_results is None:
             df_results = model.df_mp_mags
         else:
@@ -324,7 +212,7 @@ def do_color_2filters(filters=None, target_color=None, color_index_passbands=Non
     # log_file.close()
 
 
-class SessionModel_Color:
+class SessionModel_OneFilter:
     """ Applies to *one* filter in one session.
         NOTE 20201021: For now we use only 1st-order (linear in Color Index) transforms.
         [2nd-order (quadratic in CI) will be too hard to backsolve, and probably unstable.]
@@ -367,7 +255,7 @@ class SessionModel_Color:
         self.is_valid = False  # will be updated to True iff everything completes normally.
 
         if self.n_images <= 0:
-            print(' >>>>> ERROR: SessionModel_Color(', filter, passband, 'was passed no images.')
+            print(' >>>>> ERROR: SessionModel_OneFilter(', filter, passband, 'was passed no images.')
         else:
             self.regression_type = 'ols' if self.n_images == 1 else 'mixed-model'
             self._prep_and_do_regression()
@@ -500,10 +388,309 @@ class SessionModel_Color:
         self.df_mags['Transform'] = self.transform
 
 
-_____SUPPORT_FUNCTIONS______________________________________ = 0
+_____SUPPORT_and_SCREENING_FUNCTIONS________________________ = 0
+
+
+def _verify_input_parms(definition, catalog_color_index, instrument_dict, color_control_dict):
+    """ Verify that parms passed in are correct in: number, form, and valid content.
+        PASSES TESTS 2020-11-12 written for *ONE* COLOR ONLY.
+    :param definition: a tuple of 4-tuples (filter_a, filter_b, passband_a, passband_b),
+               e.g., (('R', 'I', 'SR', 'SI'), ...).
+               A bare 4-tuple of strings for one color is OK too.
+    :param catalog_color_index: passbands defining the color index (of comps). [tuple of strings]
+    :param instrument_dict: instrument dict appropriate to this color session. [py dict]
+    :param color_control_dict: color control dictionary for this color session. [py dict]
+    :return: True iff parms entirely OK, else False. [boolean]
+    """
+    # TODO: extend testing to TWO COLOR definition.
+    # Quick screen for types:
+    if not all([isinstance(definition, tuple),
+                isinstance(catalog_color_index, tuple),
+                isinstance(color_control_dict, dict),
+                isinstance(instrument_dict, dict),
+                (len(catalog_color_index) == 2)]):
+        print(' >>>>> ERROR: _verify_input_parms() found at least one parm with wrong type.')
+        return False
+
+    # Wrap definition in outer tuple if a bare 4-tuple of strings (for one color):
+    if len(definition) == 4:
+        if all([isinstance(x, str) for x in definition]):
+            definition = (definition,)  # definition must be tuple of tuples (nested).
+
+    # Parm 'definition': verify syntax:
+    definition_ok = True  # to be falsified by any error.
+    if not len(definition) in (1, 2):  # only 1 or 2 result colors supported.
+        definition_ok = False
+    for d in definition:
+        if not len(d) == 4:
+            definition_ok = False
+            break
+        if not all([isinstance(dd, str) for dd in d]):
+            definition_ok = False
+            break
+    if not definition_ok:
+        print(' >>>>> ERROR: definition has invalid syntax.')
+        return False
+
+    # Parm 'definition': verify filters available in instrument_dict:
+    absent_filters = set()
+    for d in definition:
+        for f in d[:2]:
+            if f not in instrument_dict['available filters']:
+                absent_filters.add(f)
+    if not len(absent_filters) == 0:
+        print(' >>>>> ERROR: filters absent from instrument_dict:', str(list(absent_filters)))
+        return False
+
+    # Parm 'definition': verify all data available for transforms in color control file:
+    definition_ok = True
+    for f_a, f_b, pb_a, pb_b in definition:
+        if instrument_dict['transforms'].get((f_a, pb_a,
+                                              catalog_color_index[0], catalog_color_index[1])) is None:
+            definition_ok = False
+        if instrument_dict['transforms'].get((f_b, pb_b,
+                                              catalog_color_index[0], catalog_color_index[1])) is None:
+            definition_ok = False
+            break
+    if not definition_ok:
+        print(' >>>>> ERROR: definition requires a transform that is missing from color control file.')
+        return False
+
+    # Parm 'definition': verify extinctions available for filters in color control file:
+    extinction_ok = True
+    for f_a, f_b, pb_a, pb_b in definition:
+        for f in (f_a, f_b):
+            extinction = color_control_dict['extinctions'].get(f)
+            if extinction is None:
+                extinction_ok = False
+                break
+    if not extinction_ok:
+        print(' >>>>> ERROR: definition requires an extinction that is missing from color control file.')
+        return False
+
+    # Parm 'catalog_color_index': verify available in catalog:
+    cat_ci_ok = (len(catalog_color_index) == 2) and\
+        all([pb in AVAILABLE_CATALOG_COLOR_INDEX_PASSBANDS for pb in catalog_color_index])
+    if not cat_ci_ok:
+        print(' >>>>> ERROR: catalog CI passbands invalid (must be 2, both in catalog).')
+        return False
+
+    return True
+
+
+def _verify_images_available(df_all, definition):
+    """ Return True iff at least one credible image available for every filter in this color session.
+    :param df_all: master dataframe of all comp and MP observations. [pandas dataframe]
+    :param definition: a 4-tuple (filter_a, filter_b, passband_a, passband_b), e.g., ('R', 'I', 'SR', 'SI').
+    :return: True iff >1 image in each filter available in this color session. [boolean]
+    """
+    # Make list of all filters:
+    filters = set()
+    for (f_a, f_b, _, _) in definition:
+        filters.update((f_a, f_b))
+
+    # Verify at least one image with MP obs and Comp obs for each filter:
+    all_present = True  # falsify on absence detected.
+    for f in filters:
+        mp_present = any((df_all['Filter'] == f) & (df_all['Type'] == 'MP'))
+        comp_present = any((df_all['Filter'] == f) & (df_all['Type'] == 'Comp'))
+        if not (mp_present and comp_present):
+            all_present = False
+            print(' >>>>> ERROR: no image with filter', f + '.')
+    return all_present
+
+
+def _remove_images_on_user_request(df_in, images_to_omit):
+    """ Remove all observations from dataframe that have FITSfile that control file instructs to omit.
+    :param df_all: master dataframe of observations. [pandas dataframe]
+    :param images_to_omit: images [FITS file names] for which all observations are to be removed. [tuple]
+    :return: updated dataframe. [pandas dataframe]
+    """
+    if len(images_to_omit) <= 0:
+        return df_in
+    df_screened_obs = df_in.copy()
+    obs_to_remove = (df_screened_obs['FITSfile'].isin(images_to_omit))
+    if any(obs_to_remove):
+        obs_to_keep = (~ obs_to_remove).to_list()
+        df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
+    return df_screened_obs
+
+
+
+def _remove_comps_on_user_request(df_in, comps_to_omit):
+    """ Remove all comp observations from dataframe that have comp IDs that control file instructs to omit.
+    :param df_in: screened master dataframe of observations. [pandas dataframe]
+    :param comps_to_omit: comp IDs for which all observations are to be removed. [tuple]
+    :return: updated dataframe. [pandas dataframe]
+    """
+    if len(comps_to_omit) <= 0:
+        return df_in
+    df_screened_obs = df_in.copy()
+    obs_to_remove = df_screened_obs['SourceID'].isin(comps_to_omit)
+    is_comp = (df_screened_obs['Type'] == 'Comp')
+    obs_to_remove = (obs_to_remove & is_comp)
+    if any(obs_to_remove):
+        obs_to_keep = (~ obs_to_remove).to_list()
+        df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
+    return df_screened_obs
+
+
+def _remove_obs_with_unusuable_instmag_instmagsigma(df_in):
+    """ Remove from dataframe any observations, comp or MP, with None, NaN, etc as instrument magnitude
+            or inst. mag. sigma.
+    :param df_in: screened master dataframe of observations. [pandas dataframe]
+    :return: updated dataframe. [pandas dataframe]
+    """
+    return df_in.dropna(subset=['InstMag', 'InstMagSigma'])
+
+
+def _keep_images_with_one_mp_obs(df_in):
+    """ Retain in dataframe only the observations of those images with exactly one MP observation.
+    :param df_in: screened master dataframe of observations. [pandas dataframe]
+    :return: updated dataframe. [pandas dataframe]
+    """
+    mp_obs_count_by_filename = df_in.loc[df_in['Type'] == 'MP', 'FITSfile'].value_counts()
+    filenames_with_one_mp = [fn for fn in mp_obs_count_by_filename.index
+                             if mp_obs_count_by_filename[fn] == 1]
+    obs_to_keep = df_in['FITSfile'].isin(filenames_with_one_mp).to_list()
+    if all(obs_to_keep):
+        return df_in
+    return df_in.loc[obs_to_keep, :].copy()
+
+
+def _keep_images_with_low_mp_obs_uncertainty(df_in, max_mp_obs_mag_uncertainty):
+    """ Retain in dataframe only the observations whose MP observation uncertainty is sufficiently low.
+    :param df_in: screened master dataframe of observations. [pandas dataframe]
+    :param max_mp_obs_mag_uncertainty: upper allowed limit of MP observation magnitude uncertainty. [float]
+    :return: updated dataframe. [pandas dataframe]
+    """
+    is_mp_obs = (df_in['Type'] == 'MP')
+    obs_uncert_ok = (df_in['InstMagSigma'] <= max_mp_obs_mag_uncertainty)
+    row_is_good_mp = (is_mp_obs & obs_uncert_ok).to_list()
+    filenames_to_keep = df_in.loc[row_is_good_mp, 'FITSfile']
+    obs_to_keep = df_in['FITSfile'].isin(filenames_to_keep).to_list()
+    if all(obs_to_keep):
+        return df_in
+    return df_in.loc[obs_to_keep, :].copy()
+
+
+def _remove_comps_obs_with_high_obs_uncertainty(df_in, max_comp_obs_mag_uncertainty):
+    """ Retain in dataframe only the comp observations whose magnitude uncertainty is sufficiently low.
+    :param df_in: screened master dataframe of observations. [pandas dataframe]
+    :param max_comp_obs_mag_uncertainty: upper allowed limit of comp obs magnitude uncertainty. [float]
+    :return: updated dataframe. [pandas dataframe]
+    """
+    # TODO: ? make max uncert relative to instrumental mag (to more accurately remove true outliers) ?
+    is_comp_obs = df_in['Type'] == 'Comp'
+    uncert_too_high = df_in['InstMagSigma'] > max_comp_obs_mag_uncertainty
+    obs_to_remove = (is_comp_obs & uncert_too_high)
+    if any(obs_to_remove):
+        obs_to_keep = (~ obs_to_remove).to_list()
+        return df_in.loc[obs_to_keep, :].copy()
+    return df_in
+
+
+def _apply_selections_to_comp_obs(df_in, color_control_dict):
+    """ Split df_in to separate comp-obs and MP-obs dataframes; apply color_control selections to the comps,
+        recombine and return the recombined dataframe of MPs and selected comp obs.
+        All selection criteria handled *except* 'omit obs' which is handled below (later).
+    :param df_in: screened master dataframe of observations. [pandas dataframe]
+    :param color_control_dict: user options from color control ini file. [python dict]
+    :return: updated dataframe. [pandas dataframe]
+    """
+    df_in_comp_obs = df_in.loc[df_in['Type'] == 'Comp', :].copy()
+    df_in_mp_obs = df_in.loc[df_in['Type'] == 'MP', :].copy()
+
+    # Apply selection criteria to comp obs (MP obs don't have catalog values):
+    remove_by_min_mag = (df_in_comp_obs['SR'] < color_control_dict['min sr mag'])
+    remove_by_max_mag = (df_in_comp_obs['SR'] > color_control_dict['max sr mag'])
+    remove_by_cat_mag_uncert = (df_in_comp_obs['dSR'] > color_control_dict['max catalog dsr mmag'])
+    color = (df_in_comp_obs['SR'] - df_in_comp_obs['SI'])
+    remove_by_min_color = (color < color_control_dict['min sloan ri color'])
+    remove_by_max_color = (color > color_control_dict['max sloan ri color'])
+    obs_to_remove = (remove_by_min_mag | remove_by_max_mag | remove_by_cat_mag_uncert |
+                     remove_by_min_color | remove_by_max_color)
+    if any(obs_to_remove):
+        obs_to_keep = (~ obs_to_remove).to_list()
+        df_screened_comp_obs = df_in_comp_obs.loc[obs_to_keep, :]
+        return df_screened_comp_obs.append(df_in_mp_obs)  # if any comp obs were removed.
+    return df_in  # if no comp obs were removed.
+
+
+def _remove_images_with_few_comps(df_in):
+    """ Remove all observations from images which have fewer comps than half the maximum number of comps.
+        (Remove obviously bad images.)
+    :param df_in:screened master dataframe of observations. [pandas dataframe]
+    :return:updated dataframe. [pandas dataframe]
+    """
+    comp_counts = df_in.loc[df_in['Type'] == 'Comp', 'FITSfile'].value_counts()
+    max_comp_count = comp_counts.max()
+    filenames_too_few_comps = [fn for fn in comp_counts.index if comp_counts[fn] < max_comp_count / 2.0]
+    if len(filenames_too_few_comps) >= 1:
+        remove_too_few_comps = df_in['FITSfile'].isin(filenames_too_few_comps)
+        obs_to_keep = (~ remove_too_few_comps).to_list()
+        return df_in.loc[obs_to_keep, :].copy()
+    return df_in
+
+
+def _remove_comps_absent_from_any_image(df_in):
+    """ Remove all observations of any comp star that is not present in *every* image.
+        After running this, all images will have obs from *exactly* the same comps (though the user's
+        'omit obs' selection criteria may later remove some, and this has no effect on that.)
+    :param df_in: screened master dataframe of observations. [pandas dataframe]
+    :return: updated dataframe. [pandas dataframe]
+    """
+    image_count = len(df_in.loc[df_in['Type'] == 'Comp', 'FITSfile'].drop_duplicates())
+    image_count_per_comp = df_in.loc[df_in['Type'] == 'Comp', 'SourceID'].value_counts()
+    comps_not_in_every_image = [id for id in image_count_per_comp.index
+                                if image_count_per_comp[id] < image_count]
+    if len(comps_not_in_every_image) >= 1:
+        obs_to_remove = df_in['SourceID'].isin(comps_not_in_every_image)
+        obs_to_keep = (~ obs_to_remove).to_list()
+        return df_in.loc[obs_to_keep, :].copy()
+    return df_in
+
+
+def _apply_omit_obs_selection_criteria(df_in, omit_obs_criteria):
+    """ Remove (comp) observations as specified by 'omit obs' element of user's color control ini file.
+    :param df_in: screened master dataframe of observations. [pandas dataframe]
+    :param omit_obs_criteria: observation IDs to remove, as specified by user. [tuple of strings]
+    :return: updated dataframe. [pandas dataframe]
+    """
+    remove_by_obs_id = df_in['Serial'].isin(omit_obs_criteria)
+    if any(remove_by_obs_id):
+        obs_to_keep = (~ remove_by_obs_id).to_list()
+        return df_in.loc[obs_to_keep, :].copy()
+    return df_in
+
+
+def _remove_images_with_too_few_comps(df_in, min_valid_comps_per_image):
+    """ Remove (with console warning) all obs from any images with fewer than a minimum number of comps.
+        Such removal will be very rare, especially after all the above screens unless there are very many
+        observations removed by the user's 'omit obs' selection criteria.
+    :param df_in: screened master dataframe of observations. [pandas dataframe]
+    :param min_valid_comps_per_image: the minimum number of valid comp obs per image. [int]
+    :return: updated dataframe. [pandas dataframe]
+    """
+    comp_count_per_image = df_in.loc[df_in['Type'] == 'Comp', 'FITSfile'].value_counts()
+    images_too_few_comps = [fn for fn in comp_count_per_image.index
+                            if comp_count_per_image[fn] < min_valid_comps_per_image]
+    if len(images_too_few_comps) >= 1:
+        remove_too_few_comps = df_in,['FITSfile'].isin(images_too_few_comps)
+        obs_to_keep = (~ remove_too_few_comps).to_list()
+        return df_in.loc[obs_to_keep, :].copy()
+    return df_in
+
+
+_____CONTROL_INI_DICT_FUNCTIONS_____________________________ = 0
 
 
 def _write_color_control_ini_template(this_directory, defaults_dict):
+    """ Write color control ini template to current session directory.
+    :param this_directory: fullpath of current session directory. [string]
+    :param defaults_dict: dict of defaults [py dict]
+    :return: [None]
+    """
     color_control_template_filename = defaults_dict['color control template filename']
     fullpath = os.path.join(this_directory, color_control_template_filename)
 

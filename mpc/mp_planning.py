@@ -38,7 +38,7 @@ DSNM = ('251.10288d', '31.748657576406853d', '1372m')
 EXP_TIME_TABLE_PHOTOMETRY = [(13, 60), (14, 80), (15, 160), (16, 300), (17, 600), (17.5, 900)]
 EXP_OVERHEAD = 20  # Nominal exposure overhead, in seconds.
 COV_RESOLUTION_MINUTES = 5  # min. coverage plot resolution, in minutes.
-MAX_V_MAGNITUDE_DEFAULT = 18  # to ensure ridiculously faint MPs don't get into planning & plots.
+MAX_V_MAGNITUDE_DEFAULT = 18.25  # to ensure ridiculously faint MPs don't get into planning & plots.
 MAX_EXP_TIME_NO_GUIDING = 119
 
 MPFILE_DIRECTORY = 'C:/Dev/Photometry/MPfile'
@@ -98,7 +98,7 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
                    ''.rjust(22) + 'Start Tran  End    V   Exp/s Duty/%   P/hr']
     for i in df.index:
         # print(str(i), str(df.loc[i, 'MPnumber']), str(df.loc[i, 'Status']))
-        if df.loc[i, 'Status'].lower() != 'ok':
+        if df.loc[i, 'Status'].lower() not in ['ok', 'too late']:
             continue  # sentinel
         duty_cycle = df.loc[i, 'DutyCyclePct']
         duty_cycle_string = '    --' if (duty_cycle is None or np.isnan(duty_cycle) == True) \
@@ -671,7 +671,7 @@ def degrees_as_hex(angle_degrees, arcseconds_decimal_places=2):
 MPFILE____________________________________________________ = 0
 
 
-def make_mpfile(mp_number, utc_date_brightest=None, days=150, mpfile_directory=MPFILE_DIRECTORY):
+def make_mpfile(mp_number, utc_date_brightest=None, days=210, mpfile_directory=MPFILE_DIRECTORY):
     """ Make new MPfile text file for upcoming apparition.
     :param mp_number: MP's number, e.g., 7084. [int or string]
     :param utc_date_brightest: UTC date of MP brightest, e.g. '2020-02-01' or '20200201'. [string]
@@ -685,13 +685,22 @@ def make_mpfile(mp_number, utc_date_brightest=None, days=150, mpfile_directory=M
     s = str(utc_date_brightest).replace('-', '')
     datetime_brightest = datetime(year=int(s[0:4]), month=int(s[4:6]),
                                   day=int(s[6:8])).replace(tzinfo=timezone.utc)
+    apparition_year = datetime_brightest.year
+
+    # DO NOT OVERWRITE existing MPfile:
+    mpfile_name = 'MP_' + str(mp_number) + '_' + str(apparition_year) + '.txt'
+    mpfile_fullpath = os.path.join(mpfile_directory, mpfile_name)
+    if os.path.exists(mpfile_fullpath):
+        print(' >>>>> ERROR: MPfile for MP', mp_number, 'already exists, will not be overwritten.')
+        return
+
     datetime_now = datetime.now()
-    datetime_now_zero_utc = datetime(datetime_now.year, datetime_now.month,
-                                     datetime_now.day).replace(tzinfo=timezone.utc)
+    # datetime_now_zero_utc = datetime(datetime_now.year, datetime_now.month,
+    #                                  datetime_now.day).replace(tzinfo=timezone.utc)
     datetime_start = datetime_brightest - timedelta(days=int(floor(days/2.0)))
-    if datetime_start < datetime_now_zero_utc:
-        print(' >>>>> WARNING: Ephemeris table starts IN THE PAST, at',
-              '{:%Y-%m-%d}'.format(datetime_start) + '.')
+    datetime_end = datetime_brightest + timedelta(days=int(floor(days/2.0)))
+    print('Ephemeris: from ', '{:%Y-%m-%d}'.format(datetime_start),
+          'to about', '{:%Y-%m-%d}'.format(datetime_end))
 
     # Get strings from MPC (minorplanetcenter.com), making > 1 call if needed for number of days:
     n_days_per_call = 90
@@ -757,14 +766,8 @@ def make_mpfile(mp_number, utc_date_brightest=None, days=150, mpfile_directory=M
                                                                                   df_eph['MPC_string'],
                                                                                   df_eph['MP_info'])]
     # Write MPfile text file:
-    # apparition_year = (datetime_start + timedelta(days=days/2)).year
-    apparition_year = datetime_brightest.year
-    # utc_start_string = '{:%Y-%m-%d}'.format(datetime_start)
-    # utc_end_string = '{:%Y-%m-%d}'.format(datetime_start + timedelta(days=days))
     utc_start_string = min(df_eph['DateUTC'])
     utc_end_string = max(df_eph['DateUTC'])
-    mpfile_name = 'MP_' + str(mp_number) + '_' + str(apparition_year) + '.txt'
-    mpfile_fullpath = os.path.join(mpfile_directory, mpfile_name)
     top_text = soup.contents[0].text[:300]
     top_left = top_text.find('Results for:') + 12
     top_right = top_text.find('CALL and LCDB')

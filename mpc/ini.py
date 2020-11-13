@@ -10,13 +10,17 @@ INI_FILE_SUBDIRECTORY = 'ini'
 BOOT_INI_FILENAME = 'defaults.ini'
 
 
-def make_defaults_dict():
+def make_defaults_dict(root_dir=MPC_ROOT_DIRECTORY, ini_subdir=INI_FILE_SUBDIRECTORY,
+                       filename=BOOT_INI_FILENAME):
     """ Reads .ini file, returns defaults_dict.
         See defaults.template for value types and key names.
-    :return: defaults_dict. [python dict object; All keys and values are strings]
+        :param root_dir: root directory; the mpc source directory except when testing. [string]
+        :param ini_subdir: the subdirectory under root where defaults ini file is found. [string]
+        :param filename: defaults ini filename, typically 'defaults.ini'. [string]
+    :return: the defaults_dict. [python dict object; All keys and values are strings]
 
     """
-    fullpath = os.path.join(MPC_ROOT_DIRECTORY, INI_FILE_SUBDIRECTORY, BOOT_INI_FILENAME)
+    fullpath = os.path.join(root_dir, ini_subdir, filename)
     defaults_ini = astropak.ini.IniFile(fullpath)
     return defaults_ini.value_dict
 
@@ -62,6 +66,12 @@ def make_instrument_dict(defaults_dict):
         else:
             print(' >>>>> ERROR:', filename, 'bad transform line:', line)
     instrument_dict['transforms'] = transform_dict
+
+    # Parse and overwrite 'available filters', 'default color filters', 'default color index':
+    instrument_dict['available filters'] = tuple(instrument_dict['available filters'].split())
+    instrument_dict['default color filters'] = tuple(instrument_dict['default color filters'].split())
+    instrument_dict['default color index'] = \
+        tuple([s.strip() for s in instrument_dict['default color index'].split('-')])
     return instrument_dict
 
 

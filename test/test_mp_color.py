@@ -28,8 +28,7 @@ def test_do_color_2filters():
     # log_file = open(mpc.mp_phot.LOG_FILENAME, mode='a')
     # mpc.mp_phot._write_color_control_ini_template(this_directory, log_file)
     # mpc.mp_phot.make_dfs()
-    mpc.mp_color.do_color_2filters(filters=('R', 'I'), target_color=('SR', 'SI'),
-                                   color_index_passbands=('SR', 'SI'))
+    mpc.mp_color.do_one_color(definition=('R', 'I', 'SR', 'SI'), catalog_color_index=('SR', 'SI'))
     assert 1 == 1
 
 
@@ -63,3 +62,62 @@ def test_make_color_control_dict():
     assert ccd['fit vignette'] == True
     assert ccd['fit xy'] == False
     assert ccd['fit jd'] == False
+
+
+def test__verify_input_parms():
+    mpc.mp_phot.resume(TEST_TOP_DIRECTORY, 426, '20201023')
+    context = mpc.mp_phot.get_context()
+    this_directory, mp_string, an_string = context
+    defaults_dict = mpc.ini.make_defaults_dict()
+    instrument_dict = mpc.ini.make_instrument_dict(defaults_dict)
+    ccd = mpc.mp_color.make_color_control_dict(this_directory, defaults_dict)
+
+    # Case: one color, valid, definition is already a nested tuple:
+    definition = (('R', 'I', 'SR', 'SI'),)
+    catalog_color_index = ('SR', 'SI')
+    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    assert verified == True
+
+    # Case: one color, valid, definition is a bare tuple of 4 strings:
+    definition = ('R', 'I', 'SR', 'SI')
+    catalog_color_index = ('SR', 'SI')
+    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    assert verified == True
+
+    # Case: one color, definition has invalid form:
+    definition = ('R', 'I', 'SR')  # 3 elements, should be 4
+    catalog_color_index = ('SR', 'SI')
+    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    assert verified == False
+    definition = ('R', 'I', 'SR', 999)  # should be strings
+    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    assert verified == False
+    definition = tuple()  # empty tuple
+    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    assert verified == False
+    definition = ['R', 'I', 'SR', 'SI']  # list, but should be tuple
+    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    assert verified == False
+
+    # Case: one color, definition requires filter that is unavailable:
+    definition = ('XXX', 'I', 'SR', 'SI')
+    catalog_color_index = ('SR', 'SI')
+    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    assert verified == False
+    definition = ('R', 'XXXY', 'SR', 'SI')
+    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    assert verified == False
+
+    # Case: one color, extinction missing from color control file:
+    definition = ('V', 'I', 'SR', 'SI')
+    catalog_color_index = ('SR', 'SI')
+    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    assert verified == False
+
+    # Case: one color, catalog color index has a passband not listed as available:
+    definition = ('R', 'I', 'SR', 'SI')
+    catalog_color_index = ('XXX', 'SI')
+    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    assert verified == False
+
+    # TODO: test two-color cases.
