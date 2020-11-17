@@ -320,10 +320,10 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
 # import os
 #
-# MP_TOP_DIRECTORY = 'C:/Astro/MP Photometry/'
+# MP_PHOT_TOP_DIRECTORY = 'C:/Astro/MP Photometry/'
 #
 #
-# def canopus(mp_top_directory=MP_TOP_DIRECTORY, rel_directory=None):
+# def canopus(mp_top_directory=MP_PHOT_TOP_DIRECTORY, rel_directory=None):
 #     """ Read all FITS in mp_directory, rotate right, bin 2x2, invalidating plate solution.
 #     Intended for making images suitable (North Up, smaller) for photometric reduction in Canopus 10.
 #     Tests OK ~20191101.

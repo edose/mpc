@@ -63,15 +63,15 @@ ADU_SATURATED = 56000  # Max ADU allowable in original (Ur) images.
 VIGNETTING = (1846, 0.62)  # (px from center, max fract of ADU_SATURATED allowed) both at corner.
 
 # For this package:
-MP_TOP_DIRECTORY = 'C:/Astro/MP Photometry/'
-LOG_FILENAME = 'mp_photometry.log'
-CONTROL_FILENAME = 'control.txt'
+MP_PHOT_TOP_DIRECTORY = 'C:/Astro/MP Photometry/'
+MP_PHOT_LOG_FILENAME = 'mp_photometry.log'
+MP_PHOT_CONTROL_FILENAME = 'control.txt'
 TRANSFORM_CONTROL_FILENAME = 'control_transform.txt'
-COLOR_CONTROL_FILENAME = 'color_control.ini'
-COLOR_CONTROL_TEMPLATE_FILENAME = 'color_control.template'
-DF_OBS_ALL_FILENAME = 'df_obs_all.csv'
-DF_IMAGES_ALL_FILENAME = 'df_images_all.csv'
-DF_COMPS_ALL_FILENAME = 'df_comps_all.csv'
+# COLOR_CONTROL_FILENAME = 'color_control.ini'
+# COLOR_CONTROL_TEMPLATE_FILENAME = 'color_control.template'
+MP_PHOT_DF_OBS_ALL_FILENAME = 'df_obs_all.csv'
+MP_PHOT_DF_IMAGES_ALL_FILENAME = 'df_images_all.csv'
+MP_PHOT_DF_COMPS_ALL_FILENAME = 'df_comps_all.csv'
 # TRANSFORM_CLEAR_SR_SR_SI = 0.025  # estimate from MP 1074 20191109 (37 images).
 TRANSFORM_CLEAR_SR_SR_SI = -0.20  # estimate from MP 191 20200617 (18 Clear images).
 DEFAULT_MODEL_OPTIONS = {'fit_transform': 'fit=2', 'fit_extinction': False,
@@ -107,16 +107,16 @@ DO_PHOT_COMP_SELECTION_DEFAULTS = {
 #     'max_catalog_ri_color': 0.8
 # }
 
-COLOR_COMP_SELECTION_DEFAULTS = {
-    'min_catalog_r_mag': 10,
-    'max_catalog_r_mag': 16,
-    'max_catalog_dr_mag': 20,
-    'min_catalog_ri_color': -0.4,
-    'max_catalog_ri_color': 0.8
-}
+# COLOR_COMP_SELECTION_DEFAULTS = {
+#     'min_catalog_r_mag': 10,
+#     'max_catalog_r_mag': 16,
+#     'max_catalog_dr_mag': 20,
+#     'min_catalog_ri_color': -0.4,
+#     'max_catalog_ri_color': 0.8
+# }
 
 # For ALCDEF File generation:
-DSW_SITE_DATA = {'longitude': -105.6536, 'latitude': +35.3311,
+DSW_SITE_DATA = {'longitude': -105.6536, 'latitude': +35.3311, 'elevation': 2210,
                  'facility': 'Deep Sky West Observatory', 'mpccode': 'V28'}
 ALCDEF_DATA = {'contactname': 'Eric V. Dose',
                'contactinfo': 'MP@ericdose.com',
@@ -130,7 +130,7 @@ _____EARLY_WORKFLOW_ATLAS_BASED________________________________________________ 
 """  ***************************************************************************
      WORKFLOW STEPS (example lines):
      * Ensure at least 1 file IN Photometric (e.g., Clear or BB) filter.
-     >>> start(MP_TOP_DIRECTORY + '/Test', 1074, 20191109)
+     >>> start(MP_PHOT_TOP_DIRECTORY + '/Test', 1074, 20191109)
      >>> assess()
      * Edit control.txt: add 2 MP positions (x_pixel, y_pixel), at early and late times.
      >>> make_dfs()
@@ -138,17 +138,19 @@ _____EARLY_WORKFLOW_ATLAS_BASED________________________________________________ 
      >>> do_mp_phot()
      ********************************************
      (at any time:)
-     >>> resume(MP_TOP_DIRECTORY + '/Test', 1074, 20191109), esp. after Console restart.
+     >>> resume(MP_PHOT_TOP_DIRECTORY + '/Test', 1074, 20191109), esp. after Console restart.
      ***************************************************************************
 """
 
 
-def start(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+def start(mp_top_directory=MP_PHOT_TOP_DIRECTORY, mp_number=None, an_string=None,
+          log_filename=MP_PHOT_LOG_FILENAME):
     """  Preliminaries to begin MP photometry workflow.
     :param mp_top_directory: path of lowest directory common to all MP photometry FITS, e.g.,
                'C:/Astro/MP Photometry' [string]
     :param mp_number: number of target MP, e.g., 1602 for Indiana. [integer or string].
     :param an_string: Astronight string representation, e.g., '20191106' [string].
+    :param log_filename: name of log file to initiate. [string]
     :return: [None]
     """
     if mp_number is None or an_string is None:
@@ -163,7 +165,7 @@ def start(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     print('Working directory set to:', mp_directory)
 
     # Initiate log file and finish:
-    log_file = open(LOG_FILENAME, mode='w')  # new file; wipe old one out if it exists.
+    log_file = open(log_filename, mode='w')  # new file; wipe old one out if it exists.
     log_file.write(mp_directory + '\n')
     log_file.write('MP: ' + mp_string + '\n')
     log_file.write('AN: ' + an_string + '\n')
@@ -174,10 +176,10 @@ def start(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
     print('Next: assess()')
 
 
-def resume(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+def resume(mp_top_directory=MP_PHOT_TOP_DIRECTORY, mp_number=None, an_string=None):
     """  Restart a workflow in its correct working directory,
          but keep the previous log file--DO NOT overwrite it.
-    parameters as for start().
+        Parameters as for start().
     :return: [None]
     """
     if mp_number is None or an_string is None:
@@ -202,18 +204,21 @@ def resume(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
         print(' >>>>> Can\'t resume in', this_directory)
 
 
-def assess():
+def assess(log_filename=MP_PHOT_LOG_FILENAME, write_mp_phot_control_stub=True):
     """  First, verify that all required files are in the working directory or otherwise accessible.
          Then, perform checks on FITS files in this directory before performing the photometry proper.
          Modeled after and extended from assess() found in variable-star photometry package 'photrix'.
                                     May be zero for MP color index determination only. [int]
+    :param log_filename: name of log file to be written, e.g., mp_photometry.log or mp_color.log. [string]
+    :param write_mp_phot_control_stub: True iff photometry control stub file is to be written
+        (typically True for mp_phot lightcurve workflow, False for color workflow and any others). [boolean]
     :return: [None]
     """
     context = get_context()
     if context is None:
         return
     this_directory, mp_string, an_string = context
-    log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
+    log_file = open(log_filename, mode='a')  # set up append to log file.
     log_file.write('\n===== access()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
     n_warnings = 0
@@ -324,7 +329,7 @@ def assess():
     # Summarize and write instructions for next steps:
     if n_warnings == 0:
         print('\n >>>>> ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.')
-        print('Next: (1) enter MP pixel positions in', CONTROL_FILENAME, 'AND SAVE it,',
+        print('Next: (1) enter MP pixel positions in', MP_PHOT_CONTROL_FILENAME, 'AND SAVE it,',
               '\n      (2) make_dfs()')
         log_file.write('assess(): ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.' + '\n')
     else:
@@ -333,47 +338,61 @@ def assess():
         log_file.write('assess(): ' + str(n_warnings) + ' warnings.' + '\n')
 
     defaults_dict = make_defaults_dict()
-    # color_control_dict = make_color_control_dict(this_directory, defaults_dict) # TODO: why is this here?
-    write_control_txt_stub(this_directory, log_file, df)        # if it doesn't already exist.
-    # write_transform_control_txt_stub(this_directory, log_file)  # "
-    # TODO: Where do defaults come from? Add lines to default_dict?
-    # _write_color_control_ini_stub(this_directory, defaults_dict, log_file)      # "
-    # _write_color_control_ini_template(this_directory, defaults_dict, log_file)
+    if write_mp_phot_control_stub:
+        write_control_txt_stub(this_directory, log_file, df)        # if it doesn't already exist.
     log_file.close()
 
 
-def make_dfs():
+def make_dfs(color_control_dict=None):
     """ For one MP on one night: gather images and ATLAS refcat2 catalog data,
             make df_comps, df_obs, and df_images. Modified 20200704 to include all filters.
             Intent: to make dataframes usable for all later purposes,
                esp. for measuring session lightcurves, system transforms, and MP color index.
+    :param color_control_dict: None if for mp_phot (lightcurve), a dict of relevant parm values if for color.
     :return: [None]
-    USAGE: make_dfs()
+    USAGE: make_dfs() or make_dfs(color_parm_dict)
     """
     context = get_context()
     if context is None:
         return
     this_directory, mp_string, an_string = context
-    log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
     mp_int = int(mp_string)  # put this in try/catch block.
     mp_string = str(mp_int)
+
+    # Gather key parameters, before computation:
+    defaults_dict = make_defaults_dict()
+    if color_control_dict is None:
+        # Case: this run is for mp_phot, so use parm values local to this module, just as originally done:
+        log_filename = MP_PHOT_LOG_FILENAME
+        control_filename = MP_PHOT_CONTROL_FILENAME
+        mp_location_filenames, x_pixels, y_pixels = read_mp_locations()
+        df_obs_all_filename = MP_PHOT_DF_OBS_ALL_FILENAME
+        df_images_all_filename = MP_PHOT_DF_IMAGES_ALL_FILENAME
+        df_comps_all_filename = MP_PHOT_DF_COMPS_ALL_FILENAME
+    else:
+        # Case: this run is for color, so get parm values from the color control dict passed in:
+        log_filename = defaults_dict['color log filename']
+        control_filename = defaults_dict['color control filename']
+        mp_location_filenames = color_control_dict.get('mp location filenames')
+        x_pixels = color_control_dict.get('x pixels')
+        y_pixels = color_control_dict.get('y pixels')
+        df_obs_all_filename = color_control_dict.get('df_obs_all filename')
+        df_images_all_filename = color_control_dict.get('df_images_all filenames')
+        df_comps_all_filename = color_control_dict.get('df_comps_all filenames')
+
+    # Start log file, do initial parm validation:
+    log_file = open(log_filename, mode='a')  # set up append to log file.
     log_file.write('\n===== make_dfs()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
-
-    # Read user's MP *pixel* location in each of 2 images, from control file:
-    # (Putting this near top of fn, to save time if something wrong with control.txt.)
-    mp_location_filenames, x_pixels, y_pixels = read_mp_locations()
-    if mp_location_filenames is None:
-        print(' >>>>> ' + CONTROL_FILENAME + ': something wrong with #MP lines. Stopping.')
-        log_file.write(' >>>>> ' + CONTROL_FILENAME + ': something wrong with #MP lines. Stopping.\n')
+    if mp_location_filenames is None or x_pixels is None or y_pixels is None:  # save time if parms wrong.
+        print(' >>>>> ' + control_filename + ': something wrong with #MP lines. Stopping.')
+        log_file.write(' >>>>> ' + control_filename + ': something wrong with #MP lines. Stopping.\n')
         return None
 
     # Get all relevant FITS filenames, make lists of FITS objects and Image objects:
     fits_names = get_fits_filenames(this_directory)
     fits_list = [FITS(this_directory, '', fits_name) for fits_name in fits_names]  # list of FITS objects
     fits_list = [fits for fits in fits_list if fits.is_valid]  # list of *valid* FITS objects
-    # filters_to_use = [MP_PHOTOMETRY_FILTER] + list(DEFAULT_FILTERS_FOR_MP_COLOR_INDEX)
-    # fits_list = [fits for fits in fits_list if fits.filter in filters_to_use]
     image_list = [Image(fits_object) for fits_object in fits_list]  # Image objects
     if len(image_list) <= 0:
         print(' >>>>> ERROR: no FITS files found in this directory.')
@@ -583,7 +602,7 @@ def make_dfs():
     site_data = DSW_SITE_DATA
     observer = Observer(longitude=site_data['longitude'] * u.deg,
                         latitude=site_data['latitude'] * u.deg,
-                        elevation=2210 * u.m, name='DSW')
+                        elevation=site_data['elevation'] * u.m, name='DSW')  # astropy.
     df_obs['ObsAirmass'] = None
     for im in df_images.index:
         time = Time(df_images.loc[im, 'JD_mid'], format='jd')
@@ -612,31 +631,31 @@ def make_dfs():
         print('ObsAirmass done for', im)
 
     # Write df_obs to CSV file (rather than returning the df):
-    fullpath_df_obs_all = os.path.join(this_directory, DF_OBS_ALL_FILENAME)
+    fullpath_df_obs_all = os.path.join(this_directory, df_obs_all_filename)
     df_obs.to_csv(fullpath_df_obs_all, sep=';', quotechar='"',
                   quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
     n_comp_obs = sum([t.lower() == 'comp' for t in df_obs['Type']])
     n_mp_obs = sum([t.lower() == 'mp' for t in df_obs['Type']])
     print('obs written to', fullpath_df_obs_all)
-    log_file.write(DF_OBS_ALL_FILENAME + ' written: ' + str(n_comp_obs) + ' comp obs & ' +
+    log_file.write(df_obs_all_filename + ' written: ' + str(n_comp_obs) + ' comp obs & ' +
                    str(n_mp_obs) + ' MP obs.\n')
 
     # Write df_comps to CSV file (rather than returning the df):
-    fullpath_df_comps_all = os.path.join(this_directory, DF_COMPS_ALL_FILENAME)
+    fullpath_df_comps_all = os.path.join(this_directory, df_comps_all_filename)
     df_comps.to_csv(fullpath_df_comps_all, sep=';', quotechar='"',
                     quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
     print('comps written to', fullpath_df_comps_all)
-    log_file.write(DF_COMPS_ALL_FILENAME + ' written: ' + str(len(df_comps)) + ' comps.\n')
+    log_file.write(df_comps_all_filename + ' written: ' + str(len(df_comps)) + ' comps.\n')
 
     # Write df_images to CSV file (rather than returning the df):
-    fullpath_df_images_all = os.path.join(this_directory, DF_IMAGES_ALL_FILENAME)
+    fullpath_df_images_all = os.path.join(this_directory, df_images_all_filename)
     df_images.to_csv(fullpath_df_images_all, sep=';', quotechar='"',
                      quoting=2, index=True)  # quoting=2-->quotes around non-numerics.
     print('images written to', fullpath_df_images_all)
-    log_file.write(DF_IMAGES_ALL_FILENAME + ' written: ' + str(len(df_images)) + ' images.\n')
+    log_file.write(df_images_all_filename + ' written: ' + str(len(df_images)) + ' images.\n')
 
     log_file.close()
-    print('\nNext: (1) enter comp selection limits and model options in ' + CONTROL_FILENAME,
+    print('\nNext: (1) enter comp selection limits and model options in ' + control_filename,
           '\n      (2) run do_mp_phot()')
 
 
@@ -659,7 +678,7 @@ def do_mp_phot(fits_filter='Clear'):
     if context is None:
         return
     this_directory, mp_string, an_string = context
-    log_file = open(LOG_FILENAME, mode='a')  # set up append to log file.
+    log_file = open(MP_PHOT_LOG_FILENAME, mode='a')  # set up append to log file.
     mp_int = int(mp_string)  # put this in try/catch block.
     mp_string = str(mp_int)
     log_file.write('\n===== do_mp_phot(' + fits_filter + ')  ' +
@@ -685,7 +704,7 @@ def do_mp_phot(fits_filter='Clear'):
     # Note: df_model now contains all obs, comp, and image data, for both comp stars and minor planets.
 
     # Mark df_model with user selections, sync comp and image dfs:
-    user_selections = read_selection_criteria(CONTROL_FILENAME, DO_PHOT_COMP_SELECTION_DEFAULTS)
+    user_selections = read_selection_criteria(MP_PHOT_CONTROL_FILENAME, DO_PHOT_COMP_SELECTION_DEFAULTS)
     apply_do_phot_selections(df_model, user_selections)  # modifies in-place.
 
     # # Sync the comp and image dataframes (esp. user selections); may be needed later for plotting:
@@ -693,7 +712,7 @@ def do_mp_phot(fits_filter='Clear'):
     # print(str(len(df_model_comps)), 'comps retained in model.')
 
     # Make photometric model via mixed-model regression, using only selected observations:
-    options_dict = read_regression_options(CONTROL_FILENAME)
+    options_dict = read_regression_options(MP_PHOT_CONTROL_FILENAME)
     model = SessionModel(df_model, fits_filter, mp_color_ri, state, options_dict)
 
     make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_selections)
@@ -1138,7 +1157,7 @@ def make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_sele
 
 
 def write_control_txt_stub(this_directory, log_file, df):
-    fullpath = os.path.join(this_directory, CONTROL_FILENAME)
+    fullpath = os.path.join(this_directory, MP_PHOT_CONTROL_FILENAME)
     if os.path.exists(fullpath):
         return
 
@@ -1152,7 +1171,7 @@ def write_control_txt_stub(this_directory, log_file, df):
     def yes_no(true_false):
         return 'Yes' if true_false else 'No'
 
-    lines = [';----- This is ' + CONTROL_FILENAME + ' for directory:\n;      ' + this_directory,
+    lines = [';----- This is ' + MP_PHOT_CONTROL_FILENAME + ' for directory:\n;      ' + this_directory,
              ';',
              ';===== MP LOCATIONS BLOCK ===========================================',
              ';===== Enter before make_dfs() ======================================',
@@ -1208,11 +1227,11 @@ def write_control_txt_stub(this_directory, log_file, df):
              ';'
              ]
     lines = [line + '\n' for line in lines]
-    fullpath = os.path.join(this_directory, CONTROL_FILENAME)
+    fullpath = os.path.join(this_directory, MP_PHOT_CONTROL_FILENAME)
     if not os.path.exists(fullpath):
         with open(fullpath, 'w') as f:
             f.writelines(lines)
-            log_file.write('New ' + CONTROL_FILENAME + ' file written.\n')
+            log_file.write('New ' + MP_PHOT_CONTROL_FILENAME + ' file written.\n')
 
 
 def write_text_file(filename, lines):
@@ -1326,7 +1345,7 @@ def combine_alcdef(mp, apparition_year):
     :param apparition_year
     :return: None. Writes new file to MP's directory.
     """
-    mpdir = os.path.join(MP_TOP_DIRECTORY, 'MP_' + str(mp))
+    mpdir = os.path.join(MP_PHOT_TOP_DIRECTORY, 'MP_' + str(mp))
     an_subdirs = [f.path for f in os.scandir(mpdir)
                   if (f.is_dir() and f.name.startswith('AN') and len(f.name) == 10)]
     all_lines = []
@@ -1358,15 +1377,17 @@ def combine_alcdef(mp, apparition_year):
 _____READING_LOG_and_CONTROL_FILES__________________________________ = 0
 
 
-def get_context():
+def get_context(log_filename=MP_PHOT_LOG_FILENAME):
     """ This is run at beginning of workflow functions (except start() or resume()) to orient the function.
+    :param log_filename: name of log file from which to get context data. [string]
     :return: 3-tuple: (this_directory, mp_string, an_string) [3 strings]
     """
     this_directory = os.getcwd()
-    if not os.path.isfile(LOG_FILENAME):
-        print(' >>>>> ERROR: no log file found ==> You probably need to run start() or resume().')
+    if not os.path.isfile(log_filename):
+        print(' >>>>> ERROR: no log file', log_filename ,
+              'found ==> You probably need to run start() or resume().')
         return None
-    log_file = open(LOG_FILENAME, mode='r')  # for read only
+    log_file = open(log_filename, mode='r')  # for read only
     lines = log_file.readlines()
     log_file.close()
     if len(lines) < 3:
@@ -1386,7 +1407,7 @@ def read_mp_locations():
     """
     mp_location_key = '#MP_LOCATION'
     mp_location_filenames, x_pixels, y_pixels = [], [], []
-    with open(CONTROL_FILENAME, 'r') as cf:
+    with open(MP_PHOT_CONTROL_FILENAME, 'r') as cf:
         lines = cf.readlines()
         lines = [line.split(";")[0] for line in lines]  # remove all comments
         lines = [line.strip() for line in lines]  # remove lead/trail blanks
@@ -1416,7 +1437,7 @@ def read_mp_ri_color():
     """
     # First set defaults, to be overridden if valid color in fact read from file.
     mp_ri_color, mp_ri_color_source = DEFAULT_MP_RI_COLOR, 'Default MP color'
-    with open(CONTROL_FILENAME, 'r') as cf:
+    with open(MP_PHOT_CONTROL_FILENAME, 'r') as cf:
         lines = cf.readlines()
         lines = [line.split(";")[0] for line in lines]  # remove all comments
         lines = [line.strip() for line in lines]  # remove lead/trail blanks
@@ -1425,16 +1446,16 @@ def read_mp_ri_color():
             if line.upper().startswith('#MP_RI_COLOR '):
                 tokens = line[len('#MP_RI_COLOR '):].split(maxsplit=1)
                 if len(tokens) < 2:
-                    print(' >>>>> ERROR: Either color or color source is missing from ' + CONTROL_FILENAME)
+                    print(' >>>>> ERROR: Either color or color source is missing from ' + MP_PHOT_CONTROL_FILENAME)
                 else:
                     ri_string = tokens[0]
                     mp_ri_color_source = tokens[1].strip()
                     try:
                         mp_ri_color = float(ri_string)  # parse color value.
                     except ValueError:
-                        print(' >>>>> ERROR: cannot read #MP_RI_COLOR given in ' + CONTROL_FILENAME)
+                        print(' >>>>> ERROR: cannot read #MP_RI_COLOR given in ' + MP_PHOT_CONTROL_FILENAME)
                         mp_ri_color, mp_ri_color_source = None, \
-                            '[error in reading control file ' + CONTROL_FILENAME + ']'
+                            '[error in reading control file ' + MP_PHOT_CONTROL_FILENAME + ']'
         if not ((-0.25) <= mp_ri_color <= +0.75):
             print(' >>>>> WARNING: MP_RI_COLOR has unreasonable value of', '{0:.2f}'.format(mp_ri_color))
         if len(mp_ri_color_source) < 5:
@@ -1617,7 +1638,7 @@ def read_df_obs_all():
     :return: df_obs from make_dfs() [pandas Dataframe]
     """
     this_directory, _, _ = get_context()
-    fullpath = os.path.join(this_directory, DF_OBS_ALL_FILENAME)
+    fullpath = os.path.join(this_directory, MP_PHOT_DF_OBS_ALL_FILENAME)
     df_obs = pd.read_csv(fullpath, sep=';', index_col=0)
     serials = [str(s) for s in df_obs['Serial']]  # ensure strings.
     df_obs.loc[:, 'Serial'] = serials
@@ -1630,7 +1651,7 @@ def read_df_images_all():
     :return: df_images from make_dfs() [pandas Dataframe]
     """
     this_directory, _, _ = get_context()
-    fullpath = os.path.join(this_directory, DF_IMAGES_ALL_FILENAME)
+    fullpath = os.path.join(this_directory, MP_PHOT_DF_IMAGES_ALL_FILENAME)
     df_images = pd.read_csv(fullpath, sep=';', index_col=0)
     return df_images
 
@@ -1640,7 +1661,7 @@ def read_df_comps_all():
     :return: df_comps from make_dfs() [pandas Dataframe]
     """
     this_directory, _, _ = get_context()
-    fullpath = os.path.join(this_directory, DF_COMPS_ALL_FILENAME)
+    fullpath = os.path.join(this_directory, MP_PHOT_DF_COMPS_ALL_FILENAME)
     df_comps = pd.read_csv(fullpath, sep=';', index_col=0)
     comp_ids = [str(id) for id in df_comps['CompID']]  # ensure strings.
     df_comps.loc[:, 'CompID'] = comp_ids

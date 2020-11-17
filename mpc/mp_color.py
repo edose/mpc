@@ -16,13 +16,14 @@ import mpc.ini
 import mpc.mp_phot
 
 # From EVD package photrix (deprecated import--> prefer astropak):
-# NO PHOTRIX IMPORTS ALLOWED in this module mp_color.py.
+# ********** NO PHOTRIX IMPORTS ALLOWED ************* in this module mp_color.py.
 # from photrix.image import Image, FITS
 
 # From EVD package astropak (preferred):
 import astropak.ini
 import astropak.stats
 import astropak.util
+import astropak.image
 
 # MPC_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # BOOT_INI_FILENAME = 'defaults.ini'
@@ -42,17 +43,49 @@ MAX_COLOR_COMP_UNCERT = 0.015  # mag
 # DF_COMPS_ALL_FILENAME = 'df_comps_all.csv'
 # COLOR_IMAGE_PREFIX = 'Image_Color_'
 
+MP_COLOR_TOP_DIRECTORY = 'C:/Astro/MP Color/'
+
 
 _____INITIALIZE_COLOR_WORKFLOW______________________________ = 0
+# Largely implemented as calls to functions in module 'mp_phot'.
 
 
-def write_control_files():
+def start(mp_number=None, an_string=None):
+    """ Preliminaries to begin MP COLOR workflow.
+        Wrapper to call mp_phot.start() with correct color parms.
+    :param mp_number: number of target MP, e.g., 1602 for Indiana. [integer or string].
+    :param an_string: Astronight string representation, e.g., '20191106' [string].
+    :return: [None]
+    """
     defaults_dict = mpc.ini.make_defaults_dict()
-    context = mpc.mp_phot.get_context()
+    color_log_filename = defaults_dict['color log filename']
+    mpc.mp_phot.start(MP_COLOR_TOP_DIRECTORY, mp_number, an_string, color_log_filename)
+
+
+def resume(mp_number=None, an_string=None):
+    """ Restart a workflow in its correct working directory; keep log file--DO NOT overwrite it.
+        Implemented as: wrapper to call mp_phot.resume() with correct color parms.
+        Parameters as for start().
+    :return: [None]
+    """
+    mpc.mp_phot.resume(MP_COLOR_TOP_DIRECTORY, mp_number, an_string)
+
+
+def assess():
+    """ Assess FITS files in target directory, then write color control ini file and its template.
+        Implemented as: wrapper around mp_phot.assess() + control file writing.
+    :return: [None]
+    """
+    defaults_dict = mpc.ini.make_defaults_dict()
+    color_log_filename = defaults_dict['color log filename']
+    mpc.mp_phot.assess(color_log_filename, write_mp_phot_control_stub=False)
+
+    # Write color control files (ini and its template):
+    context = mpc.mp_phot.get_context(color_log_filename)
     if context is None:
         return
     this_directory, mp_string, an_string = context
-    log_file = open(defaults_dict['color log filename'], mode='a')  # set up append to log file.
+    log_file = open(color_log_filename, mode='a')  # set up append to log file.
 
     # Write color control template file if it doesn't already exist:
     color_control_template_filename = defaults_dict['color control template filename']
@@ -67,6 +100,21 @@ def write_control_files():
     if not os.path.exists(fullpath):
         _write_color_control_ini_stub(this_directory, defaults_dict)
         log_file.write('New ' + color_control_filename + ' file written.\n')
+
+
+def make_dfs():
+    """ For one MP on one night (color): make the 3 required dataframes.
+        Implemented as wrapper around mp_phot.make_dfs()
+    :return: [None]
+    """
+    defaults_dict = mpc.ini.make_defaults_dict()
+    color_log_filename = defaults_dict['color log filename']
+    context = mpc.mp_phot.get_context(color_log_filename)
+    if context is None:
+        return
+    this_directory, mp_string, an_string = context
+    color_control_dict = make_color_control_dict(this_directory, defaults_dict)
+    mpc.mp_phot.make_dfs(color_control_dict)
 
 
 _____COLOR_INDEX_PHOTOMETRY________________________________________________ = 0
@@ -100,7 +148,8 @@ def do_one_color(definition=None, catalog_color_index=None):
     """
     # ===== Get context, write log file header and color control stub:
     defaults_dict = mpc.ini.make_defaults_dict()
-    context = mpc.mp_phot.get_context()
+    color_log_filename = defaults_dict['color log filename']
+    context = mpc.mp_phot.get_context(color_log_filename)
     if context is None:
         return
     this_directory, mp_string, an_string = context
@@ -148,7 +197,8 @@ def do_one_color(definition=None, catalog_color_index=None):
     for (f, pb) in [(fa, result_a), (fb, result_b)]:
         df_model_this_filter = df_screened_obs.loc[df_screened_obs['Filter'] == f, :].copy()
         # Here, count MP obs in this filter, error if not at least one.
-        model = SessionModel_OneFilter(df_model_this_filter, f, pb, catalog_color_index, color_control_dict)
+        model = SessionModel_OneFilter(df_model_this_filter, f, pb, catalog_color_index, color_control_dict,
+                                       defaults_dict)
         if df_results is None:
             df_results = model.df_mp_mags
         else:
@@ -206,7 +256,7 @@ def do_one_color(definition=None, catalog_color_index=None):
     # output = 'MP color index (' + passband_string + ') = ' + '{0:.3f}'.format(mp_color) +\
     #          ' ' + u'\u00B1' + ' {0:.3f}'.format(sigma_color) + ' from ' + filter_string +\
     #          '  (' + str(n_ci_comps) + ' comps used)'
-    # print(output + '\n   Write this to ' + CONTROL_FILENAME + ': #MP_RI_COLOR  ' +
+    # print(output + '\n   Write this to ' + MP_PHOT_CONTROL_FILENAME + ': #MP_RI_COLOR  ' +
     #       '{0:.3f}'.format(mp_color))
     # log_file.write(output)
     # log_file.close()
@@ -217,7 +267,8 @@ class SessionModel_OneFilter:
         NOTE 20201021: For now we use only 1st-order (linear in Color Index) transforms.
         [2nd-order (quadratic in CI) will be too hard to backsolve, and probably unstable.]
     """
-    def __init__(self, df_model, filter, passband, color_index_passbands, color_control_dict):
+    def __init__(self, df_model, filter, passband, color_index_passbands, color_control_dict,
+                 defaults_dict):
         """ :param df_model:
             :param filter:
             :param passband:
@@ -228,6 +279,7 @@ class SessionModel_OneFilter:
         self.filter = filter
         self.passband = passband
         self.color_index_passbands = color_index_passbands
+        self.defaults_dict = defaults_dict.copy()
 
         self.transform_option = color_control_dict['Transform'][(filter, passband)]  # TODO: correct this.
         self.extinction_option = color_control_dict['Extinction'][filter]
@@ -350,9 +402,10 @@ class SessionModel_OneFilter:
             fit_summary_lines.append(msg)
         color_index_string = self.color_index_passbands[0] + '-' + self.color_index_passbands[1]
         filename = 'fit_summary_' + color_index_string + '_' + self.filter + '.txt'
+        color_log_filename = self.defaults_dict['color log filename']
         mpc.mp_phot.write_text_file(filename,
                                     'Mixed-model Regression for directory ' +
-                                    mpc.mp_phot.get_context()[0] + '\n\n' +
+                                    mpc.mp_phot.get_context(color_log_filename)[0] + '\n\n' +
                                     'Color index ' + color_index_string +
                                     '   Filter ' + self.filter + '\n' +
                                     '\n'.join(fit_summary_lines) +
@@ -388,7 +441,7 @@ class SessionModel_OneFilter:
         self.df_mags['Transform'] = self.transform
 
 
-_____SUPPORT_and_SCREENING_FUNCTIONS________________________ = 0
+_____SUPPORT_FUNCTIONS______________________________________ = 0
 
 
 def _verify_input_parms(definition, catalog_color_index, instrument_dict, color_control_dict):
@@ -500,9 +553,12 @@ def _verify_images_available(df_all, definition):
     return all_present
 
 
+_____SCREENING_FUNCTIONS____________________________________ = 0
+
+
 def _remove_images_on_user_request(df_in, images_to_omit):
     """ Remove all observations from dataframe that have FITSfile that control file instructs to omit.
-    :param df_all: master dataframe of observations. [pandas dataframe]
+    :param df_in: master dataframe of observations. [pandas dataframe]
     :param images_to_omit: images [FITS file names] for which all observations are to be removed. [tuple]
     :return: updated dataframe. [pandas dataframe]
     """
@@ -697,6 +753,10 @@ def _write_color_control_ini_template(this_directory, defaults_dict):
     lines = ['#----- This is template file ' + color_control_template_filename,
              '#----- in directory ' + this_directory,
              '#',
+             '[MP Location]',
+             'MP Location Early = string -> mp location early',
+             'MP Location Late  = string -> mp location late',
+             '#',
              '[Selection]',
              'Omit Comps  = string  ->  omit comps',
              'Omit Obs    = string  ->  omit obs',
@@ -727,17 +787,26 @@ def _write_color_control_ini_stub(this_directory, defaults_dict):
     """ Write user-ready stub of color control file, only if file doesn't already exist.
     :param this_directory:
     :param defaults_dict:
-    :param log_file:
     :return:
     """
     color_control_filename = defaults_dict['color control filename']
     fullpath = os.path.join(this_directory, color_control_filename)
+
+    fits_filenames = mpc.mp_phot.get_fits_filenames(this_directory)  # TODO: move this fn to util.py.
+    utc_mid_list = [astropak.image.FITS(this_directory, '', fn).utc_mid for fn in fits_filenames]
+    mp_filename_earliest = fits_filenames[np.argmin(utc_mid_list)]
+    mp_filename_latest = fits_filenames[np.argmax(utc_mid_list)]
 
     lines = ['#----- This is ' + color_control_filename + ' for directory:',
              '#-----    ' + this_directory,
              '#',
              '[Ini Template]',
              'Filename = ' + defaults_dict['color control template filename'],
+             '',
+             '[MP Location]',
+             '# for each, give: FITS_filename  x_pixel  y_pixel.',
+             'MP Location Early = ' + mp_filename_earliest,
+             'MP Location Late  = ' + mp_filename_latest,
              '',
              '[Selection]',
              '# Omit Comps & Omit Obs: values may extend to multiple lines if necessary.',
@@ -776,6 +845,14 @@ def make_color_control_dict(this_directory, defaults_dict):
     color_control_ini = astropak.ini.IniFile(os.path.join(this_directory,
                                                           defaults_dict['color control filename']))
     color_control_dict = color_control_ini.value_dict
+
+    # Parse and overwrite MP Location items:
+    early_items = color_control_dict['mp location early'].split()
+    late_items = color_control_dict['mp location late'].split()
+    color_control_dict['mp_location filenames'] = (early_items[0], late_items[0])
+    color_control_dict['x pixels'] = (float(early_items[1]), float(late_items[1]))
+    color_control_dict['y pixels'] = (float(early_items[2]), float(late_items[2]))
+    del color_control_dict['mp location early'], color_control_dict['mp location late']
 
     # Parse and overwrite 'omit comps', 'omit obs', and 'omit images':
     comps_to_omit = color_control_dict['omit comps'].replace(',', ' ').split()

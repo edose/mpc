@@ -76,7 +76,7 @@ NEW_WORKFLOW________________________________________________ = 0
 # ***********************
 
 
-# def start(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+# def start(mp_top_directory=MP_PHOT_TOP_DIRECTORY, mp_number=None, an_string=None):
 #     """  Preliminaries to begin MP photometry workflow.
 #     :param mp_top_directory: path of lowest directory common to all MP photometry FITS, e.g.,
 #                'C:/Astro/MP Photometry' [string]
@@ -121,7 +121,7 @@ NEW_WORKFLOW________________________________________________ = 0
 #     print('Next: assess()')
 #
 #
-# def resume(mp_top_directory=MP_TOP_DIRECTORY, mp_number=None, an_string=None):
+# def resume(mp_top_directory=MP_PHOT_TOP_DIRECTORY, mp_number=None, an_string=None):
 #     """  Restart a workflow in its correct working directory,
 #          but keep the previous log file--DO NOT overwrite it.
 #     parameters as for start().

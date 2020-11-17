@@ -16,7 +16,7 @@ import mpc.ini
 import mpc.mp_color
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEST_TOP_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, "test", '$test_data_do_color')
+TEST_TOP_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, "test", '$test_data_mp_color')
 
 
 def test_do_color_2filters():
@@ -37,10 +37,14 @@ def test_make_color_control_dict():
     context = mpc.mp_phot.get_context()
     this_directory, mp_string, an_string = context
     defaults_dict = mpc.ini.make_defaults_dict()
-
     ccd = mpc.mp_color.make_color_control_dict(this_directory, defaults_dict)
+
     assert isinstance(ccd, dict)
     assert len(ccd) == 16
+    assert ccd['mp location filenames'] == ('MP_426-0011-R.fts', 'MP_426-0012-I.fts')
+    assert ccd['x pixel'] == (1034.4, 1036.0)
+    assert ccd['y pixel'] == (454.3, 455.4)
+
     assert ccd['max mp obs mag uncertainty']
     assert ccd['max comp obs mag uncertainty']
     assert ccd['min sr mag'] == 10
@@ -62,6 +66,9 @@ def test_make_color_control_dict():
     assert ccd['fit vignette'] == True
     assert ccd['fit xy'] == False
     assert ccd['fit jd'] == False
+
+
+_____TEST_SUPPORT_FUNCTIONS_________________________________ = 0
 
 
 def test__verify_input_parms():
@@ -121,3 +128,38 @@ def test__verify_input_parms():
     assert verified == False
 
     # TODO: test two-color cases.
+
+
+def test__verify_images_available():
+    resume_with_df_all('426', '20201023')
+    df_all = mpc.mp_phot.make_df_all(('R', 'I'), comps_only=False, require_mp_obs_each_image=True)
+    assert mpc.mp_color._verify_images_available(df_all, definition=('R', 'I', 'SR', 'SI')) == True
+    assert mpc.mp_color._verify_images_available(df_all, definition=('R', 'SI', 'SR', 'SI')) == False
+    assert mpc.mp_color._verify_images_available(df_all, definition=('R', 'I', 'SR', 'I')) == False
+    mp_in_r = (df_all['Type'] == 'MP') & (df_all['Filter'] == 'R')
+    df_partial = df_all.loc[mp_in_r, :]
+    assert mpc.mp_color._verify_images_available(df_partial, definition=('R', 'I', 'SR', 'SI')) == False
+
+
+
+
+
+
+_____TEST_SCREENING_FUNCTIONS____________________________ = 0
+
+
+def test__remove_images_on_user_request():
+    pass
+
+
+_____HELPER_FUNCTIONS_for_TESTING___________________________ = 0
+
+
+def resume_with_df_all(mp_string, an_string):
+    mpc.mp_phot.resume(TEST_TOP_DIRECTORY, mp_string, an_string)
+    context = mpc.mp_phot.get_context()
+    this_directory, mp_string, an_string = context
+    defaults_dict = mpc.ini.make_defaults_dict()
+    instrument_dict = mpc.ini.make_instrument_dict(defaults_dict)
+    color_control_dict = mpc.mp_color.make_color_control_dict(this_directory, defaults_dict)
+    return this_directory, defaults_dict, instrument_dict, test_make_color_control_dict

@@ -1,6 +1,10 @@
 #----- This is template file color_control.template
 #----- in directory C:\Dev\mpc\test\$test_data_do_color\MP_426\AN20201023
 #
+[MP Location]
+MP Location Early  = string -> mp location early
+MP Location Late   = string -> mp location late
+
 [Selection]
 Max MP Obs Mag Uncertainty   = float -> max mp obs mag uncertainty
 Max Comp Obs Mag Uncertainty = float -> max comp obs mag uncertainty
