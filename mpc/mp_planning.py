@@ -19,6 +19,9 @@ import matplotlib.patches as patches
 from mpc.mp_astrometry import calc_exp_time, PAYLOAD_DICT_TEMPLATE, get_one_html_from_list
 from photrix.user import Astronight
 from photrix.util import RaDec, datetime_utc_from_jd, jd_from_datetime_utc, hhmm_from_datetime_utc
+import astropak.web as web
+from astropak.util import ra_as_degrees, dec_as_degrees, Timespan, dec_as_hex, ra_as_hours, degrees_as_hex
+from mpc.ini import make_defaults_dict, make_site_dict
 
 MOON_CHARACTER = '\u263D'
 # MOON_CHARACTER = '\U0001F319'  # Drat, matplotlib complains 'glyph missing from current font'.
@@ -28,7 +31,7 @@ CALL_TARGET_COLUMNS = ['LCDB', 'Eph', 'CN', 'CS', 'Favorable', 'Num', 'Name',
                        'MinDistDate', 'MDist', 'BrtDate', 'BrtMag', 'BrtDec', 'PFlag', 'P',
                        'AmplMin', 'AmplMax', 'U', 'Diam']
 
-# MP_PHOTOMETRY_PLANNING:
+# MP PHOTOMETRY PLANNING:
 MIN_MP_ALTITUDE = 29  # degrees
 MIN_MOON_DISTANCE = 40  # degrees (default value)
 MIN_HOURS_OBSERVABLE = 2  # (default value) less than this, and MP is not included in planning.
@@ -38,7 +41,7 @@ DSNM = ('251.10288d', '31.748657576406853d', '1372m')
 EXP_TIME_TABLE_PHOTOMETRY = [(13, 60), (14, 80), (15, 160), (16, 300), (17, 600), (17.5, 900)]
 EXP_OVERHEAD = 20  # Nominal exposure overhead, in seconds.
 COV_RESOLUTION_MINUTES = 5  # min. coverage plot resolution, in minutes.
-MAX_V_MAGNITUDE_DEFAULT = 18.25  # to ensure ridiculously faint MPs don't get into planning & plots.
+MAX_V_MAGNITUDE_DEFAULT = 18.4  # to ensure that ridiculously faint MPs don't get into planning & plots.
 MAX_EXP_TIME_NO_GUIDING = 119
 
 MPFILE_DIRECTORY = 'C:/Dev/Photometry/MPfile'
@@ -47,18 +50,144 @@ ACP_PLANNING_TOP_DIRECTORY = 'C:/Astro/ACP'
 CURRENT_MPFILE_VERSION = '1.1'
 # MPfile version 1.1 = added #BRIGHTEST directive; #EPH_RANGE rather than #UTC_RANGE; added #FAMILY.
 
-FOR_PLANNING_____________________________________________________________ = 0
+# COLOR PLANNING:
+MAX_COLOR_MANDATORY_MP_NUMBER = 50  # TODO: increase this after testing.
+MIN_COLOR_V_MAGNITUDE_DEFAULT = 12
+MAX_COLOR_V_MAGNITUDE_DEFAULT = 15.5
+MIN_COLOR_MP_ALTITUDE = 35
+MIN_COLOR_MOON_DISTANCE = 50
+MAX_COLOR_SUN_ALT = -9
+COLOR_MP_LIST_FULLPATH = 'C:/Astro/MP Color/MP list.txt'
+COLOR_ROSTER_FILENAME = 'MP Color Roster.txt'
+
+MAX_COLOR_MOTION = 1.0  # in arcseconds/minute
+DELAY_BETWEEN_MPES_CALLS = 5  # seconds between successive calls to MP eph service (MPC site)
+
+
+_____FOR_COLOR_PLANNING_____________________________________ = 0
+
+
+def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
+                      min_hours=MIN_HOURS_OBSERVABLE,
+                      min_vmag=MIN_COLOR_V_MAGNITUDE_DEFAULT, max_vmag=MAX_COLOR_V_MAGNITUDE_DEFAULT,
+                      max_mandatory_mp_number=MAX_COLOR_MANDATORY_MP_NUMBER):
+    """ Main COLOR INDEX planning function for MP photometry.
+    :param an Astronight, e.g. 20200201 [string or int]
+    :param site_name: name of site for Site object. [string]
+    :param min_moon_dist: min dist from min (degrees) to consider MP observable. [float]
+    :param min_hours: min hours of observing time to include an MP. [float]
+    :param max_vmag: maximum estimated V mag allowed for MP to be kept in table & plots. [float]
+    :return:
+    """
+    # ===== Make 2 lists of MP numbers to query (user-specified and low-number):
+    user_list = []
+    if os.path.exists(COLOR_MP_LIST_FULLPATH) and os.path.isfile(COLOR_MP_LIST_FULLPATH):
+        with open(COLOR_MP_LIST_FULLPATH, 'r') as mpfile:
+            lines = mpfile.readlines()
+        for line in lines:
+            data_string = line.strip()
+            if len(data_string) >= 1:
+                if not data_string.startswith(';'):
+                    strs = data_string.replace(',', ' ').split()
+                    user_list.extend([int(s) for s in strs])
+    else:
+        print(' >>>>> WARNING: cannot find MP List file:', COLOR_MP_LIST_FULLPATH)
+        print(' >>>>> Ignoring and using only standard low MP numbers.')
+
+    # ===== Make 2 df_mpes dataframes.
+    defaults_dict = make_defaults_dict()
+    site_dict = make_site_dict(defaults_dict)
+    an_string = str(an)
+    year, month, day = int(an_string[:4]), int(an_string[4:6]), int(an_string[6:8])
+    utc_start = datetime(year, month, day, 0, 0, 0).replace(tzinfo=timezone.utc)
+
+    df_mpes_user = web.make_df_mpes(mp_list=user_list, site_dict=site_dict,
+                                    utc_start=utc_start, hours=13)
+    low_number_list = [i + 1 for i in range(MAX_COLOR_MANDATORY_MP_NUMBER) if i not in user_list]
+    df_mpes_low_number = web.make_df_mpes(mp_list=low_number_list, site_dict=site_dict,
+                                          utc_start=utc_start, hours=13)
+    df_mpes_low_number['Source'] = 'Low Number'
+    if df_mpes_user is None:
+        df = df_mpes_low_number
+    else:
+        df_mpes_user['Source'] = 'User'
+        df = df_mpes_user.append(df_mpes_low_number, ignore_index=True)
+    df['V_mag'] = [float(v) for v in df['V_mag']]
+
+    # Screen df_mpes for user criteria incl: altitude, V mag, motion max, moon distance.
+    v_mag_ok = (MIN_COLOR_V_MAGNITUDE_DEFAULT <= df['V_mag']) & \
+               (df['V_mag'] <= MAX_COLOR_V_MAGNITUDE_DEFAULT)
+    altitude_ok = (df['Alt'] >= MIN_COLOR_MP_ALTITUDE)
+    motion_ok = (abs(df['Motion']) < MAX_COLOR_MOTION)
+    moon_dist_ok = (df['Moon_dist'] >= MIN_COLOR_MOON_DISTANCE) | (df['Moon_alt'] < 0)
+    sun_alt_ok = (df['Sun_alt'] <= MAX_COLOR_SUN_ALT)
+    row_ok = v_mag_ok & altitude_ok & motion_ok & moon_dist_ok & sun_alt_ok
+    df_mpes = df.loc[row_ok, :].sort_values(by=['Number', 'UTC'])
+    df_mpes.index = [i for i in range(len(df_mpes))]
+    roster_mps = df_mpes['Number'].drop_duplicates()
+
+    # Convert df_mpes to df_by_mp:
+    list_mp_dict = []
+    for mp in roster_mps:
+        df_mp = df_mpes.loc[df_mpes['Number'] == mp, :]
+        n = len(df_mp)
+        mp_dict = {'Number': mp,
+                   'Name': df_mp['Name'].iloc[0],
+                   'Source': df_mp['Source'].iloc[0],
+                   'V_mag': max(df_mp['V_mag']),
+                   'RA_deg': sum([ra_as_degrees(ra) for ra in df_mp['RA']]) / n,
+                   'Dec_deg': sum([dec_as_degrees(dec) for dec in df_mp['Dec']]) / n,
+                   'Moon_dist': min(df_mp['Moon_dist']),
+                   'Motion': max(df_mp['Motion'])
+                   }
+        list_mp_dict.append(mp_dict)
+    df_mp = pd.DataFrame(data=list_mp_dict)
+    df_mp.index = list(df_mp['Number'])
+    this_an = Astronight(an_string, 'DSW')
+    radecs = [RaDec(ra, dec) for (ra, dec) in zip(df_mp['RA_deg'], df_mp['Dec_deg'])]
+    ts_observables = [this_an.ts_observable(radec, MIN_COLOR_MP_ALTITUDE) for radec in radecs]
+    df_mp['UTC_earliest'] = [ts.start for ts in ts_observables]
+    df_mp['UTC_latest'] = [ts.end for ts in ts_observables]
+    df_mp = df_mp.sort_values(by=['UTC_earliest', 'UTC_latest', 'Number'])
+
+    # Make text lines from df_mp:
+    lines = []
+    max_name_length = min(30, max([len(name) for name in df_mp['Name']]))
+    for mp in df_mp.index:
+        line = str(df_mp.loc[mp, 'Number']).rjust(7) + ' ' +\
+               (' ! ' if df_mp.loc[mp, 'Source'] == 'User' else '   ') +\
+               df_mp.loc[mp, 'Name'][:max_name_length].ljust(max_name_length) + '  ' +\
+               hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_earliest']) + '-' + \
+               hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_latest']) + '  ' +\
+               '{0:5.1f}'.format(df_mp.loc[mp, 'V_mag']) + '  ' +\
+               ra_as_hours(df_mp.loc[mp, 'RA_deg'], seconds_decimal_places=0) + ' ' +\
+               dec_as_hex(df_mp.loc[mp, 'Dec_deg'], arcseconds_decimal_places=0) + '  ' +\
+               '{0:4d}'.format(round(df_mp.loc[mp, 'Moon_dist'])) + '  ' +\
+               '{0:5.2f}'.format(df_mp.loc[mp, 'Motion'])
+        lines.append(line)
+
+    # Write lines to roster text file:
+    roster_directory = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string)
+    # TODO: make directory if doesn't already exist.
+    roster_fullpath = os.path.join(roster_directory, COLOR_ROSTER_FILENAME)
+    with open(roster_fullpath, 'w') as this_file:
+        this_file.write('\n'.join(lines))
+
+
+_____FOR_LIGHTCURVE_PLANNING________________________________ = 0
 
 
 def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
                    min_hours=MIN_HOURS_OBSERVABLE, max_vmag=MAX_V_MAGNITUDE_DEFAULT,
                    plots_to_console=False):
-    """ Main planning workflow for MP photometry. Requires a
+    """ Main LIGHTCURVE planning function for MP photometry.
     :param an_string: Astronight, e.g. 20200201 [string or int]
     :param site_name: name of site for Site object. [string]
     :param min_moon_dist: min dist from min (degrees) to consider MP observable. [float]
     :param min_hours: min hours of observing time to include an MP. [float]
     :param max_vmag: maximum estimated V mag allowed for MP to be kept in table & plots. [float]
+    :param plots_to_console: [NOT IMPLEMENTED] will control whether plots are drawn to console;
+        (plots are always written to files). [boolean]
     :return: [None]
     """
     # Make and print table of values, 1 line/MP, sorted by earliest observable UTC:
@@ -216,9 +345,6 @@ def backlog(months=6):
     df = pd.DataFrame(data=backlog_dict_list).sort_values(by='Brightest')
     df.index = list(df['Number'])
     return df  # temporary for testing.
-
-
-SUPPORT_____________________________________________________________ = 0
 
 
 def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
@@ -606,69 +732,10 @@ def make_df_phase_coverage(period, obs_jd_ranges, phase_entries=100):
     return df_phase_coverage
 
 
-def ra_as_hours(ra_degrees, seconds_decimal_places=3):
-    """
-    Adapted 20200525 from photrix.util module.
-    :param ra_degrees: Right Ascension in degrees. [float]
-    :param seconds_decimal_places: number of places to the right of the decimal point. [int]
-    :return: RA as hours, in hex. [string]
-    """
-    if (ra_degrees < 0) | (ra_degrees > 360):
-        return None
-    n_ra_milliseconds = round((ra_degrees * 3600 * 1000) / 15)
-    ra_hours, remainder = divmod(n_ra_milliseconds, 3600 * 1000)
-    ra_minutes, remainder = divmod(remainder, 60 * 1000)
-    ra_seconds = round(remainder / 1000, 3)
-    # format_string = "{0:02d}:{1:02d}:{2:06.3f}"
-    if seconds_decimal_places <= 0:
-        format_string = "{0:02d}:{1:02d}:{2:02.0f}"
-    else:
-        format_string = '{0:02d}:{1:02d}:{2:0' + str(3 + seconds_decimal_places) + \
-                        '.' + str(seconds_decimal_places) + 'f}'
-    ra_str = format_string.format(int(ra_hours), int(ra_minutes), ra_seconds)
-    if ra_str[:3] == "24:":
-        ra_str = format_string.format(0, 0, 0)
-    return ra_str
+_____GENERAL_SUPPORT________________________________________ = 0
 
 
-def dec_as_hex(dec_degrees):
-    """
-    Copied 20200525 from photrix.util module.
-    :param dec_degrees: Declination in degrees.  [float]
-    :return: Declination in hex, or None if Dec value illegal. [string]
-    """
-    if (dec_degrees < -90) | (dec_degrees > +90):
-        return None
-    dec_string = degrees_as_hex(dec_degrees, arcseconds_decimal_places=2)
-    return dec_string
-
-
-def degrees_as_hex(angle_degrees, arcseconds_decimal_places=2):
-    """
-    Adapted 20200525 from photrix.util module.
-    :param angle_degrees: any angle as degrees.
-    :param arcseconds_decimal_places: number of places after the decimal point, arcseconds. [int]
-    :return: Angle in hex notation, unbounded. [float]
-    """
-    if angle_degrees < 0:
-        sign = "-"
-    else:
-        sign = "+"
-    abs_degrees = abs(angle_degrees)
-    milliseconds = round(abs_degrees * 3600 * 1000)
-    degrees, remainder = divmod(milliseconds, 3600 * 1000)
-    minutes, remainder = divmod(remainder, 60 * 1000)
-    seconds = round(remainder / 1000, 2)
-    if arcseconds_decimal_places <= 0:
-        format_string = "{0}{1:02d}:{2:02d}:{3:02.0f}"
-    else:
-        format_string = '{0}{1:02d}:{2:02d}:{3:0' + str(int(arcseconds_decimal_places)+3) + \
-                        '.' + str(int(arcseconds_decimal_places)) + 'f}'
-    hex_string = format_string.format(sign, int(degrees), int(minutes), seconds)
-    return hex_string
-
-
-MPFILE____________________________________________________ = 0
+_____MPFILE_________________________________________________ = 0
 
 
 def make_mpfile(mp_number, utc_date_brightest=None, days=210, mpfile_directory=MPFILE_DIRECTORY):

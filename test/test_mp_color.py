@@ -34,19 +34,21 @@ def test_do_color_2filters():
 
 def test_make_color_control_dict():
     mpc.mp_phot.resume(TEST_TOP_DIRECTORY, 426, '20201023')
-    context = mpc.mp_phot.get_context()
-    this_directory, mp_string, an_string = context
     defaults_dict = mpc.ini.make_defaults_dict()
+    color_log_filename = defaults_dict['color log filename']
+    context = mpc.mp_phot.get_context(color_log_filename)
+    this_directory, mp_string, an_string = context
     ccd = mpc.mp_color.make_color_control_dict(this_directory, defaults_dict)
 
     assert isinstance(ccd, dict)
-    assert len(ccd) == 16
+    assert len(ccd) == 21
+
     assert ccd['mp location filenames'] == ('MP_426-0011-R.fts', 'MP_426-0012-I.fts')
     assert ccd['x pixel'] == (1034.4, 1036.0)
     assert ccd['y pixel'] == (454.3, 455.4)
 
-    assert ccd['max mp obs mag uncertainty']
-    assert ccd['max comp obs mag uncertainty']
+    assert ccd['max mp obs mag uncertainty'] == 0.05
+    assert ccd['max comp obs mag uncertainty'] == 0.025
     assert ccd['min sr mag'] == 10
     assert ccd['max sr mag'] == 16
     assert ccd['max catalog dsr mmag'] == 20
