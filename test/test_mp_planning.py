@@ -18,4 +18,8 @@ THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__
 
 
 def test_make_color_roster():
-    pl.make_color_roster(an=20201122, site_name='DSW')
+    # Normal case, with both outside files:
+    pl.make_color_roster(an=20201122, site_name='DSW', min_vmag=11, max_mandatory_mp_number=300)
+
+
+

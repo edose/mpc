@@ -1339,13 +1339,19 @@ def write_alcdef_file(model, mp_color_ri, source_string_ri):
         f.write(fulltext)
 
 
-def combine_alcdef(mp, apparition_year):
+def combine_alcdef(mp, apparition_year, top_directory=MP_PHOT_TOP_DIRECTORY):
     """ Append into one file all ALCDEF files in this MP Campaign directory, write to MP directory.
-    :param mp: MP number. A subdirectory 'MP_[mpnumber]' must exist in the MP TOP DIRECTORY. [int or str]
-    :param apparition_year
+    :param mp: MP number. A subdirectory 'MP_[mpnumber]' must exist in mp_phot_top_directory. [int or str]
+    :param apparition_year: used to name output file. [string or int]
+    :param top_directory: directory just above the MP_nnnn directory containing alcdef files.
+           Is usually the default, or like 'C:/Astro/MP Photometry/MPBs In Press/For MPB 48-1/'. [string]
+    Before use: Be VERY sure that unused session directories are removed to 'Exclude' subdir.
+    Usage: combine_alcdef(1604, 2020) or
+           combine_alcdef(1604, 2020, 'C:/Astro/MP Photometry'
+    After use: Verify combined file with ALCDEF Verify web-based checker (on alcdef.org).
     :return: None. Writes new file to MP's directory.
     """
-    mpdir = os.path.join(MP_PHOT_TOP_DIRECTORY, 'MP_' + str(mp))
+    mpdir = os.path.join(top_directory, 'MP_' + str(mp))
     an_subdirs = [f.path for f in os.scandir(mpdir)
                   if (f.is_dir() and f.name.startswith('AN') and len(f.name) == 10)]
     all_lines = []
@@ -1371,7 +1377,7 @@ def combine_alcdef(mp, apparition_year):
     fullpath = os.path.join(mpdir, combined_filename)
     with open(fullpath, 'w') as f:
         f.writelines(fulltext)
-    print('Combined ALCDEF now at', fullpath, '= ', len(all_lines), 'lines.')
+    print(str(len(all_lines)), 'total lines written to', fullpath, '.')
 
 
 _____READING_LOG_and_CONTROL_FILES__________________________________ = 0
