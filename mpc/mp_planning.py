@@ -17,12 +17,13 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import matplotlib.patches as patches
 
-from mpc.mp_astrometry import calc_exp_time, PAYLOAD_DICT_TEMPLATE, get_one_html_from_list
+
 from photrix.user import Astronight
 from photrix.util import RaDec, datetime_utc_from_jd, jd_from_datetime_utc, hhmm_from_datetime_utc
 import astropak.web as web
 from astropak.util import ra_as_degrees, dec_as_degrees, dec_as_hex, ra_as_hours, degrees_as_hex, \
-    Timespan, make_directory_if_not_exists
+    Timespan, make_directory_if_not_exists, next_date_utc
+from mpc.mp_astrometry import calc_exp_time, PAYLOAD_DICT_TEMPLATE, get_one_html_from_list
 from mpc.ini import make_defaults_dict, make_site_dict
 
 MOON_CHARACTER = '\u263D'
@@ -59,7 +60,8 @@ MAX_COLOR_V_MAGNITUDE_DEFAULT = 15.5
 MIN_COLOR_MP_ALTITUDE = 35
 MIN_COLOR_MOON_DISTANCE = 50
 MAX_COLOR_SUN_ALT = -9
-COLOR_MP_LIST_FULLPATH = 'C:/Astro/MP Color/MP list.txt'
+COLOR_LIGHTCURVE_LIST_FULLPATH = 'C:/Astro/MP Color/MP lightcurve list.txt'
+COLOR_OPPORTUNITY_LIST_FULLPATH = 'C:/Astro/MP Color/MP opportunity list.txt'
 COLOR_OMIT_LIST_FULLPATH = 'C:/Astro/MP Color/MP omit list.txt'
 COLOR_ROSTER_FILENAME = 'MP Color Roster.txt'
 
@@ -93,44 +95,57 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
             with open(fullpath, 'r') as mpfile:
                 lines = mpfile.readlines()
             for line in lines:
-                data_string = line.strip()
-                if len(data_string) >= 1:
-                    if not data_string.startswith(';'):
-                        strs = data_string.replace(',', ' ').split()
-                        this_list.extend(strs)
+                strs = line.strip().split(';', maxsplit=1)[0].replace(',', ' ').split()
+                this_list.extend(strs)
         return this_list
 
-    # ===== Make lists of MP numbers to query (user-specified and low-number):
-    # Make user list of desired MPs to INCLUDE:
-    user_list = _get_mp_list(COLOR_MP_LIST_FULLPATH)
-    if len(user_list) <= 0:
-        print('\n >>>>> WARNING: cannot find MP List file or file empty:', COLOR_MP_LIST_FULLPATH)
-        print(' >>>>> Ignoring and using only standard low MP numbers.')
+    # ===== Make 3 lists of MP numbers to query (user-specified and low-number):
+    # Make user list of CURRENT LIGHTCURVE MPs to measure for Color:
+    lc_list = _get_mp_list(COLOR_LIGHTCURVE_LIST_FULLPATH)
+    if len(lc_list) <= 0:
+        print('\n >>>>> WARNING: cannot find MP List file or file empty:', COLOR_LIGHTCURVE_LIST_FULLPATH)
+    # Make user list of special OPPORTUNITY MPs to measure for Color:
+    opp_list = _get_mp_list(COLOR_OPPORTUNITY_LIST_FULLPATH)
+    if len(opp_list) <= 0:
+        print('\n >>>>> WARNING: cannot find MP List file or file empty:', COLOR_OPPORTUNITY_LIST_FULLPATH)
+    opp_list = [mp for mp in opp_list if mp not in lc_list]  # Lightcurve list is highest priority.
+    # Make default list of low-number MPs to measure for color:
+    low_number_list = [str(mp + 1) for mp in range(max_mandatory_mp_number)
+                       if str(mp + 1) not in (lc_list + opp_list)]  # Low-number list is lowest priority.
 
     # Make and apply list of MPs to OMIT:
     omit_list = _get_mp_list(COLOR_OMIT_LIST_FULLPATH)
     if len(omit_list) <= 0:
         print('\n >>>>> WARNING: cannot find MP List file or list empty:', COLOR_OMIT_LIST_FULLPATH)
-    user_list = [mp for mp in user_list if mp not in omit_list]
-    low_number_list = [str(mp + 1) for mp in range(max_mandatory_mp_number)
-                       if str(mp + 1) not in (user_list + omit_list)]
+    else:
+        lc_list = [mp for mp in lc_list if mp not in omit_list]
+        opp_list = [mp for mp in opp_list if mp not in omit_list]
+        low_number_list = [mp for mp in low_number_list if mp not in omit_list]
 
-    # ===== Make 2 df_mpes dataframes.
+    # ===== Make 3 df_mpes dataframes.
     defaults_dict = make_defaults_dict()
     site_dict = make_site_dict(defaults_dict)
     an_string = str(an)
     year, month, day = int(an_string[:4]), int(an_string[4:6]), int(an_string[6:8])
-    utc_start = datetime(year, month, day, 0, 0, 0).replace(tzinfo=timezone.utc)
-    df_mpes_user = web.make_df_mpes(mp_list=user_list, site_dict=site_dict,
-                                    utc_start=utc_start, hours=13)
+    utc_start = next_date_utc(datetime(year, month, day, 0, 0, 0).replace(tzinfo=timezone.utc))
+    df_mpes_lc = web.make_df_mpes(mp_list=lc_list, site_dict=site_dict, utc_start=utc_start, hours=13)
+    if df_mpes_lc is not None:
+        if len(df_mpes_lc) >= 1:
+            df_mpes_lc.loc[:, 'Flag'] = '!'
+    df_mpes_opp = web.make_df_mpes(mp_list=opp_list, site_dict=site_dict, utc_start=utc_start, hours=13)
+    if df_mpes_opp is not None:
+        if len(df_mpes_opp) >= 1:
+            df_mpes_opp.loc[:, 'Flag'] = '~'
     df_mpes_low_number = web.make_df_mpes(mp_list=low_number_list, site_dict=site_dict,
                                           utc_start=utc_start, hours=13)
-    df_mpes_low_number['Source'] = 'Low Number'
-    if df_mpes_user is None:
-        df = df_mpes_low_number
-    else:
-        df_mpes_user['Source'] = 'User'
-        df = df_mpes_user.append(df_mpes_low_number, ignore_index=True)
+    if df_mpes_low_number is not None:
+        if len(df_mpes_low_number) >= 1:
+            df_mpes_low_number.loc[:, 'Flag'] = ' '
+
+    # Combine dataframes into one:
+    df = df_mpes_low_number.copy()
+    df = df.append(df_mpes_lc, ignore_index=True)
+    df = df.append(df_mpes_opp, ignore_index=True)
     df['V_mag'] = [float(v) for v in df['V_mag']]
 
     # Screen df_mpes for user criteria incl: altitude, V mag, motion max, moon distance.
@@ -151,14 +166,15 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
         df_mp = df_mpes.loc[df_mpes['Number'] == mp, :]
         n = len(df_mp)
         mp_dict = {'Number': mp,
+                   'Flag': df_mp['Flag'].iloc[0],
                    'Name': df_mp['Name'].iloc[0],
-                   'Source': df_mp['Source'].iloc[0],
                    'V_mag': max(df_mp['V_mag']),
                    'RA_deg': sum([ra_as_degrees(ra) for ra in df_mp['RA']]) / n,
                    'Dec_deg': sum([dec_as_degrees(dec) for dec in df_mp['Dec']]) / n,
                    'Moon_dist': min(df_mp['Moon_dist']),
-                   'Motion': max(df_mp['Motion'])
-                   }
+                   'Motion': max(df_mp['Motion']),
+                   'Phase_angle': sum(df_mp['Phase_angle']) / n
+        }
         list_mp_dict.append(mp_dict)
     df_mp = pd.DataFrame(data=list_mp_dict)
     df_mp.index = list(df_mp['Number'])
@@ -166,21 +182,26 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     radecs = [RaDec(ra, dec) for (ra, dec) in zip(df_mp['RA_deg'], df_mp['Dec_deg'])]
     df_mp['Gal_lat'] = [SkyCoord(ra, dec, unit='deg', frame='icrs').galactic.b.value
                         for (ra, dec) in zip(df_mp['RA_deg'], df_mp['Dec_deg'])]
-    ts_observables = [this_an.ts_observable(radec, MIN_COLOR_MP_ALTITUDE) for radec in radecs]
+    ts_observables = [this_an.ts_observable(radec, min_alt=MIN_COLOR_MP_ALTITUDE,
+                                            min_moon_dist=MIN_COLOR_MOON_DISTANCE) for radec in radecs]
+    ts_transits = [this_an.transit(radec) for radec in radecs]
     df_mp['UTC_earliest'] = [ts.start for ts in ts_observables]
     df_mp['UTC_latest'] = [ts.end for ts in ts_observables]
+    df_mp['UTC_highest'] = [min(max(tr, ob.start), ob.end)
+                            for (tr, ob) in zip(ts_transits, ts_observables)]
     observable_long_enough = [ts.seconds / 3600 >= min_hours for ts in ts_observables]
     df_mp = df_mp.loc[observable_long_enough, :].sort_values(by=['UTC_earliest', 'UTC_latest', 'Number'])
 
     # Make text lines from df_mp:
     table_lines = []
-    number_length = 7
+    number_length = 6
     max_name_length = min(30, max([len(name) for name in df_mp['Name']]))
     for mp in df_mp.index:
-        line = str(df_mp.loc[mp, 'Number']).rjust(number_length) + ' ' +\
-               (' ! ' if df_mp.loc[mp, 'Source'] == 'User' else '   ') +\
-               df_mp.loc[mp, 'Name'][:max_name_length].ljust(max_name_length) + '  ' +\
+        line = str(df_mp.loc[mp, 'Number']).rjust(number_length) +\
+               ' ' + df_mp.loc[mp, 'Flag'] + ' ' +\
+               df_mp.loc[mp, 'Name'][:max_name_length].ljust(max_name_length) + ' ' +\
                hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_earliest']) + '-' + \
+               hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_highest']) + '-' + \
                hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_latest']) + '  ' +\
                '{0:5.1f}'.format(df_mp.loc[mp, 'V_mag']) + '  ' +\
                ra_as_hours(df_mp.loc[mp, 'RA_deg'], seconds_decimal_places=0) + ' ' +\
@@ -188,7 +209,9 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
                '{0:6d}'.format(round(df_mp.loc[mp, 'Moon_dist'])) + '  ' +\
                '{0:5.2f}'.format(df_mp.loc[mp, 'Motion']) + '  ' +\
                '{0:4d}'.format(int(round(df_mp.loc[mp, 'Gal_lat']))) +\
-               ('*' if abs(df_mp.loc[mp, 'Gal_lat']) < 16.0 else ' ')
+               ('*' if abs(df_mp.loc[mp, 'Gal_lat']) < 16.0 else ' ') +\
+               '{0:6.1f}'.format(df_mp.loc[mp, 'Phase_angle']) +\
+               ('*' if abs(df_mp.loc[mp, 'Phase_angle']) < 2.0 else ' ')
         table_lines.append(line)
 
     # Make header lines, then assemble all lines:
@@ -200,8 +223,8 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
                     '     min.alt = ' + '{:.1f}'.format(MIN_COLOR_MP_ALTITUDE) + u'\N{DEGREE SIGN}' +
                     '     V mag = ' + '{0:4.1f}'.format(min_vmag) + ' to ' + '{0:4.1f}'.format(max_vmag),
                     this_an.acp_header_string(), '']
-    table_header_line = 'V mag'.rjust(number_length + max_name_length + 22) +\
-        'Moondist'.rjust(28) + '"/min'.rjust(7) + ' Gal.B'
+    table_header_line = 'V mag'.rjust(number_length + max_name_length + 25) +\
+        'Moondist'.rjust(28) + '"/min'.rjust(7) + ' Gal.B' + '  Phase'
     all_lines = header_lines + [table_header_line] + table_lines + [table_header_line]
 
     # Write lines to roster text file:

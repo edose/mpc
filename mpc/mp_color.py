@@ -50,7 +50,7 @@ _____INITIALIZE_COLOR_WORKFLOW______________________________ = 0
 # Largely implemented as calls to functions in module 'mp_phot'.
 
 
-def start(mp_number=None, an_string=None):
+def start(color_top_directory=MP_COLOR_TOP_DIRECTORY, mp_number=None, an_string=None):
     """ Preliminaries to begin MP COLOR workflow.
         Wrapper to call mp_phot.start() with correct color parms.
     :param mp_number: number of target MP, e.g., 1602 for Indiana. [integer or string].
@@ -59,16 +59,16 @@ def start(mp_number=None, an_string=None):
     """
     defaults_dict = mpc.ini.make_defaults_dict()
     color_log_filename = defaults_dict['color log filename']
-    mpc.mp_phot.start(MP_COLOR_TOP_DIRECTORY, mp_number, an_string, color_log_filename)
+    mpc.mp_phot.start(color_top_directory, mp_number, an_string, color_log_filename)
 
 
-def resume(mp_number=None, an_string=None):
+def resume(color_top_directory=MP_COLOR_TOP_DIRECTORY, mp_number=None, an_string=None):
     """ Restart a workflow in its correct working directory; keep log file--DO NOT overwrite it.
         Implemented as: wrapper to call mp_phot.resume() with correct color parms.
         Parameters as for start().
     :return: [None]
     """
-    mpc.mp_phot.resume(MP_COLOR_TOP_DIRECTORY, mp_number, an_string)
+    mpc.mp_phot.resume(color_top_directory, mp_number, an_string)
 
 
 def assess():
@@ -173,7 +173,10 @@ def do_one_color(definition=None, catalog_color_index=None):
     df_all = df_all.rename(columns={'g': 'SG',   'r': 'SR',   'i': 'SI',   'z': 'SZ',
                                     'dg': 'dSG', 'dr': 'dSR', 'di': 'dSI', 'dz': 'dSZ'})
 
+    # Verify before all obs screenings:
     if not _verify_images_available(df_all, definition):
+        return
+    if not _verify_catalog_color_available(df_all, definition):
         return
 
     df_screened_obs = _remove_images_on_user_request(df_all, color_control_dict['omit images'])
@@ -187,10 +190,16 @@ def do_one_color(definition=None, catalog_color_index=None):
     df_screened_obs = _apply_selections_to_comp_obs(df_screened_obs, color_control_dict)
     df_screened_obs = _remove_images_with_few_comps(df_screened_obs)
     df_screened_obs = _remove_comps_absent_from_any_image(df_screened_obs)
-    df_screened_obs = _apply_omit_obs_selection_criteria(df_screened_obs, color_control_dict['omit obs'])
+    df_screened_obs = _remove_comp_obs_on_user_request(df_screened_obs, color_control_dict['omit obs'])
     df_screened_obs = _remove_images_with_too_few_comps(df_screened_obs,
                                                         color_control_dict['min valid comps per image'])
     df_screened_obs = df_screened_obs.sort_values(by=['JD_mid', 'Type', 'SourceID'])
+
+    # Verify final df_screened_obs:
+    if not _verify_images_available(df_all, definition):
+        return
+    if not _verify_catalog_color_available(df_all, definition):
+        return
 
     # For each filter, build and run model, then get no-CI MP mag for each image:
     df_results = None # accumulator for final mag results, both filters.
@@ -531,25 +540,41 @@ def _verify_input_parms(definition, catalog_color_index, instrument_dict, color_
     return True
 
 
-def _verify_images_available(df_all, definition):
+def _verify_images_available(df_in, definition):
     """ Return True iff at least one credible image available for every filter in this color session.
-    :param df_all: master dataframe of all comp and MP observations. [pandas dataframe]
+    :param df_in: master dataframe of all comp and MP observations. [pandas dataframe]
     :param definition: a 4-tuple (filter_a, filter_b, passband_a, passband_b), e.g., ('R', 'I', 'SR', 'SI').
     :return: True iff >1 image in each filter available in this color session. [boolean]
     """
-    # Make list of all filters:
-    filters = set()
-    for (f_a, f_b, _, _) in definition:
-        filters.update((f_a, f_b))
-
-    # Verify at least one image with MP obs and Comp obs for each filter:
+    f_a, f_b, _, _ = definition
     all_present = True  # falsify on absence detected.
-    for f in filters:
-        mp_present = any((df_all['Filter'] == f) & (df_all['Type'] == 'MP'))
-        comp_present = any((df_all['Filter'] == f) & (df_all['Type'] == 'Comp'))
+    for f in [f_a, f_b]:
+        mp_present = any((df_in['Filter'] == f) & (df_in['Type'] == 'MP'))
+        comp_present = any((df_in['Filter'] == f) & (df_in['Type'] == 'Comp'))
         if not (mp_present and comp_present):
             all_present = False
             print(' >>>>> ERROR: no image with filter', f + '.')
+    return all_present
+
+
+def _verify_catalog_color_available(df_in, definition):
+    """ Return True iff df has columns comprising definition's required color (e.g., columns 'SR' & 'SI'),
+        that is, both data for both passbands comprising the color defined in definition tuple.
+    :param df_in: master dataframe of all comp and MP observations. [pandas dataframe]
+    :param definition: a 4-tuple (filter_a, filter_b, passband_a, passband_b), e.g., ('R', 'I', 'SR', 'SI').
+    :return: True iff >1 both color index columns exist and not all values are NA/None. [boolean]
+    """
+    _, _, pb_a, pb_b = definition
+    all_present = True  # falsify on absence detected.
+    for pb in [pb_a, pb_b]:
+        if not (pb in df_in.columns):
+            all_present = False
+            print(' >>>>> ERROR: column', pb, 'absent from master dataframe.')
+        else:
+            count_data = sum([not np.isnan(x) for x in df_in.loc[:, pb]])
+            if count_data < len(df_in) / 2:
+                all_present = False
+                print(' >>>>> ERROR: most data invalid for column', pb, 'in master dataframe.')
     return all_present
 
 
@@ -570,7 +595,6 @@ def _remove_images_on_user_request(df_in, images_to_omit):
         obs_to_keep = (~ obs_to_remove).to_list()
         df_screened_obs = df_screened_obs.loc[obs_to_keep, :]
     return df_screened_obs
-
 
 
 def _remove_comps_on_user_request(df_in, comps_to_omit):
@@ -657,7 +681,7 @@ def _apply_selections_to_comp_obs(df_in, color_control_dict):
     df_in_comp_obs = df_in.loc[df_in['Type'] == 'Comp', :].copy()
     df_in_mp_obs = df_in.loc[df_in['Type'] == 'MP', :].copy()
 
-    # Apply selection criteria to comp obs (MP obs don't have catalog values):
+    # Apply selection criteria to comp obs only (MP obs don't have catalog values):
     remove_by_min_mag = (df_in_comp_obs['SR'] < color_control_dict['min sr mag'])
     remove_by_max_mag = (df_in_comp_obs['SR'] > color_control_dict['max sr mag'])
     remove_by_cat_mag_uncert = (df_in_comp_obs['dSR'] > color_control_dict['max catalog dsr mmag'])
@@ -669,7 +693,8 @@ def _apply_selections_to_comp_obs(df_in, color_control_dict):
     if any(obs_to_remove):
         obs_to_keep = (~ obs_to_remove).to_list()
         df_screened_comp_obs = df_in_comp_obs.loc[obs_to_keep, :]
-        return df_screened_comp_obs.append(df_in_mp_obs)  # if any comp obs were removed.
+        df_screened = df_screened_comp_obs.append(df_in_mp_obs)  # if any comp obs were removed.
+        return df_screened.sort_values(by=['JD_mid', 'Type'])
     return df_in  # if no comp obs were removed.
 
 
@@ -707,7 +732,7 @@ def _remove_comps_absent_from_any_image(df_in):
     return df_in
 
 
-def _apply_omit_obs_selection_criteria(df_in, omit_obs_criteria):
+def _remove_comp_obs_on_user_request(df_in, omit_obs_criteria):
     """ Remove (comp) observations as specified by 'omit obs' element of user's color control ini file.
     :param df_in: screened master dataframe of observations. [pandas dataframe]
     :param omit_obs_criteria: observation IDs to remove, as specified by user. [tuple of strings]
@@ -722,7 +747,7 @@ def _apply_omit_obs_selection_criteria(df_in, omit_obs_criteria):
 
 def _remove_images_with_too_few_comps(df_in, min_valid_comps_per_image):
     """ Remove (with console warning) all obs from any images with fewer than a minimum number of comps.
-        Such removal will be very rare, especially after all the above screens unless there are very many
+        Rarely changes df, especially after all the above screens unless there are very many
         observations removed by the user's 'omit obs' selection criteria.
     :param df_in: screened master dataframe of observations. [pandas dataframe]
     :param min_valid_comps_per_image: the minimum number of valid comp obs per image. [int]
@@ -732,7 +757,7 @@ def _remove_images_with_too_few_comps(df_in, min_valid_comps_per_image):
     images_too_few_comps = [fn for fn in comp_count_per_image.index
                             if comp_count_per_image[fn] < min_valid_comps_per_image]
     if len(images_too_few_comps) >= 1:
-        remove_too_few_comps = df_in,['FITSfile'].isin(images_too_few_comps)
+        remove_too_few_comps = df_in['FITSfile'].isin(images_too_few_comps)
         obs_to_keep = (~ remove_too_few_comps).to_list()
         return df_in.loc[obs_to_keep, :].copy()
     return df_in
@@ -849,7 +874,7 @@ def make_color_control_dict(this_directory, defaults_dict):
     # Parse and overwrite MP Location items:
     early_items = color_control_dict['mp location early'].split()
     late_items = color_control_dict['mp location late'].split()
-    color_control_dict['mp_location filenames'] = (early_items[0], late_items[0])
+    color_control_dict['mp location filenames'] = (early_items[0], late_items[0])
     color_control_dict['x pixels'] = (float(early_items[1]), float(late_items[1]))
     color_control_dict['y pixels'] = (float(early_items[2]), float(late_items[2]))
     del color_control_dict['mp location early'], color_control_dict['mp location late']
