@@ -24,7 +24,7 @@ def XXX_test_do_color_2filters():
     # Test with a single FITS file in each filter:
     # Assumes start(), and assess() have been run, that proper color_control.ini file is present,
     #     and that make_dfs() has been run so that df*.csv files are ready.
-    mpc.mp_phot.resume(TEST_TOP_DIRECTORY, 426, '20201023')
+    mpc.mp_color.resume(TEST_TOP_DIRECTORY, 426, '20201023')
     this_directory, mp_string, an_string = mpc.mp_phot.get_context()
     # log_file = open(mpc.mp_phot.LOG_FILENAME, mode='a')
     # mpc.mp_phot._write_color_control_ini_template(this_directory, log_file)
@@ -71,98 +71,121 @@ def test_make_color_control_dict():
     assert ccd['fit jd'] == False
 
 
-_____TEST_SUPPORT_FUNCTIONS_________________________________ = 0
+_____TEST_SUPPORT_and_VERIFY_FUNCTIONS______________________ = 0
 
 
-def test__verify_input_parms():
-    mpc.mp_phot.resume(TEST_TOP_DIRECTORY, 426, '20201023')
+def test_verify_data_syntax():
+    mpc.mp_color.resume(TEST_TOP_DIRECTORY, 426, '20201023')
     context = mpc.mp_phot.get_context()
     this_directory, mp_string, an_string = context
     defaults_dict = mpc.ini.make_defaults_dict()
     instrument_dict = mpc.ini.make_instrument_dict(defaults_dict)
+    site_dict = mpc.ini.make_site_dict(defaults_dict)
     ccd = mpc.mp_color.make_color_control_dict(this_directory, defaults_dict)
 
     # Case: one color, valid, definition is already a nested tuple:
     definition = (('R', 'I', 'SR', 'SI'),)
     catalog_color_index = ('SR', 'SI')
-    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    verified = mpc.mp_color.verify_data_syntax(definition, catalog_color_index,
+                                               instrument_dict, site_dict, ccd)
     assert verified == True
 
-    # Case: one color, valid, definition is a bare tuple of 4 strings:
+    # Case: Error, definition is a bare tuple of 4 strings, not allowed:
     definition = ('R', 'I', 'SR', 'SI')
     catalog_color_index = ('SR', 'SI')
-    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
-    assert verified == True
+    verified = mpc.mp_color.verify_data_syntax(definition, catalog_color_index,
+                                               instrument_dict, site_dict, ccd)
+    assert verified == False
 
     # Case: one color, definition has invalid form:
     definition = ('R', 'I', 'SR')  # 3 elements, should be 4
     catalog_color_index = ('SR', 'SI')
-    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    verified = mpc.mp_color.verify_data_syntax(definition, catalog_color_index,
+                                               instrument_dict, site_dict, ccd)
     assert verified == False
     definition = ('R', 'I', 'SR', 999)  # should be strings
-    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    verified = mpc.mp_color.verify_data_syntax(definition, catalog_color_index,
+                                               instrument_dict, site_dict, ccd)
     assert verified == False
     definition = tuple()  # empty tuple
-    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    verified = mpc.mp_color.verify_data_syntax(definition, catalog_color_index,
+                                               instrument_dict, site_dict, ccd)
     assert verified == False
     definition = ['R', 'I', 'SR', 'SI']  # list, but should be tuple
-    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
+    verified = mpc.mp_color.verify_data_syntax(definition, catalog_color_index,
+                                               instrument_dict, site_dict, ccd)
     assert verified == False
 
-    # Case: one color, definition requires filter that is unavailable:
-    definition = ('XXX', 'I', 'SR', 'SI')
-    catalog_color_index = ('SR', 'SI')
-    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
-    assert verified == False
-    definition = ('R', 'XXXY', 'SR', 'SI')
-    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
-    assert verified == False
 
-    # Case: one color, extinction missing from color control file:
-    definition = ('V', 'I', 'SR', 'SI')
-    catalog_color_index = ('SR', 'SI')
-    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
-    assert verified == False
-
-    # Case: one color, catalog color index has a passband not listed as available:
-    definition = ('R', 'I', 'SR', 'SI')
-    catalog_color_index = ('XXX', 'SI')
-    verified = mpc.mp_color._verify_input_parms(definition, catalog_color_index, instrument_dict, ccd)
-    assert verified == False
-
-    # TODO: test two-color cases.
-
-
-def test__verify_images_available():
-    mpc.mp_phot.resume(TEST_TOP_DIRECTORY, 426, '20201023')
+def test_verify_data_available():
+    mpc.mp_color.resume(TEST_TOP_DIRECTORY, 426, '20201023')
+    context = mpc.mp_phot.get_context()
+    this_directory, mp_string, an_string = context
+    defaults_dict = mpc.ini.make_defaults_dict()
     df_all = make_df_all_for_tests()
-    assert mpc.mp_color._verify_images_available(df_all, definition=('R', 'I', 'SR', 'SI')) == True
-    assert mpc.mp_color._verify_images_available(df_all, definition=('R', 'SI', 'SR', 'SI')) == False
-    assert mpc.mp_color._verify_images_available(df_all, definition=('R', 'I', 'SR', 'I')) == True
-    mp_in_r = (df_all['Type'] == 'MP') & (df_all['Filter'] == 'R')
-    df_partial = df_all.loc[mp_in_r, :]
-    assert mpc.mp_color._verify_images_available(df_partial, definition=('R', 'I', 'SR', 'SI')) == False
+    instrument_dict = mpc.ini.make_instrument_dict(defaults_dict)
+    ccd = mpc.mp_color.make_color_control_dict(this_directory, defaults_dict)
+    # Normal case (one target color):
+    definition = (('R', 'I', 'SR', 'SI'),)  # nested tuple, as required.
+    catalog_color_index = ('SR', 'SI')
+    assert mpc.mp_color.verify_data_available(df_all, definition, catalog_color_index,
+                                              instrument_dict, ccd) == True
+    # Error case, filter has no image:
+    bad_definition = (('INVALID FILTER', 'I', 'SR', 'SI'),)
+    assert mpc.mp_color.verify_data_available(df_all, bad_definition, catalog_color_index,
+                                              instrument_dict, ccd) == False
+    bad_definition = (('R', 'INVALID FILTER', 'SR', 'SI'),)
+    assert mpc.mp_color.verify_data_available(df_all, bad_definition, catalog_color_index,
+                                              instrument_dict, ccd) == False
+
+    # Error case, filter is absent from instrument dict (available filters):
+    bad_instrument_dict = instrument_dict.copy()
+    bad_instrument_dict['available filters'] = ['SR', 'SI', 'R']  # I is missing.
+    assert mpc.mp_color.verify_data_available(df_all, definition, catalog_color_index,
+                                              bad_instrument_dict, ccd) == False
+
+    # Error case, filter has no extinction (color control dict):
+    bad_ccd = ccd.copy()
+    bad_ccd['extinctions'] = {'INVALID FILTER': ('use', 0.1),
+                              'I': ('fit',)}
+    assert mpc.mp_color.verify_data_available(df_all, definition, catalog_color_index,
+                                              instrument_dict, bad_ccd) == False
+
+    # Error case, filter has no transform (color control dict):
+    bad_ccd = ccd.copy()
+    bad_ccd['transforms'] = {('INVALID FILTER', 'SR', 'SR', 'SI'): ('fit',),
+                             ('R', 'SR', 'SR', 'SI'): ('use', -0.11)}
+    assert mpc.mp_color.verify_data_available(df_all, definition, catalog_color_index,
+                                              instrument_dict, bad_ccd) == False
+
+    # Error case, target color passband is absent from catalog:
+    bad_definition = (('R', 'I', 'INVALID PASSBAND', 'SI'),)
+    assert mpc.mp_color.verify_data_available(df_all, bad_definition, catalog_color_index,
+                                              instrument_dict, ccd) == False
+    bad_definition = (('R', 'I', 'SR', 'INVALID PASSBAND'),)
+    assert mpc.mp_color.verify_data_available(df_all, bad_definition, catalog_color_index,
+                                              instrument_dict, ccd) == False
+
+    # Error case, color index passband is absent from catalog:3339999
+    bad_catalog_color_index = ('INVALID PASSBAND', 'SI')
+    assert mpc.mp_color.verify_data_available(df_all, definition, bad_catalog_color_index,
+                                              instrument_dict, ccd) == False
+    bad_catalog_color_index = ('SR', 'INVALID PASSBAND')
+    assert mpc.mp_color.verify_data_available(df_all, definition, bad_catalog_color_index,
+                                              instrument_dict, ccd) == False
+    # Normal case (sanity/regression check):
+    assert mpc.mp_color.verify_data_available(df_all, definition, catalog_color_index,
+                                              instrument_dict, ccd) == True  # sanity/regression check.
+    # TODO: test cases with two target colors.
 
 
-def test__verify_catalog_color_available():
-    import random
-    mpc.mp_phot.resume(TEST_TOP_DIRECTORY, 426, '20201023')
-    df_all = make_df_all_for_tests()
-    # Verify df column names available:
-    assert mpc.mp_color._verify_catalog_color_available(df_all, definition=('R', 'I', 'SR', 'SI')) == True
-    assert mpc.mp_color._verify_catalog_color_available(df_all, definition=('R', 'I', 'XX', 'SI')) == False
-    # Verify values available:
-    df_defaced = df_all.copy()
-    is_comp = (df_defaced['Type'] == 'Comp')
-    comp_serials = df_defaced.loc[is_comp, 'Serial']
-    count_to_set_nan = (2 * len(comp_serials) // 3)
-    serials_to_set_nan = random.sample(list(comp_serials), count_to_set_nan)
-    df_defaced.loc[serials_to_set_nan, 'SR'] = np.nan
-    assert mpc.mp_color._verify_catalog_color_available(df_defaced,
-                                                        definition=('R', 'I', 'SR', 'SI')) == False
-    df_defaced.loc[:, 'SR'] = 1.0
-    assert mpc.mp_color._verify_catalog_color_available(df_defaced,
-                                                        definition=('R', 'I', 'SR', 'SI')) == True
+def test_write_color_control_ini_stub():
+    mpc.mp_color.resume(TEST_TOP_DIRECTORY, 426, '20201023')
+    context = mpc.mp_phot.get_context()
+    this_directory, mp_string, an_string = context
+    defaults_dict = mpc.ini.make_defaults_dict()
+    # instrument_dict = mpc.ini.make_instrument_dict(defaults_dict)
+    mpc.mp_color.write_color_control_ini_stub(this_directory, defaults_dict, write_test_dummy_file=True)
 
 
 _____TEST_SCREENING_FUNCTIONS____________________________ = 0

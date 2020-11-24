@@ -33,16 +33,13 @@ AVAILABLE_CATALOG_COLOR_INDEX_PASSBANDS = ('SG', 'SR', 'SI')
 # DEFAULT_FILTERS_FOR_MP_COLOR_INDEX = ('V', 'I')
 # COLOR_INDEX_PASSBANDS = ('r', 'i')
 # DEFAULT_MP_RI_COLOR = 0.22  # close to known Sloan mean (r-i) for MPs.
-MAX_COLOR_COMP_UNCERT = 0.015  # mag
-# COLOR_CONTROL_FILENAME = 'color_control.ini'
-# COLOR_CONTROL_TEMPLATE_FILENAME = 'color_control.template'
-# COLOR_LOG_FILENAME = 'color_log.txt'
-
-# DF_OBS_ALL_FILENAME = 'df_obs_all.csv'
-# DF_IMAGES_ALL_FILENAME = 'df_images_all.csv'
-# DF_COMPS_ALL_FILENAME = 'df_comps_all.csv'
-# COLOR_IMAGE_PREFIX = 'Image_Color_'
-
+MAX_COLOR_COMP_UNCERT = 0.025   # of instrumental magnitudes
+MAX_COLOR_MP_UNCERT = 0.02      # "
+MIN_COLOR_CATALOG_SR_MAG = 10
+MAX_COLOR_CATALOG_SR_MAG = 16
+MAX_COLOR_CATALOG_DSR_MAG = 15  # uncertainty of catalog magnitudes
+MIN_COLOR_CATALOG_SLOAN_RI_COLOR = 0.0
+MAX_COLOR_CATALOG_SLOAN_RI_COLOR = 0.6
 MP_COLOR_TOP_DIRECTORY = 'C:/Astro/MP Color/'
 
 
@@ -91,14 +88,14 @@ def assess():
     color_control_template_filename = defaults_dict['color control template filename']
     fullpath = os.path.join(this_directory, color_control_template_filename)
     if not os.path.exists(fullpath):
-        _write_color_control_ini_template(this_directory, defaults_dict)
+        write_color_control_ini_template(this_directory, defaults_dict)
         log_file.write('New ' + color_control_template_filename + ' file written.\n')
 
     # Write color control ini file (stub) if it doesn't already exist:
     color_control_filename = defaults_dict['color control filename']
     fullpath = os.path.join(this_directory, color_control_filename)
     if not os.path.exists(fullpath):
-        _write_color_control_ini_stub(this_directory, defaults_dict)
+        write_color_control_ini_stub(this_directory, defaults_dict)
         log_file.write('New ' + color_control_filename + ' file written.\n')
 
 
@@ -146,6 +143,11 @@ def do_one_color(definition=None, catalog_color_index=None):
         in the local catalog object. [2-tuple of strings] MANDATORY: no default.
     :return: None. Only writes to screen and to log file, makes diagnostic plots.
     """
+    # Wrap definition in outer tuple if a bare 4-tuple of strings (specific allowance for one-color case):
+    if len(definition) == 4:
+        if all([isinstance(x, str) for x in definition]):
+            definition = (definition,)  # definition must be tuple of tuples (nested) before proceeding.
+
     # ===== Get context, write log file header and color control stub:
     defaults_dict = mpc.ini.make_defaults_dict()
     color_log_filename = defaults_dict['color log filename']
@@ -153,14 +155,19 @@ def do_one_color(definition=None, catalog_color_index=None):
     if context is None:
         return
     this_directory, mp_string, an_string = context
-    color_control_dict = make_color_control_dict(this_directory, defaults_dict)
-    instrument_dict = mpc.ini.make_instrument_dict(defaults_dict)
+
     log_file = open(defaults_dict['color log filename'], mode='a')  # set up append to log file.
     log_file.write('\n===== do_color()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
-    # ===== Verify parms; verify that required filters and transforms exist:
-    if not _verify_input_parms(definition, catalog_color_index, instrument_dict, color_control_dict):
+    # ===== Get other required data:
+    instrument_dict = mpc.ini.make_instrument_dict(defaults_dict)
+    site_dict = mpc.ini.make_site_dict(defaults_dict)
+    color_control_dict = make_color_control_dict(this_directory, defaults_dict)
+
+    # ===== Quick check of data syntax:
+    if not verify_data_syntax(definition, catalog_color_index,
+                              instrument_dict, site_dict, color_control_dict):
         return
     fa, fb, result_a, result_b = definition     # convenience variables.
     catalog_a, catalog_b = catalog_color_index  # "
@@ -173,10 +180,10 @@ def do_one_color(definition=None, catalog_color_index=None):
     df_all = df_all.rename(columns={'g': 'SG',   'r': 'SR',   'i': 'SI',   'z': 'SZ',
                                     'dg': 'dSG', 'dr': 'dSR', 'di': 'dSI', 'dz': 'dSZ'})
 
-    # Verify before all obs screenings:
-    if not _verify_images_available(df_all, definition):
-        return
-    if not _verify_catalog_color_available(df_all, definition):
+    # Verify data before obs screenings:
+    if not verify_data_available(df_all, definition, catalog_color_index,
+                                 instrument_dict, color_control_dict):
+        print(' >>>>> Terminating for error found by verify_data_available(), before screens.')
         return
 
     df_screened_obs = _remove_images_on_user_request(df_all, color_control_dict['omit images'])
@@ -195,10 +202,10 @@ def do_one_color(definition=None, catalog_color_index=None):
                                                         color_control_dict['min valid comps per image'])
     df_screened_obs = df_screened_obs.sort_values(by=['JD_mid', 'Type', 'SourceID'])
 
-    # Verify final df_screened_obs:
-    if not _verify_images_available(df_all, definition):
-        return
-    if not _verify_catalog_color_available(df_all, definition):
+    # Verify data after obs screenings:
+    if not verify_data_available(df_all, definition, catalog_color_index,
+                                 instrument_dict, color_control_dict):
+        print(' >>>>> Terminating for error found by verify_data_available(), after screens.')
         return
 
     # For each filter, build and run model, then get no-CI MP mag for each image:
@@ -453,35 +460,35 @@ class SessionModel_OneFilter:
 _____SUPPORT_FUNCTIONS______________________________________ = 0
 
 
-def _verify_input_parms(definition, catalog_color_index, instrument_dict, color_control_dict):
+def verify_data_syntax(definition, catalog_color_index, instrument_dict, site_dict, color_control_dict):
     """ Verify that parms passed in are correct in: number, form, and valid content.
-        PASSES TESTS 2020-11-12 written for *ONE* COLOR ONLY.
+        PASSES TESTS XXX written for *ONE* COLOR ONLY.
+        Currently (2020-11-23) applies to one color only (two filters & two target color passbands).
     :param definition: a tuple of 4-tuples (filter_a, filter_b, passband_a, passband_b),
                e.g., (('R', 'I', 'SR', 'SI'), ...).
-               A bare 4-tuple of strings for one color is OK too.
     :param catalog_color_index: passbands defining the color index (of comps). [tuple of strings]
     :param instrument_dict: instrument dict appropriate to this color session. [py dict]
+    :param site_dict: site dict appropriate to this color session. [py dict]
     :param color_control_dict: color control dictionary for this color session. [py dict]
     :return: True iff parms entirely OK, else False. [boolean]
     """
-    # TODO: extend testing to TWO COLOR definition.
     # Quick screen for types:
     if not all([isinstance(definition, tuple),
                 isinstance(catalog_color_index, tuple),
                 isinstance(color_control_dict, dict),
                 isinstance(instrument_dict, dict),
+                isinstance(site_dict, dict),
                 (len(catalog_color_index) == 2)]):
         print(' >>>>> ERROR: _verify_input_parms() found at least one parm with wrong type.')
         return False
 
-    # Wrap definition in outer tuple if a bare 4-tuple of strings (for one color):
-    if len(definition) == 4:
-        if all([isinstance(x, str) for x in definition]):
-            definition = (definition,)  # definition must be tuple of tuples (nested).
-
     # Parm 'definition': verify syntax:
     definition_ok = True  # to be falsified by any error.
-    if not len(definition) in (1, 2):  # only 1 or 2 result colors supported.
+    if len(definition) == 4:
+        if all([isinstance(dd, str) for dd in definition]):
+            print(' >>>>> ERROR: definition appears to be a bare tuple (not nested as required).')
+            return False
+    if not len(definition) in (1, 2):  # only 1 or 2 result colors supported for now (2020-11-23).
         definition_ok = False
     for d in definition:
         if not len(d) == 4:
@@ -494,88 +501,84 @@ def _verify_input_parms(definition, catalog_color_index, instrument_dict, color_
         print(' >>>>> ERROR: definition has invalid syntax.')
         return False
 
-    # Parm 'definition': verify filters available in instrument_dict:
-    absent_filters = set()
-    for d in definition:
-        for f in d[:2]:
-            if f not in instrument_dict['available filters']:
-                absent_filters.add(f)
-    if not len(absent_filters) == 0:
-        print(' >>>>> ERROR: filters absent from instrument_dict:', str(list(absent_filters)))
-        return False
-
-    # Parm 'definition': verify all data available for transforms in color control file:
-    definition_ok = True
-    for f_a, f_b, pb_a, pb_b in definition:
-        if instrument_dict['transforms'].get((f_a, pb_a,
-                                              catalog_color_index[0], catalog_color_index[1])) is None:
-            definition_ok = False
-        if instrument_dict['transforms'].get((f_b, pb_b,
-                                              catalog_color_index[0], catalog_color_index[1])) is None:
-            definition_ok = False
-            break
-    if not definition_ok:
-        print(' >>>>> ERROR: definition requires a transform that is missing from color control file.')
-        return False
-
-    # Parm 'definition': verify extinctions available for filters in color control file:
-    extinction_ok = True
-    for f_a, f_b, pb_a, pb_b in definition:
-        for f in (f_a, f_b):
-            extinction = color_control_dict['extinctions'].get(f)
-            if extinction is None:
-                extinction_ok = False
-                break
-    if not extinction_ok:
-        print(' >>>>> ERROR: definition requires an extinction that is missing from color control file.')
-        return False
-
-    # Parm 'catalog_color_index': verify available in catalog:
-    cat_ci_ok = (len(catalog_color_index) == 2) and\
-        all([pb in AVAILABLE_CATALOG_COLOR_INDEX_PASSBANDS for pb in catalog_color_index])
-    if not cat_ci_ok:
-        print(' >>>>> ERROR: catalog CI passbands invalid (must be 2, both in catalog).')
-        return False
-
+    # TODO: extend testing to TWO COLOR definition.
     return True
 
 
-def _verify_images_available(df_in, definition):
-    """ Return True iff at least one credible image available for every filter in this color session.
+def verify_data_available(df_in, definition, catalog_color_index,
+                          instrument_dict, color_control_dict):
+    """ Verify that data needed for this color determination (images, catalog, etc) are available.
+        Quick checks for likely validity included.
     :param df_in: master dataframe of all comp and MP observations. [pandas dataframe]
     :param definition: a 4-tuple (filter_a, filter_b, passband_a, passband_b), e.g., ('R', 'I', 'SR', 'SI').
-    :return: True iff >1 image in each filter available in this color session. [boolean]
+    :return: True iff data verified for this color session are likely available. [boolean]
     """
-    f_a, f_b, _, _ = definition
-    all_present = True  # falsify on absence detected.
-    for f in [f_a, f_b]:
+    # Gather required elements for tests below:
+    required_filters = set([])
+    for f_a, f_b, _, _ in definition:
+        required_filters.update([f_a, f_b])
+    required_target_color_passbands = set([])
+    for _, _, pb_a, pb_b in definition:
+        required_target_color_passbands.update([pb_a, pb_b])
+
+    # Verify: all filters in definition are represented by at least one image in present directory:
+    all_filters_have_images = True  # falsify on absence detected.
+    for f in required_filters:
         mp_present = any((df_in['Filter'] == f) & (df_in['Type'] == 'MP'))
         comp_present = any((df_in['Filter'] == f) & (df_in['Type'] == 'Comp'))
         if not (mp_present and comp_present):
-            all_present = False
-            print(' >>>>> ERROR: no image with filter', f + '.')
-    return all_present
+            all_filters_have_images = False
+            print(' >>>>> ERROR: required filter ', f, ' has no image in current directory.')
 
+    # Verify: all filters in definition exist in instrument dict:
+    all_filters_in_inst_dict = True  # falsify on absence detected.
+    for f in required_filters:
+        if f not in instrument_dict['available filters']:
+            all_filters_in_inst_dict = False
+            print(' >>>>> ERROR: required filter ', f,
+                  'is not listed as available filter in instrument ini.')
 
-def _verify_catalog_color_available(df_in, definition):
-    """ Return True iff df has columns comprising definition's required color (e.g., columns 'SR' & 'SI'),
-        that is, both data for both passbands comprising the color defined in definition tuple.
-    :param df_in: master dataframe of all comp and MP observations. [pandas dataframe]
-    :param definition: a 4-tuple (filter_a, filter_b, passband_a, passband_b), e.g., ('R', 'I', 'SR', 'SI').
-    :return: True iff >1 both color index columns exist and not all values are NA/None. [boolean]
-    """
-    _, _, pb_a, pb_b = definition
-    all_present = True  # falsify on absence detected.
-    for pb in [pb_a, pb_b]:
-        if not (pb in df_in.columns):
-            all_present = False
-            print(' >>>>> ERROR: column', pb, 'absent from master dataframe.')
-        else:
-            count_data = sum([not np.isnan(x) for x in df_in.loc[:, pb]])
-            if count_data < len(df_in) / 2:
-                all_present = False
-                print(' >>>>> ERROR: most data invalid for column', pb, 'in master dataframe.')
-    return all_present
+    # Verify: all filters in definition have an extinction (in color control dict):
+    all_filters_have_extinction = True  # falsify on absence detected.
+    for f in required_filters:
+        extinction = color_control_dict['extinctions'].get(f, None)
+        if extinction is None:
+            all_filters_have_extinction = False
+            print(' >>>>> ERROR: required filter ', f, 'has no extinction available in color control.')
+
+    # Verify: all filters in definition have a transform to a target color, with proper color index:
+    all_filters_have_transform = True  # falsify on absence detected.
+    for f_a, f_b, pb_a, pb_b in definition:
+        candidate_transform_key_a = (f_a, pb_a, catalog_color_index[0], catalog_color_index[1])
+        candidate_transform_key_b = (f_b, pb_b, catalog_color_index[0], catalog_color_index[1])
+        transform_a = color_control_dict['transforms'].get(candidate_transform_key_a, None)
+        transform_b = color_control_dict['transforms'].get(candidate_transform_key_b, None)
+        if transform_a is None or transform_b is None:
+            all_filters_have_transform = False
+        if transform_a is None:
+            print(' >>>>> ERROR:', [f_a, f_b, pb_a, pb_b], 'has no transform available in color control.')
+
+    # Verify: target color passbands exist in catalog:
+    target_color_passbands_in_catalog = True
+    for pb in required_target_color_passbands:
+        if pb not in df_in.columns:
+            target_color_passbands_in_catalog = False
+            print(' >>>>> ERROR: required target color passband', pb, 'is not in dataframe.')
+
+    # Verify: color index passbands exist in catalog:
+    color_index_passbands_in_catalog = True
+    for pb in catalog_color_index:
+        if pb not in df_in.columns:
+            color_index_passbands_in_catalog = False
+            print(' >>>>> ERROR: required color index passband', pb, 'is not in dataframe.')
+
+    all_data_are_available = (all_filters_have_images and
+                              all_filters_in_inst_dict and
+                              all_filters_have_extinction and
+                              all_filters_have_transform and
+                              target_color_passbands_in_catalog and
+                              color_index_passbands_in_catalog)
+    return all_data_are_available
 
 
 _____SCREENING_FUNCTIONS____________________________________ = 0
@@ -766,7 +769,7 @@ def _remove_images_with_too_few_comps(df_in, min_valid_comps_per_image):
 _____CONTROL_INI_DICT_FUNCTIONS_____________________________ = 0
 
 
-def _write_color_control_ini_template(this_directory, defaults_dict):
+def write_color_control_ini_template(this_directory, defaults_dict):
     """ Write color control ini template to current session directory.
     :param this_directory: fullpath of current session directory. [string]
     :param defaults_dict: dict of defaults [py dict]
@@ -808,7 +811,7 @@ def _write_color_control_ini_template(this_directory, defaults_dict):
             f.writelines(lines)
 
 
-def _write_color_control_ini_stub(this_directory, defaults_dict):
+def write_color_control_ini_stub(this_directory, defaults_dict, write_test_dummy_file=False):
     """ Write user-ready stub of color control file, only if file doesn't already exist.
     :param this_directory:
     :param defaults_dict:
@@ -817,11 +820,38 @@ def _write_color_control_ini_stub(this_directory, defaults_dict):
     color_control_filename = defaults_dict['color control filename']
     fullpath = os.path.join(this_directory, color_control_filename)
 
-    fits_filenames = mpc.mp_phot.get_fits_filenames(this_directory)  # TODO: move this fn to util.py.
+    fits_filenames = list(mpc.mp_phot.get_fits_filenames(this_directory))  # TODO: move this fn to astropak.
     utc_mid_list = [astropak.image.FITS(this_directory, '', fn).utc_mid for fn in fits_filenames]
     mp_filename_earliest = fits_filenames[np.argmin(utc_mid_list)]
     mp_filename_latest = fits_filenames[np.argmax(utc_mid_list)]
 
+    # Make Transform lines using defaults from instrument dict:
+    instrument_dict = mpc.ini.make_instrument_dict(defaults_dict)
+    default_transforms = instrument_dict['transforms']
+    transform_lines = []
+    for i, key in enumerate(default_transforms):
+        key_string = ' '.join(key)
+        value_string = ' '.join([str(val) for val in default_transforms[key]])
+        if i == 0:
+            line = 'Transforms = ' + key_string + '    Use ' + value_string
+        else:
+            line = '             ' + key_string + '    Use ' + value_string
+        transform_lines.append(line)
+
+    # Make Extinction lines using defaults from site dict:
+    site_dict = mpc.ini.make_site_dict(defaults_dict)
+    default_extinctions = site_dict['extinctions']
+    extinction_lines = []
+    for i, key in enumerate(default_extinctions):
+        key_string = key
+        value_string = ' '.join([str(val) for val in default_extinctions[key]])
+        if i == 0:
+            line = 'Extinctions = ' + key_string + '    Use ' + value_string
+        else:
+            line = '              ' + key_string + '    Use ' + value_string
+        extinction_lines.append(line)
+
+    # Construct master list of lines to write:
     lines = ['#----- This is ' + color_control_filename + ' for directory:',
              '#-----    ' + this_directory,
              '#',
@@ -830,8 +860,8 @@ def _write_color_control_ini_stub(this_directory, defaults_dict):
              '',
              '[MP Location]',
              '# for each, give: FITS_filename  x_pixel  y_pixel.',
-             'MP Location Early = ' + mp_filename_earliest,
-             'MP Location Late  = ' + mp_filename_latest,
+             'MP Location Early = ' + mp_filename_earliest + '  [x-pixel]  [y-pixel]',
+             'MP Location Late  = ' + mp_filename_latest + '  [x-pixel]  [y-pixel]',
              '',
              '[Selection]',
              '# Omit Comps & Omit Obs: values may extend to multiple lines if necessary.',
@@ -839,23 +869,23 @@ def _write_color_control_ini_stub(this_directory, defaults_dict):
              'Omit Obs = ',
              '# Omit Images: give filename, (with or) without .fts at end.',
              'Omit Images = ',
-             'Max MP Obs Mag Uncertainty = ' + str(defaults_dict['max mp obs mag uncertainty']),
-             'Max Comp Obs Uncertainty = ' + str(defaults_dict['max comp obs mag uncertainty']),
-             'Min SR Mag = ' + str(defaults_dict['min sr mag']),
-             'Max SR Mag = ' + str(defaults_dict['max sr mag']),
-             'Max Catalog dSR mmag = ' + str(defaults_dict['max catalog dsr mmag']),
-             'Min Sloan RI Color = ' + str(defaults_dict['min sloan ri color']),
-             'Max Sloan RI Color = ' + str(defaults_dict['max sloan ri color']),
+             'Max MP Obs Mag Uncertainty = ' + str(MAX_COLOR_MP_UNCERT),
+             'Max Comp Obs Uncertainty = ' + str(MAX_COLOR_COMP_UNCERT),
+             'Min SR Mag = ' + str(MIN_COLOR_CATALOG_SR_MAG),
+             'Max SR Mag = ' + str(MAX_COLOR_CATALOG_SR_MAG),
+             'Max Catalog dSR mmag = ' + str(MAX_COLOR_CATALOG_DSR_MAG),
+             'Min Sloan RI Color = ' + str(MIN_COLOR_CATALOG_SLOAN_RI_COLOR),
+             'Max Sloan RI Color = ' + str(MAX_COLOR_CATALOG_SLOAN_RI_COLOR),
              '',
              '[Regression]',
              '# Transform = Filter Passband CI_passband1 CI_passband2  -or-',
              '# Transform = Filter Passband Command -where- Command: Fit or Use -0.03',
-             '# One per line only. First order only for do_color() [2020-10-21].',
-             'Transform = ',
-             '# Extinction = Filter Command -where- Command: Fit -or- Use +0.16.',
-             '# One per line only. Recommend \'Use\' if at all possible.',
-             'Extinction = ',
-             'Fit Vignette = Yes',
+             '# One per line only. First order only for do_color() [2020-10-21].'] +\
+            transform_lines +\
+            ['# Extinction = Filter Command -where- Command: Fit -or- Use +0.16.',
+             '# One per line only. Recommend \'Use\' if at all possible.'] +\
+            extinction_lines +\
+            ['Fit Vignette = Yes',
              'Fit XY = No',
              '# Strongly recommend Fit JD = No for do_color().',
              'Fit JD = No'
@@ -863,6 +893,10 @@ def _write_color_control_ini_stub(this_directory, defaults_dict):
     lines = [line + '\n' for line in lines]
     if not os.path.exists(fullpath):
         with open(fullpath, 'w') as f:
+            f.writelines(lines)
+    if write_test_dummy_file:
+        dummy_fullpath = os.path.join(this_directory, '$$$_dummy_color_control_stub.ini')
+        with open(dummy_fullpath, 'w') as f:
             f.writelines(lines)
 
 
@@ -931,7 +965,3 @@ def make_color_control_dict(this_directory, defaults_dict):
                   'bad extinction line:', line)
     color_control_dict['extinctions'] = extinction_dict
     return color_control_dict
-
-
-
-
