@@ -40,6 +40,7 @@ MAX_COLOR_CATALOG_SR_MAG = 16
 MAX_COLOR_CATALOG_DSR_MAG = 15  # uncertainty of catalog magnitudes
 MIN_COLOR_CATALOG_SLOAN_RI_COLOR = 0.0
 MAX_COLOR_CATALOG_SLOAN_RI_COLOR = 0.6
+MIN_COLOR_FINAL_COMPS_PER_IMAGE = 6
 MP_COLOR_TOP_DIRECTORY = 'C:/Astro/MP Color/'
 
 
@@ -50,6 +51,7 @@ _____INITIALIZE_COLOR_WORKFLOW______________________________ = 0
 def start(color_top_directory=MP_COLOR_TOP_DIRECTORY, mp_number=None, an_string=None):
     """ Preliminaries to begin MP COLOR workflow.
         Wrapper to call mp_phot.start() with correct color parms.
+    :param color_top_directory: where MP color subdirectories sit, e.g., 'C:/Astro/MP Color/'. [string]
     :param mp_number: number of target MP, e.g., 1602 for Indiana. [integer or string].
     :param an_string: Astronight string representation, e.g., '20191106' [string].
     :return: [None]
@@ -117,14 +119,14 @@ def make_dfs():
 _____COLOR_INDEX_PHOTOMETRY________________________________________________ = 0
 
 
-# def do_color_SRI():
+# def do_one_color_SRI_from_sloan():
 #     """ Convenience wrapper function. """
-#     do_one_color(filters=('SR', 'SI'), result_color_index=('SR', 'SI'), catalog_color_index=('SR', 'SI'))
+#     do_one_color(definition=(('SR', 'SI', 'SR', 'SI'),), catalog_color_index=('SR', 'SI'))
 #
 #
-# def do_color_SRI_from_johnson():
+# def do_one_color_SRI_from_johnson():
 #     """ Convenience wrapper function. """
-#     do_one_color(filters=('R', 'I'), result_color_index=('SR', 'SI'), catalog_color_index=('SR', 'SI'))
+#     do_one_color(definition=(('R', 'I', 'SR', 'SI'),), catalog_color_index=('SR', 'SI'))
 
 
 def do_one_color(definition=None, catalog_color_index=None):
@@ -132,11 +134,13 @@ def do_one_color(definition=None, catalog_color_index=None):
         First run the 3 initial mp_phot functions (start(), assess(), make_dfs()) to make the dataframes.
         Then run this to get color index.
         ALL PARAMETERS MANDATORY.
-    :param definition: a 4-tuple (filter_a, filter_b, passband_a, passband_b), e.g., ('R', 'I', 'SR', 'SI').
-        Filters must have usable images in df_all.
-        Passbands must have transforms to one of the filters, using the catalog_color_index, that is,
-            in the above example definition, the transforms (R->SR, catalog_color_index) and
-            (I->SI, catalog_color_index) must exist in the defaults_dict.
+    :param definition: a 4-tuple (filter_a, filter_b, passband_a, passband_b), e.g., ('R', 'I', 'SR', 'SI')
+            that defines a color measurement, e.g., R and I filters to get SR-SI color of a target.
+        Filters must each have usable images in df_all.
+        Filter-passband pairs a and b must each have a transform (using the passed-in catalog_color_index)
+        available in color_control_dict (from local ini file).
+        Passbands must exist in star catalog--more specifically, they must exist in df_all dataframe.
+        Filters must each have an extinction value available in color_control_dict (from local ini file).
     :param catalog_color_index: specify the two passbands defining the color index, e.g., ('SR', 'SI') to
         define color in Sloan SR and SI (typical case). In any case, the two passbands must be
         represented in the ATLAS refcat2 catalog (prob. as 'r' and 'i') and must be included
@@ -157,7 +161,7 @@ def do_one_color(definition=None, catalog_color_index=None):
     this_directory, mp_string, an_string = context
 
     log_file = open(defaults_dict['color log filename'], mode='a')  # set up append to log file.
-    log_file.write('\n===== do_color()  ' +
+    log_file.write('\n===== do_one_color()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
     # ===== Get other required data:
@@ -169,23 +173,21 @@ def do_one_color(definition=None, catalog_color_index=None):
     if not verify_data_syntax(definition, catalog_color_index,
                               instrument_dict, site_dict, color_control_dict):
         return
-    fa, fb, result_a, result_b = definition     # convenience variables.
-    catalog_a, catalog_b = catalog_color_index  # "
+    fa, fb, result_a, result_b = definition[0]     # convenience variables (definition is nested tuple).
+    catalog_a, catalog_b = catalog_color_index     # convenience variables.
     print(' >>>>> do_one_color(): to get result color', result_a + '-' + result_b,
           'from filters', fa, '&', fb, 'using catalog color', catalog_a + '-' + catalog_b)
 
     # ===== Load and prepare session's master dataframe, and rename passband columns, e.g. 'r' -> 'SR':
-    df_all = mpc.mp_phot.make_df_all(filters_to_include=(fa, fb), comps_only=False,
-                                     require_mp_obs_each_image=True)
-    df_all = df_all.rename(columns={'g': 'SG',   'r': 'SR',   'i': 'SI',   'z': 'SZ',
-                                    'dg': 'dSG', 'dr': 'dSR', 'di': 'dSI', 'dz': 'dSZ'})
+    df_all = make_df_all_for_mp_color(filters_to_include=(fa, fb))
 
-    # Verify data before obs screenings:
+    # ===== Verify data before obs screenings:
     if not verify_data_available(df_all, definition, catalog_color_index,
                                  instrument_dict, color_control_dict):
         print(' >>>>> Terminating for error found by verify_data_available(), before screens.')
         return
 
+    # ===== Screen observations:
     df_screened_obs = _remove_images_on_user_request(df_all, color_control_dict['omit images'])
     df_screened_obs = _remove_comps_on_user_request(df_screened_obs, color_control_dict['omit comps'])
     df_screened_obs = _remove_obs_with_unusuable_instmag_instmagsigma(df_screened_obs)
@@ -198,27 +200,28 @@ def do_one_color(definition=None, catalog_color_index=None):
     df_screened_obs = _remove_images_with_few_comps(df_screened_obs)
     df_screened_obs = _remove_comps_absent_from_any_image(df_screened_obs)
     df_screened_obs = _remove_comp_obs_on_user_request(df_screened_obs, color_control_dict['omit obs'])
-    df_screened_obs = _remove_images_with_too_few_comps(df_screened_obs,
-                                                        color_control_dict['min valid comps per image'])
+    df_screened_obs = _remove_images_with_too_few_comps(df_screened_obs, MIN_COLOR_FINAL_COMPS_PER_IMAGE)
     df_screened_obs = df_screened_obs.sort_values(by=['JD_mid', 'Type', 'SourceID'])
 
-    # Verify data after obs screenings:
+    # ===== Verify data after obs screenings:
     if not verify_data_available(df_all, definition, catalog_color_index,
                                  instrument_dict, color_control_dict):
         print(' >>>>> Terminating for error found by verify_data_available(), after screens.')
         return
 
-    # For each filter, build and run model, then get no-CI MP mag for each image:
-    df_results = None # accumulator for final mag results, both filters.
+    # ===== For each filter: build and run model, then get zero-CI MP mag for each image:
+    model_dict = dict()  # accumulator dict for model output, both filters.
+    df_mp_mags = None    # accumulator dataframe for final mag results, both filters.
     for (f, pb) in [(fa, result_a), (fb, result_b)]:
         df_model_this_filter = df_screened_obs.loc[df_screened_obs['Filter'] == f, :].copy()
         # Here, count MP obs in this filter, error if not at least one.
-        model = SessionModel_OneFilter(df_model_this_filter, f, pb, catalog_color_index, color_control_dict,
-                                       defaults_dict)
-        if df_results is None:
-            df_results = model.df_mp_mags
+        model_dict[f] = SessionModel_OneFilter(df_model_this_filter, f, pb,
+                                               catalog_color_index, color_control_dict, defaults_dict)
+        if df_mp_mags is None:
+            df_mp_mags = model_dict[f].df_mp_mags
         else:
-            df_results = df_results.append(model.df_mp_mags)
+            df_mp_mags = df_mp_mags.append(model_dict[f].df_mp_mags)
+    print('Models result in', len(df_mp_mags), 'MP mags.')
 
     # Run second (vs JD) regression, backcalculating for best CI & sigma.
 
@@ -297,13 +300,16 @@ class SessionModel_OneFilter:
         self.color_index_passbands = color_index_passbands
         self.defaults_dict = defaults_dict.copy()
 
-        self.transform_option = color_control_dict['Transform'][(filter, passband)]  # TODO: correct this.
-        self.extinction_option = color_control_dict['Extinction'][filter]
-        self.fit_vignette = color_control_dict['fit_extinction']
-        self.fit_xy = color_control_dict['fit_xy']
-        self.fit_jd = color_control_dict['fit_jd']
+        self.transform_option = color_control_dict['transforms'][(filter, passband,
+                                                                  color_index_passbands[0],
+                                                                  color_index_passbands[1])]
+        self.extinction_option = color_control_dict['extinctions'][filter]
+        self.fit_vignette = color_control_dict['fit vignette']
+        self.fit_xy = color_control_dict['fit xy']
+        self.fit_jd = color_control_dict['fit jd']
 
-        self.df_used = df_model.copy().loc[df_model['UseInModel'], :]  # only observations used in model.
+        # self.df_used = df_model.copy().loc[df_model['UseInModel'], :]  # only observations used in model.
+        self.df_used = df_model.copy()  # this fn doesn't use UseInModel.
         self.df_used_comps_only = self.df_used.loc[(self.df_used['Type'] == 'Comp'), :].copy()
         self.df_used_mps_only = self.df_used.loc[(self.df_used['Type'] == 'MP'), :].copy()
         self.image_filenames = list(self.df_used['FITSfile'].drop_duplicates())
@@ -349,7 +355,7 @@ class SessionModel_OneFilter:
         # elif self.transform_option == 'fit=2':
         #     fixed_effect_var_list.extend(['CI', 'CI2'])
         #     transform_handled = True
-        elif isinstance(self.transform_option, list):
+        elif isinstance(self.transform_option, tuple):
             if self.transform_option[0] == 'use':
                 if len(self.transform_option) in [2, 3]:
                     coeffs = (self.transform_option[1:] + [0.0])[:2]  # 2nd-order coeff -> 0 if absent.
@@ -363,10 +369,10 @@ class SessionModel_OneFilter:
 
         # Handle extinction option (extinction=coeff, ObsAirmass=indep var):
         extinction_handled = False
-        if self.extinction_option == 'fit':
+        if self.extinction_option in ['fit' or ('fit',)]:
             fixed_effect_var_list.append()
             extinction_handled = True
-        elif isinstance(self.extinction_option, list):
+        elif isinstance(self.extinction_option, tuple):
             if self.extinction_option[0] == 'use':
                 coeff = self.extinction_option[1]
                 dep_var_offset += coeff * self.df_used_comps_only['ObsAirmass']
@@ -384,7 +390,7 @@ class SessionModel_OneFilter:
         if self.fit_jd:
             fixed_effect_var_list.append('JD_fract')
         if len(fixed_effect_var_list) == 0:
-            fixed_effect_var_list = ['JD_fract']  # as statsmodels requires >= 1 fixed-effect variable.
+            fixed_effect_var_list = ['Vignette']  # as statsmodels requires >= 1 fixed-effect variable.
 
         # Build dependent (y) variable:
         self.df_used_comps_only[self.dep_var_name] = self.df_used_comps_only['InstMag'] - dep_var_offset
@@ -579,6 +585,21 @@ def verify_data_available(df_in, definition, catalog_color_index,
                               target_color_passbands_in_catalog and
                               color_index_passbands_in_catalog)
     return all_data_are_available
+
+
+def make_df_all_for_mp_color(filters_to_include):
+    """ Make master dataframe for MP color estimation. Very similar to df_all for MP lightcurve use.
+        Will read data from 3 dataframe CSV files in the current session directory (from make_dfs()).
+        Passband column names are changed from ATLAS catalog format (e.g., 'r') to increasingly
+        accepted two-letter format (e.g., 'SR').
+    :param filters_to_include: tuple of names of filters to include, e.g., ('SR', 'SI'). [tuple of strs]
+    :return: master dataframe, ready for use in regressions. [pandas dataframe]
+    """
+    df_all = mpc.mp_phot.make_df_all(filters_to_include=filters_to_include, comps_only=False,
+                                     require_mp_obs_each_image=True)
+    df_all = df_all.rename(columns={'g': 'SG',   'r': 'SR',   'i': 'SI',   'z': 'SZ',
+                                    'dg': 'dSG', 'dr': 'dSR', 'di': 'dSI', 'dz': 'dSZ'})
+    return df_all
 
 
 _____SCREENING_FUNCTIONS____________________________________ = 0

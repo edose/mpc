@@ -240,7 +240,7 @@ _____FOR_LIGHTCURVE_PLANNING________________________________ = 0
 
 def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
                    min_hours=MIN_HOURS_OBSERVABLE, max_vmag=MAX_V_MAGNITUDE_DEFAULT,
-                   plots_to_console=False):
+                   plots_to_console=False, forced_include=None):
     """ Main LIGHTCURVE planning function for MP photometry.
     :param an_string: Astronight, e.g. 20200201 [string or int]
     :param site_name: name of site for Site object. [string]
@@ -249,11 +249,20 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
     :param max_vmag: maximum estimated V mag allowed for MP to be kept in table & plots. [float]
     :param plots_to_console: [NOT IMPLEMENTED] will control whether plots are drawn to console;
         (plots are always written to files). [boolean]
+    :param forced_include: list of MP numbers to include in any case. [list or tuple of ints or strs]
     :return: [None]
     """
+    if forced_include is None:
+        forced_include = []
+    else:
+        if isinstance(forced_include, str) or isinstance(forced_include, int):
+            forced_include = [forced_include]
+        forced_include = [str(mp) for mp in forced_include]
+
     # Make and print table of values, 1 line/MP, sorted by earliest observable UTC:
     df_an_table = make_df_an_table(an_string, site_name='DSW',
-                                   min_moon_dist=min_moon_dist, min_hours=min_hours)
+                                   min_moon_dist=min_moon_dist, min_hours=min_hours,
+                                   forced_include=forced_include)
 
     # Write warning lines for MPs that are no longer observable:
     gone_west_lines = []
@@ -265,12 +274,13 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
 
     # Warn of, then remove too-faint MPs:
     bright_enough = [vmag <= max_vmag for vmag in df_an_table['V_mag']]
-    mps_to_keep = bright_enough
+    in_forced_list = [mp in forced_include for mp in df_an_table['MPnumber']]
+    mps_to_keep = [bright or forced for (bright, forced) in zip(bright_enough, in_forced_list)]
     mps_too_faint = df_an_table.loc[[not be for be in bright_enough], :]
     too_faint_lines = []
     for i in mps_too_faint.index:
         transit_utc = df_an_table.loc[i, 'TransitUTC']
-        if not np.isnan(transit_utc.day):
+        if (not np.isnan(transit_utc.day)) and (df_an_table.loc[i, 'MPnumber'] not in forced_include):
             too_faint_lines.append('      ' +
                                    'V=' + '{:5.2f}'.format(df_an_table.loc[i, 'V_mag']) +
                                    'transit=' + hhmm_from_datetime_utc(transit_utc) +
@@ -412,13 +422,14 @@ def backlog(months=6):
 
 
 def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
-                     min_hours=MIN_HOURS_OBSERVABLE):
+                     min_hours=MIN_HOURS_OBSERVABLE, forced_include=None):
     """  Make dataframe of one night's MP photometry planning data, one row per MP.
          USAGE: df = make_df_an_table('20200201')
     :param an_string: Astronight, e.g. 20200201 [string or int]
     :param site_name: name of site for Site object. [string]
     :param min_moon_dist: min dist from min (degrees) to consider MP observable [float].
     :param min_hours: min hours of observing time to include an MP. [float]
+    :param: forced_include: list of MP numbers to include in any case. [list of strs]
     :return: table of planning data, one row per current MP, many columns including one for
                            coverage list of dataframes. [DataFrame]
     """
@@ -428,6 +439,8 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
     mid_dark = an_object.local_middark_utc
     # dark_no_moon_start, dark_no_moon_end = an_object.ts_dark_no_moon.start, an_object.ts_dark_no_moon.end
     mpfile_dict = make_mpfile_dict()
+    if forced_include is None:
+        forced_include = []
 
     an_dict_list = []  # results to be deposited here, to make a dataframe later.
     for mp in mpfile_dict.keys():
@@ -445,6 +458,7 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
         for i in range(2):
             data = mpfile.eph_from_utc(best_utc)
             if data is None:
+                print(' >>>>> ERROR: could not read this AN date from MPFile', mp)
                 if mpfile.eph_range[1] < an_object.ts_dark.start:
                     status = 'too late'
                 else:
@@ -464,10 +478,16 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
             if hours_observable < min_hours:
                 status = 'too brief'
 
+        # Override status if MP is forced and observable:
+        if an_dict['MPnumber'] in forced_include and hours_observable > 0.0:
+            status = 'ok'
+
         # For MPs observable this night, add one line to table:
         # print(mpfile.name, status)
         an_dict['Status'] = status
         if status.lower() == 'ok':
+            if an_dict['MPnumber'] == '4717':
+                iiii = 4
             an_dict['RA'] = data['RA']
             an_dict['Dec'] = data['Dec']
             an_dict['StartUTC'] = ts_observable.start
@@ -535,7 +555,6 @@ def make_coverage_plots(an_string, site_name, df_an_table, plots_to_console):
     hours_dark_end = (dark_end - utc_zero).total_seconds() / 3600.0
 
     # Define plot structure (for both hourly coverage and phase coverage):
-    max_nobs_to_plot = 5  # max number of previous coverages (y-axis value) to plot.
     mps_to_plot = [name for (name, cov) in zip(df['MPnumber'], df['Coverage']) if cov is not None]
     n_plots = len(mps_to_plot)  # count of individual MP plots.
     n_cols, n_rows = 3, 3
@@ -578,7 +597,7 @@ def make_coverage_plots(an_string, site_name, df_an_table, plots_to_console):
                 ax = axes[i_row, i_col]
                 ax_p = axes_p[i_row, i_col]
                 subplot_title = 'MP ' + this_mp +\
-                                '    {0:.2f} h'.format(df.loc[this_mp, 'Period']) +\
+                                '    {0:.3f} h'.format(df.loc[this_mp, 'Period']) +\
                                 '    {0:d} s'.format(int(round(df.loc[this_mp, 'ExpTime']))) +\
                                 '    {0:d}%'.format(int(round(df.loc[this_mp, 'DutyCyclePct'])))
                 make_labels_9_subplots(ax, subplot_title, '', '', '', zero_line=False)
@@ -590,12 +609,17 @@ def make_coverage_plots(an_string, site_name, df_an_table, plots_to_console):
                 y = (df.loc[this_mp, 'Coverage'])['Coverage']  # count of prev obs (this apparition).
                 ax.plot(x, y, linewidth=3, alpha=1, color='darkblue', zorder=+50)
                 ax.fill_between(x, 0, y, facecolor=(0.80, 0.83, 0.88), zorder=+49)
+                max_y_hourly = y.max()
 
                 # Plot PHASE coverage curve:
                 x = (df.loc[this_mp, 'PhaseCoverage'])['Phase']
                 y = (df.loc[this_mp, 'PhaseCoverage'])['PhaseCoverage']
                 ax_p.plot(x, y, linewidth=3, alpha=1, color='darkgreen', zorder=+50)
                 ax_p.fill_between(x, 0, y, facecolor=(0.83, 0.87, 0.83), zorder=+49)
+                max_y_phase = y.max()
+
+                # Set max y value for both coverage plots:
+                max_nobs_to_plot = max(5, 1 + max(max_y_hourly, max_y_phase))
 
                 # HOURLY coverage: Make left box if any unavailable timespan before available timespan:
                 left_box_start = hours_dark_start

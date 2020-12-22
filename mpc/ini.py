@@ -113,7 +113,7 @@ def make_site_dict(defaults_dict):
     return site_dict
 
 
-def read_selection_criteria_from_ini(filename):
+def read_color_control_from_ini(filename):
     """ Read ini file in session directory, return dict of comp selection criteria.
         Generally used in do_phot() or do_color().
     :param filename: name of control or color control ini file within session directory.

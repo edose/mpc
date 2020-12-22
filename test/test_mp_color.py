@@ -20,7 +20,7 @@ THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__
 TEST_TOP_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, "test", '$test_data_mp_color')
 
 
-def XXX_test_do_color_2filters():
+def test_do_one_color():
     # Test with a single FITS file in each filter:
     # Assumes start(), and assess() have been run, that proper color_control.ini file is present,
     #     and that make_dfs() has been run so that df*.csv files are ready.
@@ -42,7 +42,7 @@ def test_make_color_control_dict():
     ccd = mpc.mp_color.make_color_control_dict(this_directory, defaults_dict)
 
     assert isinstance(ccd, dict)
-    assert len(ccd) == 19
+    assert len(ccd) == 18
 
     assert ccd['mp location filenames'] == ('MP_426-0011-R.fts', 'MP_426-0012-I.fts')
     assert ccd['x pixels'] == (1034.4, 1036.0)
@@ -58,7 +58,7 @@ def test_make_color_control_dict():
     assert ccd['omit comps'] == ('99999', '111111')
     assert ccd['omit obs'] == ('888888', '888889', '999996')
     assert ccd['omit images'] == ('MP_426-0016-R.fts', 'MP_426-0014-R.fts')
-    assert ccd['min valid comps per image'] == 6
+    # assert ccd['min valid comps per image'] == 6
 
     assert len(ccd['transforms']) == 2
     assert ccd['transforms'][('R', 'SR', 'SR', 'SI')] == tuple(['use', -0.15])
@@ -195,14 +195,6 @@ _____TEST_SCREENING_FUNCTIONS____________________________ = 0
 #    (2) verify fn doesn't change df_all (if no defects found),
 #    (3) verify that test operates correctly on df_defaced (= df_all with added defect to screen for).
 
-
-def make_df_all_for_tests():
-    df_all = mpc.mp_phot.make_df_all(('R', 'I'), comps_only=False, require_mp_obs_each_image=True)
-    df_all = df_all.rename(columns={'g': 'SG',   'r': 'SR',   'i': 'SI',   'z': 'SZ',
-                                    'dg': 'dSG', 'dr': 'dSR', 'di': 'dSI', 'dz': 'dSZ'})
-    assert len(df_all) == 183
-    assert set(df_all['FITSfile']) == {'MP_426-0011-R.fts', 'MP_426-0012-I.fts'}
-    return df_all
 
 
 def test__remove_images_on_user_request():
@@ -395,8 +387,19 @@ def test__remove_images_with_too_few_comps():
 _____HELPER_FUNCTIONS_for_TESTING___________________________ = 0
 
 
+def make_df_all_for_tests():
+    """ Helper function only, do not run as a test. """
+    df_all = mpc.mp_phot.make_df_all(('R', 'I'), comps_only=False, require_mp_obs_each_image=True)
+    df_all = df_all.rename(columns={'g': 'SG',   'r': 'SR',   'i': 'SI',   'z': 'SZ',
+                                    'dg': 'dSG', 'dr': 'dSR', 'di': 'dSI', 'dz': 'dSZ'})
+    assert len(df_all) == 183
+    assert set(df_all['FITSfile']) == {'MP_426-0011-R.fts', 'MP_426-0012-I.fts'}
+    return df_all
+
+
 def resume_with_df_all(mp_string, an_string):
-    mpc.mp_phot.resume(TEST_TOP_DIRECTORY, mp_string, an_string)
+    """ Helper function only, do not run as a test. """
+    mpc.mp_color.resume(TEST_TOP_DIRECTORY, mp_string, an_string)
     context = mpc.mp_phot.get_context()
     this_directory, mp_string, an_string = context
     defaults_dict = mpc.ini.make_defaults_dict()
