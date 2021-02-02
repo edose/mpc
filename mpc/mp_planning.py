@@ -40,9 +40,9 @@ MIN_MOON_DISTANCE = 40  # degrees (default value)
 MIN_HOURS_OBSERVABLE = 2  # (default value) less than this, and MP is not included in planning.
 DSW = ('254.34647d', '35.11861269964489d', '2220m')
 DSNM = ('251.10288d', '31.748657576406853d', '1372m')
-# next is: (v_mag, exp_time in sec), for photometry only.
-EXP_TIME_TABLE_PHOTOMETRY = [(13, 60), (14, 80), (15, 160), (16, 300), (17, 600), (17.5, 900)]
-EXP_OVERHEAD = 20  # Nominal exposure overhead, in seconds.
+# next is: (v_mag, exp_time in sec), for photometry only. Targets S/N 150-200.
+EXP_TIME_TABLE_PHOTOMETRY = [(13, 90), (14, 150), (15, 300), (16, 600), (17, 870), (17.5, 900)]
+EXP_OVERHEAD = 24  # Nominal exposure overhead, in seconds.
 COV_RESOLUTION_MINUTES = 5  # min. coverage plot resolution, in minutes.
 MAX_V_MAGNITUDE_DEFAULT = 18.4  # to ensure that ridiculously faint MPs don't get into planning & plots.
 MAX_EXP_TIME_NO_GUIDING = 119
@@ -60,7 +60,9 @@ MAX_COLOR_V_MAGNITUDE_DEFAULT = 15.5
 MIN_COLOR_MP_ALTITUDE = 35
 MIN_COLOR_MOON_DISTANCE = 50
 MAX_COLOR_SUN_ALT = -9
-COLOR_LIGHTCURVE_LIST_FULLPATH = 'C:/Astro/MP Color/MP lightcurve list.txt'
+MIN_PHASE_ANGLE = 1.5
+PHASE_ANGLE_TO_FLAG = 2.5
+# COLOR_LIGHTCURVE_LIST_FULLPATH = 'C:/Astro/MP Color/MP lightcurve list.txt'  # replaced by MPfiles.
 COLOR_OPPORTUNITY_LIST_FULLPATH = 'C:/Astro/MP Color/MP opportunity list.txt'
 COLOR_OMIT_LIST_FULLPATH = 'C:/Astro/MP Color/MP omit list.txt'
 COLOR_ROSTER_FILENAME = 'MP Color Roster.txt'
@@ -86,6 +88,8 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     :param max_vmag: maximum estimated V mag allowed for MP to be kept in table & plots. [float]
     :param max_mandatory_mp_number: max MP number to query as block from MPES. [int]
     :return:
+    Typical usage:
+        make_color_roster(an=20210131, min_vmag=10.75, max_vmag=15, max_mandatory_mp_number=500)
     """
     # Nested helper function:
     def _get_mp_list(fullpath):
@@ -101,28 +105,27 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
 
     # ===== Make 3 lists of MP numbers to query (user-specified and low-number):
     # Make user list of CURRENT LIGHTCURVE MPs to measure for Color:
-    lc_list = _get_mp_list(COLOR_LIGHTCURVE_LIST_FULLPATH)
-    if len(lc_list) <= 0:
-        print('\n >>>>> WARNING: cannot find MP List file or file empty:', COLOR_LIGHTCURVE_LIST_FULLPATH)
+    mpfile_dict = make_mpfile_dict()
+    lc_list = [int(mpfile.number) for mpfile in mpfile_dict.values()]
     # Make user list of special OPPORTUNITY MPs to measure for Color:
-    opp_list = _get_mp_list(COLOR_OPPORTUNITY_LIST_FULLPATH)
-    if len(opp_list) <= 0:
-        print('\n >>>>> WARNING: cannot find MP List file or file empty:', COLOR_OPPORTUNITY_LIST_FULLPATH)
-    opp_list = [mp for mp in opp_list if mp not in lc_list]  # Lightcurve list is highest priority.
+    opportunity_list = _get_mp_list(COLOR_OPPORTUNITY_LIST_FULLPATH)
+    if len(opportunity_list) <= 0:
+        print(' >>>>> WARNING: cannot find MP List file or file empty:', COLOR_OPPORTUNITY_LIST_FULLPATH)
+    opportunity_list = [mp for mp in opportunity_list if mp not in lc_list]
     # Make default list of low-number MPs to measure for color:
     low_number_list = [str(mp + 1) for mp in range(max_mandatory_mp_number)
-                       if str(mp + 1) not in (lc_list + opp_list)]  # Low-number list is lowest priority.
+                       if str(mp + 1) not in (lc_list + opportunity_list)]
 
     # Make and apply list of MPs to OMIT:
     omit_list = _get_mp_list(COLOR_OMIT_LIST_FULLPATH)
     if len(omit_list) <= 0:
-        print('\n >>>>> WARNING: cannot find MP List file or list empty:', COLOR_OMIT_LIST_FULLPATH)
+        print(' >>>>> WARNING: cannot find MP List file or list empty:', COLOR_OMIT_LIST_FULLPATH)
     else:
         lc_list = [mp for mp in lc_list if mp not in omit_list]
-        opp_list = [mp for mp in opp_list if mp not in omit_list]
+        opportunity_list = [mp for mp in opportunity_list if mp not in omit_list]
         low_number_list = [mp for mp in low_number_list if mp not in omit_list]
 
-    # ===== Make 3 df_mpes dataframes.
+    # ===== Make 3 df_mpes dataframes, one for each MP list from above.
     defaults_dict = make_defaults_dict()
     site_dict = make_site_dict(defaults_dict)
     an_string = str(an)
@@ -131,16 +134,19 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     df_mpes_lc = web.make_df_mpes(mp_list=lc_list, site_dict=site_dict, utc_start=utc_start, hours=13)
     if df_mpes_lc is not None:
         if len(df_mpes_lc) >= 1:
-            df_mpes_lc.loc[:, 'Flag'] = '!'
-    df_mpes_opp = web.make_df_mpes(mp_list=opp_list, site_dict=site_dict, utc_start=utc_start, hours=13)
+            df_mpes_lc.loc[:, 'Flag'] = '~'
+    # print(str(len(lc_list)), 'current lightcurve targets.')
+    df_mpes_opp = web.make_df_mpes(mp_list=opportunity_list, site_dict=site_dict, utc_start=utc_start, hours=13)
     if df_mpes_opp is not None:
         if len(df_mpes_opp) >= 1:
-            df_mpes_opp.loc[:, 'Flag'] = '~'
+            df_mpes_opp.loc[:, 'Flag'] = '!'
+    # print(str(len(opportunity_list)), 'special opportunity targets.')
     df_mpes_low_number = web.make_df_mpes(mp_list=low_number_list, site_dict=site_dict,
                                           utc_start=utc_start, hours=13)
     if df_mpes_low_number is not None:
         if len(df_mpes_low_number) >= 1:
             df_mpes_low_number.loc[:, 'Flag'] = ' '
+    # print(str(len(df_mpes_low_number)), 'low number targets.')
 
     # Combine dataframes into one:
     df = df_mpes_low_number.copy()
@@ -155,7 +161,8 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     motion_ok = (abs(df['Motion']) < MAX_COLOR_MOTION)
     moon_dist_ok = (df['Moon_dist'] >= min_moon_dist) | (df['Moon_alt'] < 0)
     sun_alt_ok = (df['Sun_alt'] <= MAX_COLOR_SUN_ALT)
-    row_ok = v_mag_ok & altitude_ok & motion_ok & moon_dist_ok & sun_alt_ok
+    phase_angle_ok = (df['Phase_angle']) >= MIN_PHASE_ANGLE
+    row_ok = v_mag_ok & altitude_ok & motion_ok & moon_dist_ok & sun_alt_ok & phase_angle_ok
     df_mpes = df.loc[row_ok, :].sort_values(by=['Number', 'UTC'])
     df_mpes.index = [i for i in range(len(df_mpes))]
     roster_mps = df_mpes['Number'].drop_duplicates()
@@ -211,21 +218,26 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
                '{0:4d}'.format(int(round(df_mp.loc[mp, 'Gal_lat']))) +\
                ('*' if abs(df_mp.loc[mp, 'Gal_lat']) < 16.0 else ' ') +\
                '{0:6.1f}'.format(df_mp.loc[mp, 'Phase_angle']) +\
-               ('*' if abs(df_mp.loc[mp, 'Phase_angle']) < 2.0 else ' ')
+               ('*' if abs(df_mp.loc[mp, 'Phase_angle']) < PHASE_ANGLE_TO_FLAG else ' ')
         table_lines.append(line)
 
     # Make header lines, then assemble all lines:
     day_of_week = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']\
         [datetime(year, month, day).weekday()]
     header_lines = ['MP COLOR Candidates for AN' + this_an.an_date_string + '   ' + day_of_week.upper(),
-                    '     as generated by make_color_roster() at ' +
+                    '    as generated by make_color_roster() at ' +
                     '{:%Y-%m-%d %H:%M  UTC}'.format(datetime.now(timezone.utc)),
-                    '     min.alt = ' + '{:.1f}'.format(MIN_COLOR_MP_ALTITUDE) + u'\N{DEGREE SIGN}' +
-                    '     V mag = ' + '{0:4.1f}'.format(min_vmag) + ' to ' + '{0:4.1f}'.format(max_vmag),
+                    '    min.alt = ' + '{:.1f}'.format(MIN_COLOR_MP_ALTITUDE) + u'\N{DEGREE SIGN}' +
+                    '    V mag = ' + '{0:4.1f}'.format(min_vmag) + ' to ' + '{0:4.1f}'.format(max_vmag) +
+                    '    min. phase angle = ' + '{:.1f}'.format(MIN_PHASE_ANGLE) + u'\N{DEGREE SIGN}',
+                    '    all MP numbers to ' + str(max_mandatory_mp_number) +
+                    ' considered, except those excluded by file ' + COLOR_OMIT_LIST_FULLPATH,
                     this_an.acp_header_string(), '']
-    table_header_line = 'V mag'.rjust(number_length + max_name_length + 25) +\
-        'Moondist'.rjust(28) + '"/min'.rjust(7) + ' Gal.B' + '  Phase'
-    all_lines = header_lines + [table_header_line] + table_lines + [table_header_line]
+    legend_line = [''.rjust(number_length) + 'Flag (between number and name): ! is special opportunity, '
+                   '~ is current lightcurve target.', '|'.rjust(number_length + 2)]
+    table_header_line = ['|'.rjust(number_length + 2) + 'V mag'.rjust(max_name_length + 23) +
+                         'Moondist'.rjust(28) + '"/min'.rjust(7) + ' Gal.B' + '  Phase']
+    all_lines = header_lines + legend_line + table_header_line + table_lines + table_header_line
 
     # Write lines to roster text file:
     roster_directory = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string)
@@ -281,10 +293,9 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
     for i in mps_too_faint.index:
         transit_utc = df_an_table.loc[i, 'TransitUTC']
         if (not np.isnan(transit_utc.day)) and (df_an_table.loc[i, 'MPnumber'] not in forced_include):
-            too_faint_lines.append('      ' +
-                                   'V=' + '{:5.2f}'.format(df_an_table.loc[i, 'V_mag']) +
-                                   'transit=' + hhmm_from_datetime_utc(transit_utc) +
-                                   df_an_table.loc[i, 'MPnumber'].rjust(7) +
+            too_faint_lines.append('      ' + 'V=' + '{:5.2f}'.format(df_an_table.loc[i, 'V_mag']) +
+                                   '  transit=' + hhmm_from_datetime_utc(transit_utc) +
+                                   df_an_table.loc[i, 'MPnumber'].rjust(7) + ' ' +
                                    df_an_table.loc[i, 'MPname'])
     if len(too_faint_lines) > 0:
         print(' >>>>> WARNING: MPs fainter than V', str(max_vmag), 'and thus excluded:')
@@ -297,8 +308,10 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
         return
 
     df = df_an_table.copy()
+    an = Astronight(an_string, site_name)
     table_lines = ['MP Photometry planning for AN ' + an_string + ':',
-                   ''.rjust(22) + 'Start Tran  End    V   Exp/s Duty/%   P/hr']
+                   an.acp_header_string(), ''.join(80*['-']),
+                   ''.ljust(22) + 'Start Tran  End    V   Exp/s Duty/%   P/hr']
     for i in df.index:
         # print(str(i), str(df.loc[i, 'MPnumber']), str(df.loc[i, 'Status']))
         if df.loc[i, 'Status'].lower() not in ['ok', 'too late']:
@@ -648,20 +661,27 @@ def make_coverage_plots(an_string, site_name, df_an_table, plots_to_console):
                     infobox_mp_name = infobox_mp_name[0:max_len_infobox_mp_name] + '...'
                 infobox_text = infobox_mp_name + '  ' + MOON_CHARACTER + ' ' +\
                     str(int(round(df.loc[this_mp, 'MoonDist']))) + u'\N{DEGREE SIGN}' +\
-                    '   ' + 'α=' + '{0:.0f}'.format(df.loc[this_mp, 'PhaseAngle']) + u'\N{DEGREE SIGN}' +\
-                    '   ' + df.loc[this_mp, 'Motive']
+                    '   ' + df.loc[this_mp, 'Motive']  # remove alpha angle 2021-01-23.
+                # infobox_text = infobox_mp_name + '  ' + MOON_CHARACTER + ' ' +\
+                #     str(int(round(df.loc[this_mp, 'MoonDist']))) + u'\N{DEGREE SIGN}' +\
+                #     '   ' + 'α=' + '{0:.0f}'.format(df.loc[this_mp, 'PhaseAngle']) + u'\N{DEGREE SIGN}' +\
+                #     '   ' + df.loc[this_mp, 'Motive']
                 hours_dark = hours_dark_end - hours_dark_start
-                ax.add_patch(patches.Rectangle((hours_dark_start, 4.3), hours_dark, 0.8,
+                n_box_top = max_nobs_to_plot
+                n_box_bottom = 0.86 * max_nobs_to_plot
+                box_height = n_box_top - n_box_bottom
+                n_text_base = 0.92 * max_nobs_to_plot
+                ax.add_patch(patches.Rectangle((hours_dark_start, n_box_bottom), hours_dark, box_height,
                                                linewidth=1, alpha=0.75, zorder=+200,
                                                fill=True, edgecolor='lightgray', facecolor='whitesmoke'))
-                ax.text(x=hours_dark_start + 0.02 * hours_dark, y=4.6, s=infobox_text,
+                ax.text(x=hours_dark_start + 0.02 * hours_dark, y=n_text_base, s=infobox_text,
                         verticalalignment='center', fontsize=8, color='dimgray', zorder=+201)
 
                 # PHASE coverage: add info box.
-                ax_p.add_patch(patches.Rectangle((0, 4.3), 1.0, 0.8,
+                ax_p.add_patch(patches.Rectangle((0, n_box_bottom), 1.0, box_height,
                                                  linewidth=1, alpha=0.75, zorder=+200,
                                                  fill=True, edgecolor='lightgray', facecolor='whitesmoke'))
-                ax_p.text(x=0.02, y=4.6, s=infobox_text,
+                ax_p.text(x=0.02, y=n_text_base, s=infobox_text,
                           verticalalignment='center', fontsize=8, color='dimgray', zorder=+201)
 
                 # Complete HOURLY coverage plot:

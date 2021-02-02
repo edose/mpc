@@ -657,7 +657,7 @@ def make_dfs(color_control_dict=None):
     log_file.close()
     print('\nNext: (1) enter comp selection limits and model options in ' + control_filename,
           '\n      (2) run do_mp_phot()')
-
+    # do_mp_phot()
 
 
 _____SESSION_LIGHTCURVE_PHOTOMETRY________________________________________________ = 0
