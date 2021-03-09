@@ -25,13 +25,13 @@ from mpc.catalogs import Refcat2, get_bounding_ra_dec
 from mpc.mp_planning import all_mpfile_names, MPfile
 from mpc.ini import *
 
-# From EVD package photrix (deprecated import--> prefer astropak:
+# From EVD package photrix:
 from photrix.image import Image, FITS
 from photrix.util import RaDec, jd_from_datetime_utc, datetime_utc_from_jd, \
     MixedModelFit, ra_as_hours, dec_as_hex
 
-# From EVD package astropak (preferred):
-import astropak.ini
+# From EVD package astropak (preferred, but not in this repo 'mpc'):
+# import astropak.ini
 
 __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 

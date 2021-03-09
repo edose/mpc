@@ -1,9 +1,13 @@
 __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 
+# Python core packages:
 import os
 from datetime import datetime, timezone, timedelta
 from math import ceil, floor, sqrt
+from collections import Counter
+from enum import Enum
 
+# External packages:
 import numpy as np
 import pandas as pd
 # from astroquery.mpc import MPC
@@ -17,14 +21,16 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import matplotlib.patches as patches
 
-
+# Author's packages:
 from photrix.user import Astronight
 from photrix.util import RaDec, datetime_utc_from_jd, jd_from_datetime_utc, hhmm_from_datetime_utc
+from mpc.mp_astrometry import calc_exp_time, PAYLOAD_DICT_TEMPLATE, get_one_html_from_list
+from mpc.ini import make_defaults_dict, make_site_dict
+
+# Astropak (author's) imports (a mistake to include, but live with it for now):
 import astropak.web as web
 from astropak.util import ra_as_degrees, dec_as_degrees, dec_as_hex, ra_as_hours, degrees_as_hex, \
     Timespan, make_directory_if_not_exists, next_date_utc
-from mpc.mp_astrometry import calc_exp_time, PAYLOAD_DICT_TEMPLATE, get_one_html_from_list
-from mpc.ini import make_defaults_dict, make_site_dict
 
 MOON_CHARACTER = '\u263D'
 # MOON_CHARACTER = '\U0001F319'  # Drat, matplotlib complains 'glyph missing from current font'.
@@ -54,7 +60,7 @@ CURRENT_MPFILE_VERSION = '1.1'
 # MPfile version 1.1 = added #BRIGHTEST directive; #EPH_RANGE rather than #UTC_RANGE; added #FAMILY.
 
 # COLOR PLANNING:
-MAX_COLOR_MANDATORY_MP_NUMBER = 50  # TODO: increase this after testing.
+MAX_COLOR_MANDATORY_MP_NUMBER = 500  # TODO: increase this after testing.
 MIN_COLOR_V_MAGNITUDE_DEFAULT = 12
 MAX_COLOR_V_MAGNITUDE_DEFAULT = 15.5
 MIN_COLOR_MP_ALTITUDE = 35
@@ -72,13 +78,25 @@ MAX_COLOR_MOTION = 1.5  # in arcseconds/minute
 DELAY_BETWEEN_MPES_CALLS = 5  # seconds between successive calls to MP eph service (MPC site)
 
 
+class Sort(Enum):
+    START = 'UTC_earliest'
+    BEST = 'UTC_highest'
+    LAST = 'UTC_latest'
+    NUMBER = 'Number_int'
+    MAG = 'V_mag'
+
+
+class DuplicateMPFileError(Exception):
+    pass
+
+
 _____FOR_COLOR_PLANNING_____________________________________ = 0
 
 
 def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE,
                       min_hours=MIN_COLOR_HOURS_OBSERVABLE,
                       min_vmag=MIN_COLOR_V_MAGNITUDE_DEFAULT, max_vmag=MAX_COLOR_V_MAGNITUDE_DEFAULT,
-                      max_mandatory_mp_number=MAX_COLOR_MANDATORY_MP_NUMBER):
+                      max_mandatory_mp_number=MAX_COLOR_MANDATORY_MP_NUMBER, sort=Sort.BEST):
     """ Main COLOR INDEX planning function for MP photometry.
     :param an Astronight, e.g. 20200201 [string or int]
     :param site_name: name of site for Site object. [string]
@@ -87,6 +105,7 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     :param min_vmag: minimum estimated V mag allowed for MP to be kept in table & plots. [float]
     :param max_vmag: maximum estimated V mag allowed for MP to be kept in table & plots. [float]
     :param max_mandatory_mp_number: max MP number to query as block from MPES. [int]
+    :param sort: property on which to sort rows of output table, from Sort enum. [Sort enum]
     :return:
     Typical usage:
         make_color_roster(an=20210131, min_vmag=10.75, max_vmag=15, max_mandatory_mp_number=500)
@@ -103,15 +122,15 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
                 this_list.extend(strs)
         return this_list
 
-    # ===== Make 3 lists of MP numbers to query (user-specified and low-number):
+    # ===== Make 3 lists of MP numbers (as strings) to query (user-specified + low-number):
     # Make user list of CURRENT LIGHTCURVE MPs to measure for Color:
     mpfile_dict = make_mpfile_dict()
-    lc_list = [int(mpfile.number) for mpfile in mpfile_dict.values()]
+    lc_list = [str(mpfile.number) for mpfile in mpfile_dict.values()]
     # Make user list of special OPPORTUNITY MPs to measure for Color:
     opportunity_list = _get_mp_list(COLOR_OPPORTUNITY_LIST_FULLPATH)
     if len(opportunity_list) <= 0:
         print(' >>>>> WARNING: cannot find MP List file or file empty:', COLOR_OPPORTUNITY_LIST_FULLPATH)
-    opportunity_list = [mp for mp in opportunity_list if mp not in lc_list]
+    opportunity_list = [str(mp) for mp in opportunity_list if mp not in lc_list]
     # Make default list of low-number MPs to measure for color:
     low_number_list = [str(mp + 1) for mp in range(max_mandatory_mp_number)
                        if str(mp + 1) not in (lc_list + opportunity_list)]
@@ -123,7 +142,8 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     else:
         lc_list = [mp for mp in lc_list if mp not in omit_list]
         opportunity_list = [mp for mp in opportunity_list if mp not in omit_list]
-        low_number_list = [mp for mp in low_number_list if mp not in omit_list]
+        low_number_list = [mp for mp in low_number_list
+                           if mp not in (omit_list + lc_list + opportunity_list)]
 
     # ===== Make 3 df_mpes dataframes, one for each MP list from above.
     defaults_dict = make_defaults_dict()
@@ -173,6 +193,7 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
         df_mp = df_mpes.loc[df_mpes['Number'] == mp, :]
         n = len(df_mp)
         mp_dict = {'Number': mp,
+                   'Number_int': int(mp),
                    'Flag': df_mp['Flag'].iloc[0],
                    'Name': df_mp['Name'].iloc[0],
                    'V_mag': max(df_mp['V_mag']),
@@ -197,7 +218,13 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     df_mp['UTC_highest'] = [min(max(tr, ob.start), ob.end)
                             for (tr, ob) in zip(ts_transits, ts_observables)]
     observable_long_enough = [ts.seconds / 3600 >= min_hours for ts in ts_observables]
-    df_mp = df_mp.loc[observable_long_enough, :].sort_values(by=['UTC_earliest', 'UTC_latest', 'Number'])
+    if sort in Sort:
+        sort_columns = [sort.value, 'UTC_latest', 'Number_int']
+    else:
+        print(' >>>>> WARNING: sort choice unknown. Use: Sort.START, .BEST, .LAST, .NUMBER, or .MAG')
+        sort_columns = ['UTC_earliest', 'UTC_latest', 'Number_int']
+
+    df_mp = df_mp.loc[observable_long_enough, :].sort_values(by=sort_columns)
 
     # Make text lines from df_mp:
     table_lines = []
@@ -235,8 +262,8 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
                     this_an.acp_header_string(), '']
     legend_line = [''.rjust(number_length) + 'Flag (between number and name): ! is special opportunity, '
                    '~ is current lightcurve target.', '|'.rjust(number_length + 2)]
-    table_header_line = ['|'.rjust(number_length + 2) + 'V mag'.rjust(max_name_length + 23) +
-                         'Moondist'.rjust(28) + '"/min'.rjust(7) + ' Gal.B' + '  Phase']
+    table_header_line = ['|'.rjust(number_length + 2) + 'start-best-last'.rjust(max_name_length + 16) +
+                         'V mag'.rjust(7) + 'Moondist'.rjust(28) + '"/min'.rjust(7) + ' Gal.B' + '  Phase']
     all_lines = header_lines + legend_line + table_header_line + table_lines + table_header_line
 
     # Write lines to roster text file:
@@ -245,6 +272,7 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     roster_fullpath = os.path.join(roster_directory, COLOR_ROSTER_FILENAME)
     with open(roster_fullpath, 'w') as this_file:
         this_file.write('\n'.join(all_lines))
+    print(str(len(table_lines)), 'MPs written to', roster_fullpath)
 
 
 _____FOR_LIGHTCURVE_PLANNING________________________________ = 0
@@ -477,6 +505,8 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
                 else:
                     status = 'too early'
                 break
+            # if an_dict['MPnumber'] == '4336':
+            #     iiii = 4
             status = 'ok'
             mp_radec = RaDec(data['RA'], data['Dec'])
             ts_observable = an_object.ts_observable(mp_radec,
@@ -499,8 +529,6 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
         # print(mpfile.name, status)
         an_dict['Status'] = status
         if status.lower() == 'ok':
-            if an_dict['MPnumber'] == '4717':
-                iiii = 4
             an_dict['RA'] = data['RA']
             an_dict['Dec'] = data['Dec']
             an_dict['StartUTC'] = ts_observable.start
@@ -536,6 +564,10 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
         return None
     df_an_table = pd.DataFrame(data=an_dict_list)
     df_an_table.index = df_an_table['MPnumber'].values
+    mp_numbers = df_an_table['MPnumber'].values
+    duplicate_mp_numbers = [mp_number for mp_number, count in Counter(mp_numbers).items() if count > 1]
+    if duplicate_mp_numbers:
+        raise DuplicateMPFileError(' '.join(duplicate_mp_numbers))
     df_an_table = df_an_table.sort_values(by='TransitUTC')
     return df_an_table
 
