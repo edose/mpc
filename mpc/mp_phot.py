@@ -781,13 +781,11 @@ class SessionModel:
         :return: [None]
         """
         fit_summary_lines = []
-
         self.df_used_comps_only['CI'] = self.df_used_comps_only['r'] - self.df_used_comps_only['i']
         self.df_used_comps_only['CI2'] = [ci ** 2 for ci in self.df_used_comps_only['CI']]
 
         # Initiate dependent-variable offset, which will aggregate all such offset terms:
         dep_var_offset = self.df_used_comps_only['r'].copy()  # *copy* CatMag, or it will be damaged
-
         fixed_effect_var_list = []
 
         # Handle transform (Color Index) options separately here:
@@ -815,7 +813,7 @@ class SessionModel:
                 except ValueError:
                     raise ValueError('#FIT_TRANSFORM use value(s) cannot be converted to float value(s).')
                 dep_var_offset += transform_1 * self.df_used_comps_only['CI'] +\
-                    transform_2 * self.df_used_comps_only['CI2']
+                                  transform_2 * self.df_used_comps_only['CI2']
                 msg = ' Transform (Color Index) not fit: 1st, 2nd order values fixed at' +\
                       ' {0:.3f}'.format(transform_1) + ' {0:.3f}'.format(transform_2)
                 fit_transform_handled = True
@@ -895,7 +893,7 @@ class SessionModel:
             print(msg)
             fit_summary_lines.append(msg)
         write_text_file('fit_summary.txt',
-                        'Regression for directory ' + get_context()[0] + '\n' +
+                        'Regression (mpc) for: ' + get_context()[0] + '\n' +
                         '\n'.join(fit_summary_lines) + '\n\n' +
                         self.mm_fit.statsmodels_object.summary().as_text() +
                         '\n\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
@@ -906,12 +904,17 @@ class SessionModel:
         self.df_used_mps_only['CI'] = self.mp_ci
         self.df_used_mps_only['CI2'] = self.mp_ci ** 2
         raw_predictions = self.mm_fit.predict(self.df_used_mps_only, include_random_effect=True)
-
-        # Compute dependent-variable offsets for MP:
         dep_var_offsets = pd.Series(len(self.df_used_mps_only) * [0.0], index=raw_predictions.index)
-        if self.fit_transform == False:
-            # TODO: is next line correct? doesn't it possibly need second-order transform, as well?
-            dep_var_offsets += self.transform_fixed * self.df_used_mps_only['CI']
+
+        # Compute transform (Color Index) offsets for MP, if not fit in regression:
+        if isinstance(self.fit_transform, list):
+            if self.fit_transform[0] == 'use':
+                transform_1 = float(self.fit_transform[1])
+                transform_2 = float(self.fit_transform[2])
+                dep_var_offsets += transform_1 * self.df_used_mps_only['CI'] +\
+                                   transform_2 * self.df_used_mps_only['CI2']
+
+        # Compute extinction (ObsAirmass) offsets for MP, if not fit in regression:
         if self.fit_extinction == False:
             dep_var_offsets += self.state['extinction'][self.fits_filter] * \
                                self.df_used_mps_only['ObsAirmass']
