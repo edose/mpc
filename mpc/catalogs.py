@@ -136,8 +136,8 @@ class Refcat2:
         dec_spec_first = max(dec_spec_first, -90)
         dec_spec_last = int(floor(dec_deg_range[1]))
         dec_spec_last = min(dec_spec_last, 89)
-        # print('RA: ', str(ra_spec_first), str((ra_spec_last % 360) + 1))
-        # print('Dec:', str(dec_spec_first), str(dec_spec_last))
+        print('RA: ', str(ra_spec_first), str((ra_spec_last % 360) + 1))
+        print('Dec:', str(dec_spec_first), str(dec_spec_last))
         df_list = []
         for ra_spec in range(ra_spec_first, ra_spec_last + 1):
             for dec_spec in range(dec_spec_first, dec_spec_last + 1):
@@ -145,7 +145,7 @@ class Refcat2:
                 # print('From:', str(ra_spec % 360), str(dec_spec), ' -> ', str(len(df_degsq)), 'rows.')
                 df_list.append(df_degsq)
         df = pd.DataFrame(pd.concat(df_list, ignore_index=True))  # new index of unique integers
-        print('\nRefcat2: begin with', str(len(df)), 'stars.')
+        print('\nRefcat2: begin with', str(len(df)), 'stars before trimming.')
 
         # Trim dataframe based on user's actual limits on RA and Dec:
         ra_too_low = (df['RA_deg'] < ra_deg_range[0]) & (df['RA_deg'] >= ra_spec_first)
@@ -155,6 +155,12 @@ class Refcat2:
         # print(str(sum(ra_too_low)), str(sum(ra_too_high)), str(sum(dec_too_low)), str(sum(dec_too_high)))
         radec_outside_requested = ra_too_low | ra_too_high | dec_too_low | dec_too_high
         df = df[~radec_outside_requested]
+        print('Refcat2: RA limits=' +
+              ' {:.4f}'.format(ra_deg_range[0]) +
+              ' {:.4f}'.format(ra_deg_range[1]))
+        print('Refcat2: Dec limits=' +
+              ' {:.4f}'.format(dec_deg_range[0]) +
+              ' {:.4f}'.format(dec_deg_range[1]))
         print('Refcat2: RADec-trimmed to', str(len(df)), 'stars.')
 
         # Add columns for synthetic B-V color & synthetic APASS (~Sloan) R magnitude:

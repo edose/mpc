@@ -339,7 +339,7 @@ def assess(log_filename=MP_PHOT_LOG_FILENAME, write_mp_phot_control_stub=True):
 
     defaults_dict = make_defaults_dict()
     if write_mp_phot_control_stub:
-        write_control_txt_stub(this_directory, log_file, df)        # if it doesn't already exist.
+        _write_control_txt_stub(this_directory, log_file, df)        # if it doesn't already exist.
     log_file.close()
 
 
@@ -663,7 +663,7 @@ def make_dfs(color_control_dict=None):
 _____SESSION_LIGHTCURVE_PHOTOMETRY________________________________________________ = 0
 
 
-def do_mp_phot(fits_filter='Clear'):
+def do_mp_phot(fits_filter='Clear', do_plots=True):
     """ Primary lightcurve photometry for one session. Takes all data incl. color index, generates:
     (1) canopus-import format results, (2) ALCDEF-format file, and (3) all diagnostic plots.
     Typically iterated, pruning comp-star ranges and outliers, until converged and then simply stop.
@@ -671,6 +671,7 @@ def do_mp_phot(fits_filter='Clear'):
         lightcurve passband is fixed as Sloan 'r', and
         color index is fixed as Sloan (r-i).
     :param fits_filter: filter allowed for this session's FITS files. Typically 'Clear' or 'BB' [string]
+    :param do_plots: True iff diagnostic plots are wanted, else False. [boolean]
     :returns None. Writes all info to files.
     USAGE: do_mp_phot()   [no return value]
     """
@@ -715,10 +716,11 @@ def do_mp_phot(fits_filter='Clear'):
     options_dict = read_regression_options(MP_PHOT_CONTROL_FILENAME)
     model = SessionModel(df_model, fits_filter, mp_color_ri, state, options_dict)
 
-    make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_selections)
+    if do_plots:
+        _make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_selections)
 
-    write_canopus_file(model)
-    write_alcdef_file(model, mp_color_ri, source_string_ri)
+    _write_canopus_file(model)
+    _write_alcdef_file(model, mp_color_ri, source_string_ri)
     # model_jds = df_model['JD_mid']
     model_jds = model.df_mp_mags['JD_mid']
     print(' >>>>> Please add this line to MPfile', mp_string + ':',
@@ -796,12 +798,14 @@ class SessionModel:
         elif self.fit_transform == False:
             self.fit_transform = ['use', '0', '0']  # convert False to exclusion of color index (rare).
             fit_transform_handled = True
+        msg = ' >>>>> WARNING: Transform not handled. '  # default
         if self.fit_transform == 'fit=1':
             fixed_effect_var_list.append('CI')
+            msg = ' Transform first-order fit to Color Index.'
             fit_transform_handled = True
         elif self.fit_transform == 'fit=2':
-            fixed_effect_var_list.append('CI')
-            fixed_effect_var_list.append('CI2')
+            fixed_effect_var_list.extend(['CI', 'CI2'])
+            msg = ' Transform second-order fit to Color Index.'
             fit_transform_handled = True
         elif isinstance(self.fit_transform, list):
             if self.fit_transform[0] == 'use':
@@ -814,24 +818,23 @@ class SessionModel:
                     transform_2 * self.df_used_comps_only['CI2']
                 msg = ' Transform (Color Index) not fit: 1st, 2nd order values fixed at' +\
                       ' {0:.3f}'.format(transform_1) + ' {0:.3f}'.format(transform_2)
-                print(msg)
-                fit_summary_lines.append(msg)
                 fit_transform_handled = True
+        print(msg)
+        fit_summary_lines.append(msg)
         if not fit_transform_handled:
             print(' >>>>> WARNING: _prep_and_do_regression() cannot interpret #FIT_TRANSFORM choice.')
 
         # Handle extinction (ObsAirmass) options separately here:
         fit_extinction_handled = False    # default, to be set to True when handled.
+        msg = ' Extinction not handled.'  # default
         if self.fit_extinction == True:
             fixed_effect_var_list.append('ObsAirmass')
-            fit_extinction_handled = True
+            msg = ' Extinction fit on ObsAirmass data.'
         if self.fit_extinction == False:
             extinction = self.state['extinction'][self.fits_filter]
             dep_var_offset += extinction * self.df_used_comps_only['ObsAirmass']
             msg = ' Extinction (ObsAirmass) not fit: value fixed at default of' +\
                   ' {0:.3f}'.format(extinction)
-            print(msg)
-            fit_summary_lines.append(msg)
             fit_extinction_handled = True
         if isinstance(self.fit_extinction, list):
             if self.fit_extinction[0] == 'use':
@@ -842,9 +845,9 @@ class SessionModel:
                 dep_var_offset += extinction * self.df_used_comps_only['ObsAirmass']
                 msg = ' Extinction (ObsAirmass) not fit: value fixed at control.txt value of' +\
                       ' {0:.3f}'.format(extinction)
-                print(msg)
-                fit_summary_lines.append(msg)
                 fit_extinction_handled = True
+        print(msg)
+        fit_summary_lines.append(msg)
         if not fit_extinction_handled:
             print(' >>>>> WARNING: _prep_and_do_regression() cannot interpret #FIT_EXTINCTION choice.')
 
@@ -884,6 +887,7 @@ class SessionModel:
                                     dep_var=self.dep_var_name,
                                     fixed_vars=fixed_effect_var_list,
                                     group_var=random_effect_var_name)
+        print()
         print(self.mm_fit.statsmodels_object.summary())
         print('sigma =', '{0:.1f}'.format(1000.0 * self.mm_fit.sigma), 'mMag.')
         if not self.mm_fit.converged:
@@ -891,8 +895,8 @@ class SessionModel:
             print(msg)
             fit_summary_lines.append(msg)
         write_text_file('fit_summary.txt',
-                        'Regression for directory ' + get_context()[0] + '\n\n' +
-                        '\n'.join(fit_summary_lines) +
+                        'Regression for directory ' + get_context()[0] + '\n' +
+                        '\n'.join(fit_summary_lines) + '\n\n' +
                         self.mm_fit.statsmodels_object.summary().as_text() +
                         '\n\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
 
@@ -906,6 +910,7 @@ class SessionModel:
         # Compute dependent-variable offsets for MP:
         dep_var_offsets = pd.Series(len(self.df_used_mps_only) * [0.0], index=raw_predictions.index)
         if self.fit_transform == False:
+            # TODO: is next line correct? doesn't it possibly need second-order transform, as well?
             dep_var_offsets += self.transform_fixed * self.df_used_mps_only['CI']
         if self.fit_extinction == False:
             dep_var_offsets += self.state['extinction'][self.fits_filter] * \
@@ -926,7 +931,7 @@ class SessionModel:
         return df_mp_mags
 
 
-def make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_selections):
+def _make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_selections):
     """  Display and write to file several diagnostic plots, to help decide which obs, comps, images
          might need removal by editing control file.
     :param model: mixed model summary object. [photrix.MixedModelFit object]
@@ -1156,7 +1161,7 @@ def make_session_diagnostic_plots(model, df_model, mp_color_ri, state, user_sele
                                 image_prefix=SESSION_IMAGE_PREFIX)
 
 
-def write_control_txt_stub(this_directory, log_file, df):
+def _write_control_txt_stub(this_directory, log_file, df):
     fullpath = os.path.join(this_directory, MP_PHOT_CONTROL_FILENAME)
     if os.path.exists(fullpath):
         return
@@ -1241,7 +1246,7 @@ def write_text_file(filename, lines):
         f.write(lines)
 
 
-def write_canopus_file(model):
+def _write_canopus_file(model):
     """  Write file that can be imported into Canopus, to populate observation data of one Canopus session.
     :param model: mixed model summary object. [photrix.MixedModelFit object]
     :return: [None]
@@ -1257,8 +1262,9 @@ def write_canopus_file(model):
         f.write(fulltext)
 
 
-def write_alcdef_file(model, mp_color_ri, source_string_ri):
+def _write_alcdef_file(model, mp_color_ri=+0.22, source_string_ri='Default MP color'):
     """  Write file that can be uploaded to ALCDEF, to make one session's observation available to public.
+         This is called by do_mp_phot() and should not be called separately.
     :param model: mixed model summary object. [photrix.MixedModelFit object]
     :param mp_color_ri: MP color in Sloan r-i. [float]
     :param source_string_ri: tells where mp_color_ri value came from. [string]
@@ -1266,7 +1272,7 @@ def write_alcdef_file(model, mp_color_ri, source_string_ri):
     """
     this_directory, mp_string, an_string = get_context()
     mpfile_names = all_mpfile_names()
-    name_list = [name for name in mpfile_names if name.startswith('MP_' + mp_string)]
+    name_list = [name for name in mpfile_names if name.startswith('MP_' + mp_string + '_')]
     if len(name_list) <= 0:
         print(' >>>>> ERROR: No MPfile can be found for MP', mp_string, '--> NO ALCDEF file written')
         return
@@ -1377,7 +1383,8 @@ def combine_alcdef(mp, apparition_year, top_directory=MP_PHOT_TOP_DIRECTORY):
     fullpath = os.path.join(mpdir, combined_filename)
     with open(fullpath, 'w') as f:
         f.writelines(fulltext)
-    print(str(len(all_lines)), 'total lines written to', fullpath, '.')
+    print(str(len(all_lines)), 'total lines from', str(len(an_subdirs)),
+          'files written to top_directory/' + combined_filename + '.')
 
 
 _____READING_LOG_and_CONTROL_FILES__________________________________ = 0
@@ -1949,10 +1956,11 @@ def screen_comps_for_photometry(refcat2):
     :return lines: list of advisory test lines. [list of strings]
     """
     lines = []
+    lines.append('Refcat2: begin with ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.select_min_r_mag(MIN_R_MAG)
-    lines.append('Refcat2: min(g) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    lines.append('Refcat2: min(r) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.select_max_r_mag(MAX_R_MAG)
-    lines.append('Refcat2: max(g) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    lines.append('Refcat2: max(r) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.select_max_g_uncert(MAX_G_UNCERT)
     lines.append('Refcat2: max(dg) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.select_max_r_uncert(MAX_R_UNCERT)
