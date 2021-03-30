@@ -1899,7 +1899,6 @@ def draw_x_line(ax, x_value, color='lightgray'):
 _____SUPPORT________________________________________________ = 0
 
 
-
 def get_fits_filenames(directory):
     all_filenames = pd.Series([e.name for e in os.scandir(directory) if e.is_file()])
     extensions = pd.Series([os.path.splitext(f)[-1].lower() for f in all_filenames])

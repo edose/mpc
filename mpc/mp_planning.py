@@ -46,7 +46,7 @@ MIN_MOON_DISTANCE = 40  # degrees (default value)
 MIN_HOURS_OBSERVABLE = 2  # (default value) less than this, and MP is not included in planning.
 DSW = ('254.34647d', '35.11861269964489d', '2220m')
 DSNM = ('251.10288d', '31.748657576406853d', '1372m')
-# next is: (v_mag, exp_time in sec), for photometry only. Targets S/N 150-200.
+# next is: (v_mag, exp_time in sec), for photometry only. Targets S/N >~200.
 EXP_TIME_TABLE_PHOTOMETRY = [(13, 90), (14, 150), (15, 300), (16, 600), (17, 870), (17.5, 900)]
 EXP_OVERHEAD = 24  # Nominal exposure overhead, in seconds.
 COV_RESOLUTION_MINUTES = 5  # min. coverage plot resolution, in minutes.
@@ -337,33 +337,39 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
 
     df = df_an_table.copy()
     an = Astronight(an_string, site_name)
-    table_lines = ['MP Photometry planning for AN ' + an_string + ':',
-                   an.acp_header_string(), ''.join(80*['-']),
-                   ''.ljust(22) + 'Start Tran  End    V   Exp/s Duty/%   P/hr']
+    roster_header = ['MP Roster for AN ' + an_string + ':',
+                     an.acp_header_string(), ''.join(100*['-'])]
+    table_header_line_1 = ''.ljust(16) + '                       Exp Duty Mot.      '
+    table_header_line_2 = ''.ljust(16) + 'Start Tran  End   V    (s)  %    "     P/hr'
+    roster_header.extend([table_header_line_1, table_header_line_2])
     for i in df.index:
-        # print(str(i), str(df.loc[i, 'MPnumber']), str(df.loc[i, 'Status']))
         if df.loc[i, 'Status'].lower() not in ['ok', 'too late']:
             continue  # sentinel
+        short_mp_name = df.loc[i, 'MPname'] if len(df.loc[i, 'MPname']) <= 8 \
+            else df.loc[i, 'MPname'][:8] + '\u2026'
         duty_cycle = df.loc[i, 'DutyCyclePct']
-        duty_cycle_string = '    --' if (duty_cycle is None or np.isnan(duty_cycle) == True) \
-            else str(int(round(duty_cycle))).rjust(6)
+        duty_cycle_string = '  --' if (duty_cycle is None or np.isnan(duty_cycle) == True) \
+            else str(int(round(duty_cycle))).rjust(3)
+        motion = (df.loc[i, 'ExpTime'] / 60) * df.loc[i, 'MotionRate']
+        motion_string = '{0:4.1f}'.format(motion) + ('*' if motion > 9 else ' ')
         period = df.loc[i, 'Period']
-        period_string = '     ? ' if (period is None or np.isnan(period) == True) \
-            else '{0:7.2f}'.format(period)
+        period_string = '    ? ' if (period is None or np.isnan(period) == True) \
+            else '{0:6.2f}'.format(period)
         table_line_elements = [df.loc[i, 'MPnumber'].rjust(6),
-                               df.loc[i, 'MPname'].ljust(15),
+                               short_mp_name.ljust(9),
                                hhmm_from_datetime_utc(df.loc[i, 'StartUTC']),
                                hhmm_from_datetime_utc(df.loc[i, 'TransitUTC']),
                                hhmm_from_datetime_utc(df.loc[i, 'EndUTC']),
-                               '{0:5.1f}'.format(df.loc[i, 'V_mag']),
+                               '{0:4.1f}'.format(df.loc[i, 'V_mag']),
                                str(int(round(df.loc[i, 'ExpTime']))).rjust(5),
                                duty_cycle_string,
+                               motion_string,
                                period_string,
-                               '  ' + df.loc[i, 'PhotrixPlanning']]
-        if df.loc[i, 'ExpTime'] <= MAX_EXP_TIME_NO_GUIDING:
-            table_line_elements.append(' AG+')
-        table_lines.append(' '.join(table_line_elements))
-    print('\n'.join(table_lines))
+                               ' ' + df.loc[i, 'PhotrixPlanning']]
+        # if df.loc[i, 'ExpTime'] <= MAX_EXP_TIME_NO_GUIDING:
+        #     table_line_elements.append(' AG+')
+        roster_header.append(' '.join(table_line_elements))
+    print('\n'.join(roster_header + [table_header_line_1] + [table_header_line_2]))
     print('\n'.join(gone_west_lines))
 
     # Make ACP AN directory if doesn't exist:
@@ -382,7 +388,7 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
     text_filename = 'MP_table_' + an_string + '.txt'
     text_file_fullpath = os.path.join(text_file_directory, text_filename)
     with open(text_file_fullpath, 'w') as this_file:
-        this_file.write('\n'.join(table_lines))
+        this_file.write('\n'.join(roster_header))
         this_file.write('\n'.join(gone_west_lines))
 
     # Display plots; also write to PNG files:
@@ -505,8 +511,6 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
                 else:
                     status = 'too early'
                 break
-            # if an_dict['MPnumber'] == '4336':
-            #     iiii = 4
             status = 'ok'
             mp_radec = RaDec(data['RA'], data['Dec'])
             ts_observable = an_object.ts_observable(mp_radec,
@@ -545,9 +549,11 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
                                           an_dict['Period']
             else:
                 an_dict['DutyCyclePct'] = None
+            an_dict['MotionAngle'] = data['MotionAngle']
+            an_dict['MotionRate'] = data['MotionRate']
         if status.lower() == 'ok':
             an_dict['PhotrixPlanning'] = 'IMAGE MP_' + mpfile.number + \
-                                         '  Clear=' + str(an_dict['ExpTime']) + 'sec(***)  ' + \
+                                         ' Clear=' + str(round(an_dict['ExpTime'])) + 'sec(*) ' + \
                                          ra_as_hours(an_dict['RA'], seconds_decimal_places=1) + ' ' + \
                                          degrees_as_hex(an_dict['Dec'], arcseconds_decimal_places=0)
             if an_dict['Period'] is not None:
@@ -878,7 +884,7 @@ _____GENERAL_SUPPORT________________________________________ = 0
 _____MPFILE_________________________________________________ = 0
 
 
-def make_mpfile(mp_number, utc_date_brightest=None, days=210, mpfile_directory=MPFILE_DIRECTORY):
+def make_mpfile(mp_number, utc_date_brightest=None, days=240, mpfile_directory=MPFILE_DIRECTORY):
     """ Make new MPfile text file for upcoming apparition.
     :param mp_number: MP's number, e.g., 7084. [int or string]
     :param utc_date_brightest: UTC date of MP brightest, e.g. '2020-02-01' or '20200201'. [string]
