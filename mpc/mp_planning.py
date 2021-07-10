@@ -4,7 +4,7 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 import os
 from datetime import datetime, timezone, timedelta
 from math import ceil, floor, sqrt
-from collections import Counter
+from collections import Counter, OrderedDict
 from enum import Enum
 
 # External packages:
@@ -54,22 +54,23 @@ MAX_V_MAGNITUDE_DEFAULT = 18.4  # to ensure that ridiculously faint MPs don't ge
 MAX_EXP_TIME_NO_GUIDING = 119
 
 MPFILE_DIRECTORY = 'C:/Dev/Photometry/MPfile'
+MP_LIGHTCURVE_DIRECTORY = 'C:/Astro/MP Photometry'
 ACP_PLANNING_TOP_DIRECTORY = 'C:/Astro/ACP'
 # MP_PHOTOMETRY_PLANNING_DIRECTORY = 'C:/Astro/MP Photometry/$Planning'
 CURRENT_MPFILE_VERSION = '1.1'
 # MPfile version 1.1 = added #BRIGHTEST directive; #EPH_RANGE rather than #UTC_RANGE; added #FAMILY.
 
 # COLOR PLANNING:
-MAX_COLOR_MANDATORY_MP_NUMBER = 500  # TODO: increase this after testing.
-MIN_COLOR_V_MAGNITUDE_DEFAULT = 12
-MAX_COLOR_V_MAGNITUDE_DEFAULT = 15.5
+MAX_COLOR_MANDATORY_MP_NUMBER = 2000  # usually overridden by user
+MIN_COLOR_V_MAGNITUDE_DEFAULT = 10.5
+MAX_COLOR_V_MAGNITUDE_DEFAULT = 16
 MIN_COLOR_MP_ALTITUDE = 35
 MIN_COLOR_MOON_DISTANCE = 50
 MAX_COLOR_SUN_ALT = -9
-MIN_PHASE_ANGLE = 1.5
-PHASE_ANGLE_TO_FLAG = 2.5
+MIN_PHASE_ANGLE = 2.0  # MPs at less than this phase angle are not included in Color roster.
+PHASE_ANGLE_TO_FLAG = 3.0
 # COLOR_LIGHTCURVE_LIST_FULLPATH = 'C:/Astro/MP Color/MP lightcurve list.txt'  # replaced by MPfiles.
-COLOR_OPPORTUNITY_LIST_FULLPATH = 'C:/Astro/MP Color/MP opportunity list.txt'
+COLOR_PRIORITY_LIST_FULLPATH = 'C:/Astro/MP Color/MP priority list.txt'
 COLOR_OMIT_LIST_FULLPATH = 'C:/Astro/MP Color/MP omit list.txt'
 COLOR_ROSTER_FILENAME = 'MP Color Roster.txt'
 
@@ -110,40 +111,41 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     Typical usage:
         make_color_roster(an=20210131, min_vmag=10.75, max_vmag=15, max_mandatory_mp_number=500)
     """
-    # Nested helper function:
-    def _get_mp_list(fullpath):
-        """ Return MP numbers (as *strings*) from mp list text file."""
-        this_list = []
-        if os.path.exists(fullpath) and os.path.isfile(fullpath):
-            with open(fullpath, 'r') as mpfile:
-                lines = mpfile.readlines()
-            for line in lines:
-                strs = line.strip().split(';', maxsplit=1)[0].replace(',', ' ').split()
-                this_list.extend(strs)
-        return this_list
+    # ===== Make required lists of MP numbers (as strings).
+    # Get CURRENT LIGHTCURVE MPs from MP lightcurve directory:
+    current_lc_list = [fname[3:] for fname in os.listdir(MP_LIGHTCURVE_DIRECTORY)
+                       if os.path.isdir(os.path.join(MP_LIGHTCURVE_DIRECTORY, fname)) and
+                       (fname.startswith("MP_"))]
+    current_lc_dict = {mp: '!' for mp in current_lc_list}
 
-    # ===== Make 3 lists of MP numbers (as strings) to query (user-specified + low-number):
-    # Make user list of CURRENT LIGHTCURVE MPs to measure for Color:
+    # Get POTENTIAL LIGHTCURVE MPs from MPfile directory:
     mpfile_dict = make_mpfile_dict()
-    lc_list = [str(mpfile.number) for mpfile in mpfile_dict.values()]
-    # Make user list of special OPPORTUNITY MPs to measure for Color:
-    opportunity_list = _get_mp_list(COLOR_OPPORTUNITY_LIST_FULLPATH)
-    if len(opportunity_list) <= 0:
-        print(' >>>>> WARNING: cannot find MP List file or file empty:', COLOR_OPPORTUNITY_LIST_FULLPATH)
-    opportunity_list = [str(mp) for mp in opportunity_list if mp not in lc_list]
-    # Make default list of low-number MPs to measure for color:
-    low_number_list = [str(mp + 1) for mp in range(max_mandatory_mp_number)
-                       if str(mp + 1) not in (lc_list + opportunity_list)]
+    potential_lc_list = [str(mpfile.number) for mpfile in mpfile_dict.values()]
+    potential_lc_dict = {mp: 'L' for mp in potential_lc_list}
 
-    # Make and apply list of MPs to OMIT:
-    omit_list = _get_mp_list(COLOR_OMIT_LIST_FULLPATH)
-    if len(omit_list) <= 0:
-        print(' >>>>> WARNING: cannot find MP List file or list empty:', COLOR_OMIT_LIST_FULLPATH)
-    else:
-        lc_list = [mp for mp in lc_list if mp not in omit_list]
-        opportunity_list = [mp for mp in opportunity_list if mp not in omit_list]
-        low_number_list = [mp for mp in low_number_list
-                           if mp not in (omit_list + lc_list + opportunity_list)]
+    # Get user's PRIORITY MPs from Priority file:
+    priority_lists = get_mp_lists_from_file(COLOR_PRIORITY_LIST_FULLPATH, codes=['+'])
+    duplicate_night_dict = {mp: '+' for mp in priority_lists['+']}
+    priority_dict = {mp: '>' for mp in priority_lists[' ']}
+
+    # Get user's OMIT list from Omit file (usually because color already measured):
+    omit_list = get_mp_lists_from_file(COLOR_OMIT_LIST_FULLPATH, codes=[])[' ']
+
+    # Make list of low-number MPs (base MP list):
+    low_number_list = [str(mp + 1) for mp in range(max_mandatory_mp_number)]
+
+    # ===== Add lists as dicts, then make small dataframe:
+    mp_dict = {mp: ' ' for mp in low_number_list}
+    mp_dict.update(priority_dict)
+    mp_dict.update(potential_lc_dict)
+    mp_dict.update(duplicate_night_dict)
+    mp_dict.update(current_lc_dict)  # highest priority
+    mp_dict = {mp: mp_dict[mp] for mp in mp_dict if mp not in omit_list}
+    mp_dict_list = [{'MP': mp, 'Flag': code} for mp, code in mp_dict.items()]
+    df_flag = pd.DataFrame(data=mp_dict_list)
+    df_flag.index = list(df_flag['MP'].astype(int))
+    df_flag = df_flag.sort_index()
+    mp_list = df_flag['MP'].values
 
     # ===== Make 3 df_mpes dataframes, one for each MP list from above.
     defaults_dict = make_defaults_dict()
@@ -151,30 +153,33 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     an_string = str(an)
     year, month, day = int(an_string[:4]), int(an_string[4:6]), int(an_string[6:8])
     utc_start = next_date_utc(datetime(year, month, day, 0, 0, 0).replace(tzinfo=timezone.utc))
-    df_mpes_lc = web.make_df_mpes(mp_list=lc_list, site_dict=site_dict, utc_start=utc_start, hours=13)
-    if df_mpes_lc is not None:
-        if len(df_mpes_lc) >= 1:
-            df_mpes_lc.loc[:, 'Flag'] = '~'
-    # print(str(len(lc_list)), 'current lightcurve targets.')
-    df_mpes_opp = web.make_df_mpes(mp_list=opportunity_list, site_dict=site_dict, utc_start=utc_start, hours=13)
-    if df_mpes_opp is not None:
-        if len(df_mpes_opp) >= 1:
-            df_mpes_opp.loc[:, 'Flag'] = '!'
-    # print(str(len(opportunity_list)), 'special opportunity targets.')
-    df_mpes_low_number = web.make_df_mpes(mp_list=low_number_list, site_dict=site_dict,
-                                          utc_start=utc_start, hours=13)
-    if df_mpes_low_number is not None:
-        if len(df_mpes_low_number) >= 1:
-            df_mpes_low_number.loc[:, 'Flag'] = ' '
-    # print(str(len(df_mpes_low_number)), 'low number targets.')
+    df = web.make_df_mpes(mp_list=mp_list, site_dict=site_dict, utc_start=utc_start, hours=13)
+    # df = pd.merge(left=df_mp, right=df_mpes, )
 
-    # Combine dataframes into one:
-    df = df_mpes_low_number.copy()
-    df = df.append(df_mpes_lc, ignore_index=True)
-    df = df.append(df_mpes_opp, ignore_index=True)
-    df['V_mag'] = [float(v) for v in df['V_mag']]
+
+    # if df_mpes_lc is not None:
+    #     if len(df_mpes_lc) >= 1:
+    #         df_mpes_lc.loc[:, 'Flag'] = '~'
+    # # print(str(len(lc_list)), 'current lightcurve targets.')
+    # df_mpes_opp = web.make_df_mpes(mp_list=opportunity_list, site_dict=site_dict, utc_start=utc_start, hours=13)
+    # if df_mpes_opp is not None:
+    #     if len(df_mpes_opp) >= 1:
+    #         df_mpes_opp.loc[:, 'Flag'] = '!'
+    # # print(str(len(opportunity_list)), 'special opportunity targets.')
+    # df_mpes_low_number = web.make_df_mpes(mp_list=low_number_list, site_dict=site_dict,
+    #                                       utc_start=utc_start, hours=13)
+    # if df_mpes_low_number is not None:
+    #     if len(df_mpes_low_number) >= 1:
+    #         df_mpes_low_number.loc[:, 'Flag'] = ' '
+    # # print(str(len(df_mpes_low_number)), 'low number targets.')
+    #
+    # # Combine dataframes into one:
+    # df = df_mpes_low_number.copy()
+    # df = df.append(df_mpes_lc, ignore_index=True)
+    # df = df.append(df_mpes_opp, ignore_index=True)
 
     # Screen df_mpes for user criteria incl: altitude, V mag, motion max, moon distance.
+    df['V_mag'] = [float(v) for v in df['V_mag']]
     v_mag_ok = (df['V_mag'] >= min_vmag) & \
                (df['V_mag'] <= max_vmag)
     altitude_ok = (df['Alt'] >= MIN_COLOR_MP_ALTITUDE)
@@ -187,14 +192,13 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     df_mpes.index = [i for i in range(len(df_mpes))]
     roster_mps = df_mpes['Number'].drop_duplicates()
 
-    # Convert df_mpes to df_by_mp:
+    # Convert df_mpes (1 row per MPES time) to df_by_mp (1 row per MP):
     list_mp_dict = []
     for mp in roster_mps:
         df_mp = df_mpes.loc[df_mpes['Number'] == mp, :]
         n = len(df_mp)
         mp_dict = {'Number': mp,
                    'Number_int': int(mp),
-                   'Flag': df_mp['Flag'].iloc[0],
                    'Name': df_mp['Name'].iloc[0],
                    'V_mag': max(df_mp['V_mag']),
                    'RA_deg': sum([ra_as_degrees(ra) for ra in df_mp['RA']]) / n,
@@ -205,7 +209,9 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
         }
         list_mp_dict.append(mp_dict)
     df_mp = pd.DataFrame(data=list_mp_dict)
-    df_mp.index = list(df_mp['Number'])
+    df_mp.index = list(df_mp['Number_int'])
+    df_mp = pd.merge(how='left', left=df_mp, right=df_flag, left_index=True, right_index=True)
+
     this_an = Astronight(an_string, site_name)
     radecs = [RaDec(ra, dec) for (ra, dec) in zip(df_mp['RA_deg'], df_mp['Dec_deg'])]
     df_mp['Gal_lat'] = [SkyCoord(ra, dec, unit='deg', frame='icrs').galactic.b.value
@@ -258,13 +264,15 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
                     '    V mag = ' + '{0:4.1f}'.format(min_vmag) + ' to ' + '{0:4.1f}'.format(max_vmag) +
                     '    min. phase angle = ' + '{:.1f}'.format(MIN_PHASE_ANGLE) + u'\N{DEGREE SIGN}',
                     '    all MP numbers to ' + str(max_mandatory_mp_number) +
-                    ' considered, except those excluded by file ' + COLOR_OMIT_LIST_FULLPATH,
-                    this_an.acp_header_string(), '']
+                    ' considered, except as excluded by ' + COLOR_OMIT_LIST_FULLPATH,
+                    this_an.acp_header_string()]
+    example_line = ['Example plan line: ' + 'COLOR MP_1626 1.1x 21:55:08 +24:24:45 ; 1x=V14', '']
     legend_line = [''.rjust(number_length) + 'Flag (between number and name): ! is special opportunity, '
                    '~ is current lightcurve target.', '|'.rjust(number_length + 2)]
     table_header_line = ['|'.rjust(number_length + 2) + 'start-best-last'.rjust(max_name_length + 16) +
                          'V mag'.rjust(7) + 'Moondist'.rjust(28) + '"/min'.rjust(7) + ' Gal.B' + '  Phase']
-    all_lines = header_lines + legend_line + table_header_line + table_lines + table_header_line
+    all_lines = header_lines + example_line + legend_line + table_header_line + table_lines + \
+                table_header_line
 
     # Write lines to roster text file:
     roster_directory = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string)
@@ -273,6 +281,38 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     with open(roster_fullpath, 'w') as this_file:
         this_file.write('\n'.join(all_lines))
     print(str(len(table_lines)), 'MPs written to', roster_fullpath)
+
+
+def get_mp_lists_from_file(fullpath, codes=[]):
+    """ Read MP list file, get MP numbers user-designated for each category in list file.
+    First character of a line may indicate a category by one-character code (not a numerical digit).
+    If first character of a line is numeric digit, put that line's MP numbers into default list (code=' ').
+    Blank lines ignored.
+    Comments (whole- or partial-line) marked with ';' anywhere in line are ignored.
+    :param fullpath: full path of file to read. [string]
+    :param codes: list of one-character (not digit) codes, e.g. ['+']. [list of one-character codes]
+    :return: dict of lists, where each key=code [character], list=MP numbers. [list of strings]
+    """
+    mp_lists = OrderedDict([(' ', [])])
+    for code in codes:
+        mp_lists[code] = []
+    if os.path.exists(fullpath) and os.path.isfile(fullpath):
+        with open(fullpath, 'r') as mpfile:
+            lines = mpfile.readlines()
+        for line in lines:
+            # Remove comments at end, get element strings:
+            strings = line.strip().split(';', maxsplit=1)[0].replace(',', ' ').split()
+            strings = [s for s in strings if s != '']
+            if len(strings) >= 1:
+                if strings[0][0] in codes or strings[0][0].isdigit():
+                    code = strings[0][0]
+                    if code.isdigit():
+                        code = ' '
+                    else:
+                        strings[0] = strings[0][1:]
+                    strings = [s for s in strings if s != '']
+                    mp_lists[code].extend(strings)
+    return mp_lists
 
 
 _____FOR_LIGHTCURVE_PLANNING________________________________ = 0
@@ -339,8 +379,8 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
     an = Astronight(an_string, site_name)
     roster_header = ['MP Roster for AN ' + an_string + ':',
                      an.acp_header_string(), ''.join(100*['-'])]
-    table_header_line_1 = ''.ljust(16) + '                       Exp Duty Mot.      '
-    table_header_line_2 = ''.ljust(16) + 'Start Tran  End   V    (s)  %    "     P/hr'
+    table_header_line_1 = ''.ljust(16) + '                       Exp Duty Mot.         '
+    table_header_line_2 = ''.ljust(16) + 'Start Tran  End   V    (s)  %  "/exp   P/hr'
     roster_header.extend([table_header_line_1, table_header_line_2])
     for i in df.index:
         if df.loc[i, 'Status'].lower() not in ['ok', 'too late']:
@@ -370,7 +410,8 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
         #     table_line_elements.append(' AG+')
         roster_header.append(' '.join(table_line_elements))
     print('\n'.join(roster_header + [table_header_line_1] + [table_header_line_2]))
-    print('\n'.join(gone_west_lines))
+    if len(gone_west_lines) >= 1:
+        print('\n\n' + '\n'.join(gone_west_lines))
 
     # Make ACP AN directory if doesn't exist:
     text_file_directory = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string)
@@ -385,11 +426,12 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
         os.remove(os.path.join(text_file_directory, f))
 
     # Write text file:
-    text_filename = 'MP_table_' + an_string + '.txt'
+    text_filename = 'MP_roster_' + an_string + '.txt'
     text_file_fullpath = os.path.join(text_file_directory, text_filename)
     with open(text_file_fullpath, 'w') as this_file:
         this_file.write('\n'.join(roster_header))
-        this_file.write('\n'.join(gone_west_lines))
+        if len(gone_west_lines) >= 1:
+            this_file.write('\n\n' + '\n'.join(gone_west_lines))
 
     # Display plots; also write to PNG files:
     is_to_plot = [status.lower() == 'ok' for status in df_an_table['Status']]
@@ -553,7 +595,7 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
             an_dict['MotionRate'] = data['MotionRate']
         if status.lower() == 'ok':
             an_dict['PhotrixPlanning'] = 'IMAGE MP_' + mpfile.number + \
-                                         ' Clear=' + str(round(an_dict['ExpTime'])) + 'sec(*) ' + \
+                                         ' Clear=' + str(round(an_dict['ExpTime'])) + 's(*) ' + \
                                          ra_as_hours(an_dict['RA'], seconds_decimal_places=1) + ' ' + \
                                          degrees_as_hex(an_dict['Dec'], arcseconds_decimal_places=0)
             if an_dict['Period'] is not None:
