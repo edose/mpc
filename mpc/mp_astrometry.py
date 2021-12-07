@@ -283,24 +283,24 @@ def go_pets(years=0.5):
 SUPPORT___________________________________________ = 0
 
 
-def calc_exp_time(v_mag, exp_time_table=None):
+def calc_exp_time(ref_mag, exp_time_table=None):
     # Check for outside limits:
-    if v_mag < exp_time_table[0][0]:
+    if ref_mag < exp_time_table[0][0]:
         return exp_time_table[0][1]
     n = len(exp_time_table)
     # Check for equals an entry:
-    if v_mag > exp_time_table[n-1][0]:
+    if ref_mag > exp_time_table[n - 1][0]:
         return exp_time_table[n-1][1]
     for (v_mag_i, t_i) in exp_time_table:
-        if v_mag == v_mag_i:
+        if ref_mag == v_mag_i:
             return t_i
     # Usual case: linear interpolation in mag (& thus in log(i)):
     for i, entry in enumerate(exp_time_table[:-1]):
         v_mag_i, t_i = entry
         v_mag_next, t_next = exp_time_table[i + 1]
-        if v_mag < v_mag_next:
+        if ref_mag < v_mag_next:
             slope = log(t_next / t_i) / (v_mag_next - v_mag_i)
-            log_t = log(t_i) + (v_mag - v_mag_i) * slope
+            log_t = log(t_i) + (ref_mag - v_mag_i) * slope
             return exp(log_t)
 
 

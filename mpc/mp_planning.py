@@ -46,8 +46,8 @@ MIN_MOON_DISTANCE = 40  # degrees (default value)
 MIN_HOURS_OBSERVABLE = 2  # (default value) less than this, and MP is not included in planning.
 DSW = ('254.34647d', '35.11861269964489d', '2220m')
 DSNM = ('251.10288d', '31.748657576406853d', '1372m')
-# next is: (v_mag, exp_time in sec), for photometry only. Targets S/N >~200.
-EXP_TIME_TABLE_PHOTOMETRY = [(13, 90), (14, 150), (15, 300), (16, 600), (17, 870), (17.5, 900)]
+# next is: (v_mag, Clear-filter exp_time in sec), for photometry only. Targets S/N >~200.
+EXP_TIME_CLEAR_TABLE_PHOTOMETRY = [(13, 90), (14, 150), (15, 300), (16, 600), (17, 870), (17.5, 900)]
 EXP_OVERHEAD = 24  # Nominal exposure overhead, in seconds.
 COV_RESOLUTION_MINUTES = 5  # min. coverage plot resolution, in minutes.
 MAX_V_MAGNITUDE_DEFAULT = 18.4  # to ensure that ridiculously faint MPs don't get into planning & plots.
@@ -61,22 +61,31 @@ CURRENT_MPFILE_VERSION = '1.1'
 # MPfile version 1.1 = added #BRIGHTEST directive; #EPH_RANGE rather than #UTC_RANGE; added #FAMILY.
 
 # COLOR PLANNING:
-MAX_COLOR_MANDATORY_MP_NUMBER = 2000  # usually overridden by user
+MAX_COLOR_MANDATORY_MP_NUMBER = 1000  # usually overridden by user
 MIN_COLOR_V_MAGNITUDE_DEFAULT = 10.5
 MAX_COLOR_V_MAGNITUDE_DEFAULT = 16
 MIN_COLOR_MP_ALTITUDE = 35
 MIN_COLOR_MOON_DISTANCE = 50
-MAX_COLOR_SUN_ALT = -9
-MIN_PHASE_ANGLE = 2.0  # MPs at less than this phase angle are not included in Color roster.
+MAX_COLOR_SUN_ALT = -10
+MIN_COLOR_PHASE_ANGLE = 2.0  # MPs at less than this phase angle are not included in Color roster.
 PHASE_ANGLE_TO_FLAG = 3.0
 # COLOR_LIGHTCURVE_LIST_FULLPATH = 'C:/Astro/MP Color/MP lightcurve list.txt'  # replaced by MPfiles.
-COLOR_PRIORITY_LIST_FULLPATH = 'C:/Astro/MP Color/MP priority list.txt'
-COLOR_OMIT_LIST_FULLPATH = 'C:/Astro/MP Color/MP omit list.txt'
-COLOR_ROSTER_FILENAME = 'MP Color Roster.txt'
+COLOR_PRIORITY_LIST_FULLPATH = 'C:/Astro/MP Color/MP Color priority list.txt'
+COLOR_PREVIOUSLY_OBSERVED_FULLPATH = 'C:/Astro/MP Color/MP Color previously observed list.txt'
+# COLOR_OMIT_LIST_FULLPATH = 'C:/Astro/MP Color/MP omit list.txt'
+COLOR_ROSTER_TXT_FILENAME = 'MP Color Roster.txt'
+COLOR_ROSTER_CSV_FILENAME = 'MP Color Roster.csv'
 
 MIN_COLOR_HOURS_OBSERVABLE = 0.5
 MAX_COLOR_MOTION = 1.5  # in arcseconds/minute
 DELAY_BETWEEN_MPES_CALLS = 5  # seconds between successive calls to MP eph service (MPC site)
+EXP_TIME_FACTOR_V14_TABLE_COLOR = [(11, 0.25), (12, 0.3), (13, 0.5), (14, 1), (15, 2.5), (16, 5)]
+N_COLOR_OBSERVATIONS_SUFFICIENT = 2
+MP_FLAG_CURRENT_LC = '!'
+MP_FLAG_POTENTIAL_LC = '?'
+# MP_FLAG_PRIORITY = 'p'
+MP_FLAG_ONE_REQUIRED = '*'
+MP_FLAG_OMIT = 'OMIT'  # only this flag can be longer than one character.
 
 
 class Sort(Enum):
@@ -112,36 +121,37 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
         make_color_roster(an=20210131, min_vmag=10.75, max_vmag=15, max_mandatory_mp_number=500)
     """
     # ===== Make required lists of MP numbers (as strings).
-    # Get CURRENT LIGHTCURVE MPs from MP lightcurve directory:
-    current_lc_list = [fname[3:] for fname in os.listdir(MP_LIGHTCURVE_DIRECTORY)
-                       if os.path.isdir(os.path.join(MP_LIGHTCURVE_DIRECTORY, fname)) and
-                       (fname.startswith("MP_"))]
-    current_lc_dict = {mp: '!' for mp in current_lc_list}
+    # Make list of low-number MPs (base MP list):
+    low_number_list = [str(mp + 1) for mp in range(max_mandatory_mp_number)]
+
+    # Get user's PRIORITY MPs from Priority file:
+    priority_dict = read_mp_control_file(COLOR_PRIORITY_LIST_FULLPATH, may_specify_flags=True)
 
     # Get POTENTIAL LIGHTCURVE MPs from MPfile directory:
     mpfile_dict = make_mpfile_dict()
     potential_lc_list = [str(mpfile.number) for mpfile in mpfile_dict.values()]
-    potential_lc_dict = {mp: 'L' for mp in potential_lc_list}
+    potential_lc_dict = {mp: MP_FLAG_POTENTIAL_LC for mp in potential_lc_list}
 
-    # Get user's PRIORITY MPs from Priority file:
-    priority_lists = get_mp_lists_from_file(COLOR_PRIORITY_LIST_FULLPATH, codes=['+'])
-    duplicate_night_dict = {mp: '+' for mp in priority_lists['+']}
-    priority_dict = {mp: '>' for mp in priority_lists[' ']}
+    # Get CURRENT LIGHTCURVE MPs from MP lightcurve directory:
+    current_lc_list = [fname[3:] for fname in os.listdir(MP_LIGHTCURVE_DIRECTORY)
+                       if os.path.isdir(os.path.join(MP_LIGHTCURVE_DIRECTORY, fname)) and
+                       (fname.startswith("MP_"))]
+    current_lc_dict = {mp: MP_FLAG_CURRENT_LC for mp in current_lc_list}
 
-    # Get user's OMIT list from Omit file (usually because color already measured):
-    omit_list = get_mp_lists_from_file(COLOR_OMIT_LIST_FULLPATH, codes=[])[' ']
-
-    # Make list of low-number MPs (base MP list):
-    low_number_list = [str(mp + 1) for mp in range(max_mandatory_mp_number)]
+    # Get PREVIOUSLY OBSERVED MPs and their obs counts, then make omit list and one-needed list:
+    omit_list, one_obs_needed_list = read_previously_observed_file(COLOR_PREVIOUSLY_OBSERVED_FULLPATH)
+    omit_dict = {mp: MP_FLAG_OMIT for mp in omit_list}
+    one_obs_needed_dict = {mp: MP_FLAG_ONE_REQUIRED for mp in one_obs_needed_list}
 
     # ===== Add lists as dicts, then make small dataframe:
     mp_dict = {mp: ' ' for mp in low_number_list}
     mp_dict.update(priority_dict)
     mp_dict.update(potential_lc_dict)
-    mp_dict.update(duplicate_night_dict)
-    mp_dict.update(current_lc_dict)  # highest priority
-    mp_dict = {mp: mp_dict[mp] for mp in mp_dict if mp not in omit_list}
-    mp_dict_list = [{'MP': mp, 'Flag': code} for mp, code in mp_dict.items()]
+    mp_dict.update(current_lc_dict)
+    mp_dict.update(one_obs_needed_dict)  # highest priority of MPs to observe.
+    mp_dict.update(omit_dict)  # overwrite those MPs to omit altogether.
+    mp_dict = {mp: flag for mp, flag in mp_dict.items() if flag != MP_FLAG_OMIT}
+    mp_dict_list = [{'MP': mp, 'Flag': flag} for mp, flag in mp_dict.items()]
     df_flag = pd.DataFrame(data=mp_dict_list)
     df_flag.index = list(df_flag['MP'].astype(int))
     df_flag = df_flag.sort_index()
@@ -154,29 +164,6 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     year, month, day = int(an_string[:4]), int(an_string[4:6]), int(an_string[6:8])
     utc_start = next_date_utc(datetime(year, month, day, 0, 0, 0).replace(tzinfo=timezone.utc))
     df = web.make_df_mpes(mp_list=mp_list, site_dict=site_dict, utc_start=utc_start, hours=13)
-    # df = pd.merge(left=df_mp, right=df_mpes, )
-
-
-    # if df_mpes_lc is not None:
-    #     if len(df_mpes_lc) >= 1:
-    #         df_mpes_lc.loc[:, 'Flag'] = '~'
-    # # print(str(len(lc_list)), 'current lightcurve targets.')
-    # df_mpes_opp = web.make_df_mpes(mp_list=opportunity_list, site_dict=site_dict, utc_start=utc_start, hours=13)
-    # if df_mpes_opp is not None:
-    #     if len(df_mpes_opp) >= 1:
-    #         df_mpes_opp.loc[:, 'Flag'] = '!'
-    # # print(str(len(opportunity_list)), 'special opportunity targets.')
-    # df_mpes_low_number = web.make_df_mpes(mp_list=low_number_list, site_dict=site_dict,
-    #                                       utc_start=utc_start, hours=13)
-    # if df_mpes_low_number is not None:
-    #     if len(df_mpes_low_number) >= 1:
-    #         df_mpes_low_number.loc[:, 'Flag'] = ' '
-    # # print(str(len(df_mpes_low_number)), 'low number targets.')
-    #
-    # # Combine dataframes into one:
-    # df = df_mpes_low_number.copy()
-    # df = df.append(df_mpes_lc, ignore_index=True)
-    # df = df.append(df_mpes_opp, ignore_index=True)
 
     # Screen df_mpes for user criteria incl: altitude, V mag, motion max, moon distance.
     df['V_mag'] = [float(v) for v in df['V_mag']]
@@ -186,7 +173,7 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     motion_ok = (abs(df['Motion']) < MAX_COLOR_MOTION)
     moon_dist_ok = (df['Moon_dist'] >= min_moon_dist) | (df['Moon_alt'] < 0)
     sun_alt_ok = (df['Sun_alt'] <= MAX_COLOR_SUN_ALT)
-    phase_angle_ok = (df['Phase_angle']) >= MIN_PHASE_ANGLE
+    phase_angle_ok = (df['Phase_angle']) >= MIN_COLOR_PHASE_ANGLE
     row_ok = v_mag_ok & altitude_ok & motion_ok & moon_dist_ok & sun_alt_ok & phase_angle_ok
     df_mpes = df.loc[row_ok, :].sort_values(by=['Number', 'UTC'])
     df_mpes.index = [i for i in range(len(df_mpes))]
@@ -223,37 +210,64 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
     df_mp['UTC_latest'] = [ts.end for ts in ts_observables]
     df_mp['UTC_highest'] = [min(max(tr, ob.start), ob.end)
                             for (tr, ob) in zip(ts_transits, ts_observables)]
-    observable_long_enough = [ts.seconds / 3600 >= min_hours for ts in ts_observables]
+    df_mp['Hours_observable'] = [ts.seconds / 3600 for ts in ts_observables]
+    observable_long_enough = (df_mp['Hours_observable'] >= min_hours)
     if sort in Sort:
-        sort_columns = [sort.value, 'UTC_latest', 'Number_int']
+        sort_columns = [sort.value, 'UTC_latest', 'UTC_earliest', 'Number_int']
     else:
         print(' >>>>> WARNING: sort choice unknown. Use: Sort.START, .BEST, .LAST, .NUMBER, or .MAG')
         sort_columns = ['UTC_earliest', 'UTC_latest', 'Number_int']
-
     df_mp = df_mp.loc[observable_long_enough, :].sort_values(by=sort_columns)
 
     # Make text lines from df_mp:
     table_lines = []
-    number_length = 6
+    csv_lines = []
+    number_length = max([len(number) for number in df_mp['Number']])
     max_name_length = min(30, max([len(name) for name in df_mp['Name']]))
     for mp in df_mp.index:
-        line = str(df_mp.loc[mp, 'Number']).rjust(number_length) +\
-               ' ' + df_mp.loc[mp, 'Flag'] + ' ' +\
-               df_mp.loc[mp, 'Name'][:max_name_length].ljust(max_name_length) + ' ' +\
-               hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_earliest']) + '-' + \
-               hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_highest']) + '-' + \
-               hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_latest']) + '  ' +\
-               '{0:5.1f}'.format(df_mp.loc[mp, 'V_mag']) + '  ' +\
-               ra_as_hours(df_mp.loc[mp, 'RA_deg'], seconds_decimal_places=0) + ' ' +\
-               dec_as_hex(df_mp.loc[mp, 'Dec_deg'], arcseconds_decimal_places=0) + '  ' +\
-               '{0:6d}'.format(round(df_mp.loc[mp, 'Moon_dist'])) + '  ' +\
-               '{0:5.2f}'.format(df_mp.loc[mp, 'Motion']) + '  ' +\
-               '{0:4d}'.format(int(round(df_mp.loc[mp, 'Gal_lat']))) +\
-               ('*' if abs(df_mp.loc[mp, 'Gal_lat']) < 16.0 else ' ') +\
-               '{0:6.1f}'.format(df_mp.loc[mp, 'Phase_angle']) +\
-               ('*' if abs(df_mp.loc[mp, 'Phase_angle']) < PHASE_ANGLE_TO_FLAG else ' ')
-        table_lines.append(line)
+        mp_number_string = str(df_mp.loc[mp, 'Number']).rjust(number_length)
+        mp_name_string = df_mp.loc[mp, 'Name'][:max_name_length].ljust(max_name_length)
+        utc_string = hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_earliest']) + '-' + \
+            hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_highest']) + '-' + \
+            hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_latest']) + '  '
+        ra_string = ra_as_hours(df_mp.loc[mp, 'RA_deg'], seconds_decimal_places=0)
+        dec_string = dec_as_hex(df_mp.loc[mp, 'Dec_deg'], arcseconds_decimal_places=0)
+        exposure_factor_string = calc_exp_time(df_mp.loc[mp, 'V_mag'], EXP_TIME_FACTOR_V14_TABLE_COLOR)
+        acp_string = ' '.join(['COLOR MP_' + str(df_mp.loc[mp, 'Number']).ljust(number_length),
+                               '{0:4.2f}x'.format(exposure_factor_string),
+                               ra_string, dec_string])
+        table_line = mp_number_string + \
+            ' ' + df_mp.loc[mp, 'Flag'] + ' ' + \
+            mp_name_string + ' ' + \
+            utc_string + \
+            '{0:5.1f}'.format(df_mp.loc[mp, 'V_mag']) + '  ' + \
+            '{0:3d}'.format(round(df_mp.loc[mp, 'Moon_dist'])) + '  ' + \
+            '{0:5.2f}'.format(df_mp.loc[mp, 'Motion']) + ' ' + \
+            '{0:4d}'.format(int(round(df_mp.loc[mp, 'Gal_lat']))) + \
+            ('*' if abs(df_mp.loc[mp, 'Gal_lat']) < 16.0 else ' ') + \
+            '{0:6.1f}'.format(df_mp.loc[mp, 'Phase_angle']) + \
+            (('*' if abs(df_mp.loc[mp, 'Phase_angle']) < PHASE_ANGLE_TO_FLAG else ' ') + '    ' +
+             acp_string)
+        table_lines.append(table_line)
 
+        csv_line = '\t'.join([str(df_mp.loc[mp, 'Number']),
+                              df_mp.loc[mp, 'Flag'],
+                              df_mp.loc[mp, 'Name'],
+                              hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_earliest']),
+                              hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_highest']),
+                              hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_latest']),
+                              '{0:5.1f}'.format(df_mp.loc[mp, 'V_mag']),
+                              '{0:3d}'.format(round(df_mp.loc[mp, 'Moon_dist'])),
+                              '{0:5.2f}'.format(df_mp.loc[mp, 'Motion']),
+                              '{0:4d}'.format(int(round(df_mp.loc[mp, 'Gal_lat']))) +
+                              ('*' if abs(df_mp.loc[mp, 'Gal_lat']) < 16.0 else ' '),
+                              '{0:6.1f}'.format(df_mp.loc[mp, 'Phase_angle']) +
+                              ('*' if abs(df_mp.loc[mp, 'Phase_angle']) < PHASE_ANGLE_TO_FLAG else ' '),
+                              acp_string + '  ;  ' + hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_earliest']) +
+                              '-' + hhmm_from_datetime_utc(df_mp.loc[mp, 'UTC_latest'])])
+        csv_lines.append(csv_line)
+
+    # Text File:
     # Make header lines, then assemble all lines:
     day_of_week = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']\
         [datetime(year, month, day).weekday()]
@@ -262,57 +276,153 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
                     '{:%Y-%m-%d %H:%M  UTC}'.format(datetime.now(timezone.utc)),
                     '    min.alt = ' + '{:.1f}'.format(MIN_COLOR_MP_ALTITUDE) + u'\N{DEGREE SIGN}' +
                     '    V mag = ' + '{0:4.1f}'.format(min_vmag) + ' to ' + '{0:4.1f}'.format(max_vmag) +
-                    '    min. phase angle = ' + '{:.1f}'.format(MIN_PHASE_ANGLE) + u'\N{DEGREE SIGN}',
+                    '    min. phase angle = ' + '{:.1f}'.format(MIN_COLOR_PHASE_ANGLE) + u'\N{DEGREE SIGN}',
+                    '    min. moon distance = ' + '{:.1f}'.format(MIN_COLOR_MOON_DISTANCE) +
+                    u'\N{DEGREE SIGN}' + ' when moon is up',
                     '    all MP numbers to ' + str(max_mandatory_mp_number) +
-                    ' considered, except as excluded by ' + COLOR_OMIT_LIST_FULLPATH,
+                    ' considered,\n        except those already observed at least ' +
+                    str(N_COLOR_OBSERVATIONS_SUFFICIENT) + ' times,',
+                    '    yielding ' + str(len(table_lines)) + ' MP Candidates in the table below.',
                     this_an.acp_header_string()]
-    example_line = ['Example plan line: ' + 'COLOR MP_1626 1.1x 21:55:08 +24:24:45 ; 1x=V14', '']
-    legend_line = [''.rjust(number_length) + 'Flag (between number and name): ! is special opportunity, '
-                   '~ is current lightcurve target.', '|'.rjust(number_length + 2)]
-    table_header_line = ['|'.rjust(number_length + 2) + 'start-best-last'.rjust(max_name_length + 16) +
-                         'V mag'.rjust(7) + 'Moondist'.rjust(28) + '"/min'.rjust(7) + ' Gal.B' + '  Phase']
-    all_lines = header_lines + example_line + legend_line + table_header_line + table_lines + \
-                table_header_line
+    # example_line = ['Example Excel plan line: ' + 'COLOR MP_1626 1.1x 21:55:08 +24:24:45 ; 1x=V14', '']
+    legend_lines = [''.rjust(number_length) + 'Flag: ' +
+                    MP_FLAG_CURRENT_LC + ' is current lightcurve, ' +
+                    MP_FLAG_POTENTIAL_LC + ' is potential lightcurve, ' +
+                    MP_FLAG_ONE_REQUIRED + ' only one more obs needed,'
+                                           ' and other flags as from priority file.',
+                    '|'.rjust(number_length + 2)]
+    table_header_line = ['|'.rjust(number_length + 2) + '  1st-best-last'.rjust(max_name_length + 16) +
+                         'V mag'.rjust(7) + 'Moon'.rjust(5) + '"/min'.rjust(7) + ' GalB' + '  Phase']
+    all_lines = header_lines + legend_lines + table_header_line + table_lines + table_header_line
 
-    # Write lines to roster text file:
+    # Write Text file:
     roster_directory = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string)
     make_directory_if_not_exists(roster_directory)
-    roster_fullpath = os.path.join(roster_directory, COLOR_ROSTER_FILENAME)
-    with open(roster_fullpath, 'w') as this_file:
+    roster_txt_fullpath = os.path.join(roster_directory, COLOR_ROSTER_TXT_FILENAME)
+    with open(roster_txt_fullpath, 'w') as this_file:
         this_file.write('\n'.join(all_lines))
-    print(str(len(table_lines)), 'MPs written to', roster_fullpath)
+    print('Text file:', str(len(table_lines)), 'MPs written to', roster_txt_fullpath)
+
+    # Write CSV file:
+    csv_legend_line = ['\t'.join(['MP', 'Flag', 'Name', '1st', 'best', 'last', 'V mag', 'Moon',
+                       'as/min', 'GalB', 'Phase', 'ACP string  ;  1st-last'])]
+    roster_csv_fullpath = os.path.join(roster_directory, COLOR_ROSTER_CSV_FILENAME)
+    with open(roster_csv_fullpath, 'w') as this_file:
+        this_file.write('\n'.join(csv_legend_line + csv_lines))
+    print('CSV file: ', str(len(csv_lines)), 'MPs written to', roster_csv_fullpath)
 
 
-def get_mp_lists_from_file(fullpath, codes=[]):
-    """ Read MP list file, get MP numbers user-designated for each category in list file.
-    First character of a line may indicate a category by one-character code (not a numerical digit).
-    If first character of a line is numeric digit, put that line's MP numbers into default list (code=' ').
-    Blank lines ignored.
-    Comments (whole- or partial-line) marked with ';' anywhere in line are ignored.
+def read_mp_control_file(fullpath, may_specify_flags):
+    """ Read MP numbers from a priority file, return dictionary with MP numbers as keys, flags as values.
+        Directive line begins with #FLAG; if following string does not exist, flag is ' ';
+            otherwise use first character of following string.
+        Topmost FLAG dominates for a given MP number, so put most important flags at top of file.
     :param fullpath: full path of file to read. [string]
-    :param codes: list of one-character (not digit) codes, e.g. ['+']. [list of one-character codes]
-    :return: dict of lists, where each key=code [character], list=MP numbers. [list of strings]
+    :param may_specify_flags: True iff #FLAG directives are allowed.
+        Error if False and #FLAG is present [boolean].
+    :return: dict of MP numbers: flag as read from file. [dict of string:char]
     """
-    mp_lists = OrderedDict([(' ', [])])
-    for code in codes:
-        mp_lists[code] = []
+    bad_mp_strings = []
+    mp_dict = {}
+    current_flag = '?'
     if os.path.exists(fullpath) and os.path.isfile(fullpath):
         with open(fullpath, 'r') as mpfile:
             lines = mpfile.readlines()
-        for line in lines:
-            # Remove comments at end, get element strings:
-            strings = line.strip().split(';', maxsplit=1)[0].replace(',', ' ').split()
-            strings = [s for s in strings if s != '']
-            if len(strings) >= 1:
-                if strings[0][0] in codes or strings[0][0].isdigit():
-                    code = strings[0][0]
-                    if code.isdigit():
-                        code = ' '
-                    else:
-                        strings[0] = strings[0][1:]
-                    strings = [s for s in strings if s != '']
-                    mp_lists[code].extend(strings)
-    return mp_lists
+    for line in lines:
+        # Remove comments at end, get element strings:
+        strings = line.strip().split(';', maxsplit=1)[0].replace(',', ' ').split()
+        strings = [s.strip() for s in strings if s != '']
+        if len(strings) >= 1:
+            if strings[0].upper() == '#FLAG':
+                if may_specify_flags is False:
+                    raise SyntaxError('#FLAG directive not allowed in file ' + fullpath)
+                if len(strings) <= 1:
+                    current_flag = ' '
+                else:
+                    current_flag = (strings[1])[0]
+                continue
+            for mp_string in strings:
+                try:
+                    _ = int(mp_string)
+                except ValueError:
+                    bad_mp_strings.append(mp_string)
+                else:
+                    if mp_string not in mp_dict.keys():
+                        mp_dict[mp_string] = current_flag
+        if len(bad_mp_strings) > 0:
+            error_text = str(len(bad_mp_strings)) + ' bad MP string(s) in ' + fullpath + ':\n' + \
+                         '\n'.join(bad_mp_strings)
+            raise ValueError(error_text)
+    return mp_dict
+
+
+# def read_all_mps_from_file(fullpath):
+#     """ Read all MP numbers from a file, return list of MP numbers. Does NOT remove duplicates.
+#     :param fullpath: full path of file to read. [string]
+#     :return: list of MP numbers from file. [list of string]
+#     """
+#     mp_list = []
+#     if os.path.exists(fullpath) and os.path.isfile(fullpath):
+#         with open(fullpath, 'r') as mpfile:
+#             lines = mpfile.readlines()
+#         strings = []
+#         for line in lines:
+#             # Remove comments at end, get element strings:
+#             strings = line.strip().split(';', maxsplit=1)[0].replace(',', ' ').split()
+#             strings = [s.strip() for s in strings if s != '']
+#             mp_list.extend(strings)
+#         bad_mp_strings = []
+#         for mp_string in mp_list:
+#             try:
+#                 _ = int(mp_string)
+#             except ValueError:
+#                 bad_mp_strings.append(mp_string)
+#         if len(bad_mp_strings) > 0:
+#             error_text = str(len(bad_mp_strings)) + ' bad MP string(s) in ' + fullpath + ':\n' + \
+#                          '\n'.join(bad_mp_strings)
+#             raise ValueError(error_text)
+#     return mp_list
+
+
+def read_previously_observed_file(fullpath=COLOR_PREVIOUSLY_OBSERVED_FULLPATH):
+    raw_mp_dict = read_mp_control_file(fullpath=COLOR_PREVIOUSLY_OBSERVED_FULLPATH, may_specify_flags=False)
+    counter = Counter(list(raw_mp_dict.keys()))
+    no_obs_needed_list = [mp for mp, count in counter.items() if count >= N_COLOR_OBSERVATIONS_SUFFICIENT]
+    one_obs_needed_list = [mp for mp, count in counter.items()
+                         if count == N_COLOR_OBSERVATIONS_SUFFICIENT - 1]
+    return no_obs_needed_list, one_obs_needed_list
+
+
+# def get_mp_lists_from_file(fullpath, codes=[]):
+#     """ Read MP list file, get MP numbers user-designated for each category in list file.
+#     First character of a line may indicate a category by one-character code (not a numerical digit).
+#     If first character of a line is numeric digit, put that line's MP numbers into default list (code=' ').
+#     Blank lines ignored.
+#     Comments (whole- or partial-line) marked with ';' anywhere in line are ignored.
+#     :param fullpath: full path of file to read. [string]
+#     :param codes: list of one-character (not digit) codes, e.g. ['+']. [list of one-character codes]
+#     :return: dict of lists, where each key=code [character], list=MP numbers. [list of strings]
+#     """
+#     mp_lists = OrderedDict([(' ', [])])
+#     for code in codes:
+#         mp_lists[code] = []
+#     if os.path.exists(fullpath) and os.path.isfile(fullpath):
+#         with open(fullpath, 'r') as mpfile:
+#             lines = mpfile.readlines()
+#         for line in lines:
+#             # Remove comments at end, get element strings:
+#             strings = line.strip().split(';', maxsplit=1)[0].replace(',', ' ').split()
+#             strings = [s for s in strings if s != '']
+#             if len(strings) >= 1:
+#                 if strings[0][0] in codes or strings[0][0].isdigit():
+#                     code = strings[0][0]
+#                     if code.isdigit():
+#                         code = ' '
+#                     else:
+#                         strings[0] = strings[0][1:]
+#                     strings = [s for s in strings if s != '']
+#                     mp_lists[code].extend(strings)
+#     return mp_lists
 
 
 _____FOR_LIGHTCURVE_PLANNING________________________________ = 0
@@ -542,6 +652,9 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
         data, status, ts_observable, mp_radec = None, None, None, None  # keep stupid IDE happy.
         best_utc = mid_dark  # best_utc will = mid-observable time at converged RA,Dec.
 
+        if int(mp) == 43:
+            iiii = 0
+
         # Converge on best RA, Dec, observable timespan (they interact, as MP is moving):
         hours_observable = 0.0  # default to keep IDE happy.
         for i in range(2):
@@ -583,8 +696,8 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
             an_dict['MoonDist'] = mp_radec.degrees_from(an_object.moon_radec)
             an_dict['PhaseAngle'] = data['Phase']
             an_dict['V_mag'] = data['V_mag']
-            an_dict['ExpTime'] = float(round(float(calc_exp_time(an_dict['V_mag'],
-                                                                 EXP_TIME_TABLE_PHOTOMETRY))))
+            an_dict['ExpTime'] = float(round(float(
+                calc_exp_time(an_dict['V_mag'], EXP_TIME_CLEAR_TABLE_PHOTOMETRY))))
             if an_dict['Period'] is not None:
                 # Duty cycle is % of time spent observing this MP if one exposure per 1/60 of period.
                 an_dict['DutyCyclePct'] = 100.0 * ((an_dict['ExpTime'] + EXP_OVERHEAD) / 60.0) / \
@@ -820,12 +933,12 @@ def make_coverage_plots(an_string, site_name, df_an_table, plots_to_console):
             fig_p.savefig(acp_planning_fullpath)
 
 
-def photometry_exp_time_from_v_mag(v_mag):
+def photometry_exp_time_clear_from_v_mag(v_mag):
     """  Given V mag, return *Clear* filter exposure time suited to lightcurve photometry.
     :param v_mag: target V magnitude [float]
     :return: suitable exposure time in Clear filter suited to lightcurve photometry. [float]
     """
-    return calc_exp_time(v_mag, EXP_TIME_TABLE_PHOTOMETRY)
+    return calc_exp_time(v_mag, EXP_TIME_CLEAR_TABLE_PHOTOMETRY)
 
 
 def make_df_coverage(period, obs_jd_ranges, target_jd_ranges, resolution_minutes=COV_RESOLUTION_MINUTES):
