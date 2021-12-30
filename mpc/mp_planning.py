@@ -69,10 +69,8 @@ MIN_COLOR_MOON_DISTANCE = 50
 MAX_COLOR_SUN_ALT = -10
 MIN_COLOR_PHASE_ANGLE = 2.0  # MPs at less than this phase angle are not included in Color roster.
 PHASE_ANGLE_TO_FLAG = 3.0
-# COLOR_LIGHTCURVE_LIST_FULLPATH = 'C:/Astro/MP Color/MP lightcurve list.txt'  # replaced by MPfiles.
 COLOR_PRIORITY_LIST_FULLPATH = 'C:/Astro/MP Color/MP Color priority list.txt'
 COLOR_PREVIOUSLY_OBSERVED_FULLPATH = 'C:/Astro/MP Color/MP Color previously observed list.txt'
-# COLOR_OMIT_LIST_FULLPATH = 'C:/Astro/MP Color/MP omit list.txt'
 COLOR_ROSTER_TXT_FILENAME = 'MP Color Roster.txt'
 COLOR_ROSTER_CSV_FILENAME = 'MP Color Roster.csv'
 
@@ -83,7 +81,6 @@ EXP_TIME_FACTOR_V14_TABLE_COLOR = [(11, 0.25), (12, 0.3), (13, 0.5), (14, 1), (1
 N_COLOR_OBSERVATIONS_SUFFICIENT = 2
 MP_FLAG_CURRENT_LC = '!'
 MP_FLAG_POTENTIAL_LC = '?'
-# MP_FLAG_PRIORITY = 'p'
 MP_FLAG_ONE_REQUIRED = '*'
 MP_FLAG_OMIT = 'OMIT'  # only this flag can be longer than one character.
 
@@ -97,6 +94,9 @@ class Sort(Enum):
 
 
 class DuplicateMPFileError(Exception):
+    pass
+
+class NoObservableMPsError(Exception):
     pass
 
 
@@ -564,7 +564,8 @@ def make_roster_one_class(month_string='202007', mp_family='MC'):
         return
 
     import requests
-    url = "http://www.minorplanet.info/PHP/call_OppLCDBQuery.php"
+    # url = "http://www.minorplanet.info/PHP/call_OppLCDBQuery.php"  # old URL (-2021)
+    url = "https://www.minorplanet.info/php/callopplcdbquery.php"
     payload = {"OppData_NumberLow": "1",
                "OppData_NumberHigh": "999999",
                "OppDataNameOptions[]": "Any",
@@ -652,9 +653,6 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
         data, status, ts_observable, mp_radec = None, None, None, None  # keep stupid IDE happy.
         best_utc = mid_dark  # best_utc will = mid-observable time at converged RA,Dec.
 
-        if int(mp) == 43:
-            iiii = 0
-
         # Converge on best RA, Dec, observable timespan (they interact, as MP is moving):
         hours_observable = 0.0  # default to keep IDE happy.
         for i in range(2):
@@ -729,6 +727,8 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
     duplicate_mp_numbers = [mp_number for mp_number, count in Counter(mp_numbers).items() if count > 1]
     if duplicate_mp_numbers:
         raise DuplicateMPFileError(' '.join(duplicate_mp_numbers))
+    if 'TransitUTC' not in df_an_table.columns:
+        raise NoObservableMPsError('none available for AN ' + an_string)
     df_an_table = df_an_table.sort_values(by='TransitUTC')
     return df_an_table
 
@@ -1104,9 +1104,10 @@ def make_mpfile(mp_number, utc_date_brightest=None, days=240, mpfile_directory=M
     df_mpc.index = df_mpc['DateUTC'].values
 
     # Get strings from minorplanet.info One Asteroid Lookup:
-    url = 'http://www.minorplanet.info/PHP/generateOneAsteroidInfo.php/'
+    # url = 'http://www.minorplanet.info/PHP/generateOneAsteroidInfo.php/'  # old URL (-2021)
+    url = 'https://www.minorplanet.info/PHP/generateoneasteroidinfo.php'
     parameter_dict = {'AstNumber': str(mp_number), 'AstName': '',
-                      'Longitude': '-109', 'Latitude': '32',  # for V16 DSNM Animas
+                      'Longitude': '-105.5', 'Latitude': '35.3',  # for V28 DSW
                       'StartDate': '',  # assign this within loop, below.
                       'UT': '0', 'subOneShot': 'Submit'}
     n_days_per_call = 30
@@ -1133,24 +1134,22 @@ def make_mpfile(mp_number, utc_date_brightest=None, days=240, mpfile_directory=M
     df_eph['Output'] = [date + '  ' + mpc + mpinfo for (date, mpc, mpinfo) in zip(df_eph['DateUTC'],
                                                                                   df_eph['MPC_string'],
                                                                                   df_eph['MP_info'])]
-    # Write MPfile text file:
+    # Extract data for MPfile text file:
     utc_start_string = min(df_eph['DateUTC'])
     utc_end_string = max(df_eph['DateUTC'])
-    top_text = soup.contents[0].text[:300]
-    top_left = top_text.find('Results for:') + 12
-    top_right = top_text.find('CALL and LCDB')
-    top_text = top_text[top_left:top_right]
-    top_left = top_text.find(')')
-    top_text = top_text[top_left + 1:]
-    undetermined_left = top_text.find('Undetermined (UKN)')
-    if undetermined_left >= 0:  # if family is undetermined.
-        mp_name = top_text[:undetermined_left].strip()
-        mp_family = 'Undetermined (UKN)'
-    else:
-        right = top_text.find('LCDB Family (CODE):')
-        mp_name = top_text[:right].strip()
-        left = top_text.find('CODE):') + 6
-        mp_family = top_text[left:].strip()
+    top_text = soup.contents[1].text[:1000]
+    # Isolate MP family text:
+    text_before_family = 'LCDB Family Number/Name:'
+    loc_start = top_text.find(text_before_family) + len(text_before_family)
+    text_after_family = 'CALL and LCDB'
+    loc_end = top_text.find(text_after_family)
+    mp_family = top_text[loc_start:loc_end].strip()
+    # Isolate MP name:
+    text_before_name = '(' + mp_number + ') '
+    loc_start = top_text.find(text_before_name) + len(text_before_name)
+    loc_end = top_text.find(text_before_family)
+    mp_name = top_text[loc_start:loc_end].strip()
+
     with open(mpfile_fullpath, 'w') as this_file:
         this_file.write('\n'.join(['; MPfile text file for MP photometry during one apparition.',
                                    '; Generated by mpc.mp_planning.make_mpfile() then edited by user',
