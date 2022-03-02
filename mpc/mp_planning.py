@@ -3,8 +3,8 @@ __author__ = "Eric Dose :: New Mexico Mira Project, Albuquerque"
 # Python core packages:
 import os
 from datetime import datetime, timezone, timedelta
-from math import ceil, floor, sqrt
-from collections import Counter, OrderedDict
+from math import ceil, floor
+from collections import Counter
 from enum import Enum
 
 # External packages:
@@ -15,7 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 from astropy.coordinates import SkyCoord
 
-import matplotlib
+# import matplotlib
 # matplotlib.use('Agg')  # Place before importing matplotlib.pyplot or pylab.
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -30,7 +30,7 @@ from mpc.ini import make_defaults_dict, make_site_dict
 # Astropak (author's) imports (a mistake to include, but live with it for now):
 import astropak.web as web
 from astropak.util import ra_as_degrees, dec_as_degrees, dec_as_hex, ra_as_hours, degrees_as_hex, \
-    Timespan, make_directory_if_not_exists, next_date_utc
+    make_directory_if_not_exists, next_date_utc
 
 MOON_CHARACTER = '\u263D'
 # MOON_CHARACTER = '\U0001F319'  # Drat, matplotlib complains 'glyph missing from current font'.
@@ -46,8 +46,10 @@ MIN_MOON_DISTANCE = 40  # degrees (default value)
 MIN_HOURS_OBSERVABLE = 2  # (default value) less than this, and MP is not included in planning.
 DSW = ('254.34647d', '35.11861269964489d', '2220m')
 DSNM = ('251.10288d', '31.748657576406853d', '1372m')
+NSM_DOME = ('254.471022d', '32.903156d', '2180m')
 # next is: (v_mag, Clear-filter exp_time in sec), for photometry only. Targets S/N >~200.
 EXP_TIME_CLEAR_TABLE_PHOTOMETRY = [(13, 90), (14, 150), (15, 300), (16, 600), (17, 870), (17.5, 900)]
+EXP_TIME_BB_TABLE_PHOTOMETRY = [(13, 90), (14, 165), (15, 330), (16, 660), (17, 900), (17.5, 900)]
 EXP_OVERHEAD = 24  # Nominal exposure overhead, in seconds.
 COV_RESOLUTION_MINUTES = 5  # min. coverage plot resolution, in minutes.
 MAX_V_MAGNITUDE_DEFAULT = 18.4  # to ensure that ridiculously faint MPs don't get into planning & plots.
@@ -96,6 +98,7 @@ class Sort(Enum):
 class DuplicateMPFileError(Exception):
     pass
 
+
 class NoObservableMPsError(Exception):
     pass
 
@@ -103,12 +106,12 @@ class NoObservableMPsError(Exception):
 _____FOR_COLOR_PLANNING_____________________________________ = 0
 
 
-def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE,
+def make_color_roster(an, site_name='NMS_Dome', min_moon_dist=MIN_COLOR_MOON_DISTANCE,
                       min_hours=MIN_COLOR_HOURS_OBSERVABLE,
                       min_vmag=MIN_COLOR_V_MAGNITUDE_DEFAULT, max_vmag=MAX_COLOR_V_MAGNITUDE_DEFAULT,
                       max_mandatory_mp_number=MAX_COLOR_MANDATORY_MP_NUMBER, sort=Sort.BEST):
     """ Main COLOR INDEX planning function for MP photometry.
-    :param an Astronight, e.g. 20200201 [string or int]
+    :param an Astronight, e.g., 20200201. [string or int]
     :param site_name: name of site for Site object. [string]
     :param min_moon_dist: min dist from min (degrees) to consider MP observable. [float]
     :param min_hours: min hours of observing time to include an MP. [float]
@@ -193,7 +196,7 @@ def make_color_roster(an, site_name='DSW', min_moon_dist=MIN_COLOR_MOON_DISTANCE
                    'Moon_dist': min(df_mp['Moon_dist']),
                    'Motion': max(df_mp['Motion']),
                    'Phase_angle': sum(df_mp['Phase_angle']) / n
-        }
+                   }
         list_mp_dict.append(mp_dict)
     df_mp = pd.DataFrame(data=list_mp_dict)
     df_mp.index = list(df_mp['Number_int'])
@@ -385,11 +388,11 @@ def read_mp_control_file(fullpath, may_specify_flags):
 
 
 def read_previously_observed_file(fullpath=COLOR_PREVIOUSLY_OBSERVED_FULLPATH):
-    raw_mp_dict = read_mp_control_file(fullpath=COLOR_PREVIOUSLY_OBSERVED_FULLPATH, may_specify_flags=False)
+    raw_mp_dict = read_mp_control_file(fullpath=fullpath, may_specify_flags=False)
     counter = Counter(list(raw_mp_dict.keys()))
     no_obs_needed_list = [mp for mp, count in counter.items() if count >= N_COLOR_OBSERVATIONS_SUFFICIENT]
     one_obs_needed_list = [mp for mp, count in counter.items()
-                         if count == N_COLOR_OBSERVATIONS_SUFFICIENT - 1]
+                           if count == N_COLOR_OBSERVATIONS_SUFFICIENT - 1]
     return no_obs_needed_list, one_obs_needed_list
 
 
@@ -428,7 +431,7 @@ def read_previously_observed_file(fullpath=COLOR_PREVIOUSLY_OBSERVED_FULLPATH):
 _____FOR_LIGHTCURVE_PLANNING________________________________ = 0
 
 
-def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
+def make_mp_roster(an_string, site_name='NMS_Dome', min_moon_dist=MIN_MOON_DISTANCE,
                    min_hours=MIN_HOURS_OBSERVABLE, max_vmag=MAX_V_MAGNITUDE_DEFAULT,
                    plots_to_console=False, forced_include=None):
     """ Main LIGHTCURVE planning function for MP photometry.
@@ -450,7 +453,7 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
         forced_include = [str(mp) for mp in forced_include]
 
     # Make and print table of values, 1 line/MP, sorted by earliest observable UTC:
-    df_an_table = make_df_an_table(an_string, site_name='DSW',
+    df_an_table = make_df_an_table(an_string, site_name='NMS_Dome',
                                    min_moon_dist=min_moon_dist, min_hours=min_hours,
                                    forced_include=forced_include)
 
@@ -487,7 +490,13 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
 
     df = df_an_table.copy()
     an = Astronight(an_string, site_name)
-    roster_header = ['MP Roster for AN ' + an_string + ':',
+    an_year = int(an.an_date_string[0:4])
+    an_month = int(an.an_date_string[4:6])
+    an_day = int(an.an_date_string[6:8])
+    day_of_week_string = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']\
+        [datetime(an_year, an_month, an_day).weekday()]
+    roster_header = ['MP Roster for AN ' + an_string + '  ' + day_of_week_string.upper() +
+                     '     (site = ' + site_name + ')',
                      an.acp_header_string(), ''.join(100*['-'])]
     table_header_line_1 = ''.ljust(16) + '                       Exp Duty Mot.         '
     table_header_line_2 = ''.ljust(16) + 'Start Tran  End   V    (s)  %  "/exp   P/hr'
@@ -498,7 +507,7 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
         short_mp_name = df.loc[i, 'MPname'] if len(df.loc[i, 'MPname']) <= 8 \
             else df.loc[i, 'MPname'][:8] + '\u2026'
         duty_cycle = df.loc[i, 'DutyCyclePct']
-        duty_cycle_string = '  --' if (duty_cycle is None or np.isnan(duty_cycle) == True) \
+        duty_cycle_string = ' --' if (duty_cycle is None or np.isnan(duty_cycle) == True) \
             else str(int(round(duty_cycle))).rjust(3)
         motion = (df.loc[i, 'ExpTime'] / 60) * df.loc[i, 'MotionRate']
         motion_string = '{0:4.1f}'.format(motion) + ('*' if motion > 9 else ' ')
@@ -523,7 +532,7 @@ def make_mp_roster(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
     if len(gone_west_lines) >= 1:
         print('\n\n' + '\n'.join(gone_west_lines))
 
-    # Make ACP AN directory if doesn't exist:
+    # Make ACP AN directory if it doesn't exist:
     text_file_directory = os.path.join(ACP_PLANNING_TOP_DIRECTORY, 'AN' + an_string)
     os.makedirs(text_file_directory, exist_ok=True)
 
@@ -621,7 +630,7 @@ def backlog(months=6):
     return df  # temporary for testing.
 
 
-def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE,
+def make_df_an_table(an_string, site_name='NMS_Dome', min_moon_dist=MIN_MOON_DISTANCE,
                      min_hours=MIN_HOURS_OBSERVABLE, forced_include=None):
     """  Make dataframe of one night's MP photometry planning data, one row per MP.
          USAGE: df = make_df_an_table('20200201')
@@ -629,7 +638,7 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
     :param site_name: name of site for Site object. [string]
     :param min_moon_dist: min dist from min (degrees) to consider MP observable [float].
     :param min_hours: min hours of observing time to include an MP. [float]
-    :param: forced_include: list of MP numbers to include in any case. [list of strs]
+    :param forced_include: list of MP numbers to include in any case. [list of strs]
     :return: table of planning data, one row per current MP, many columns including one for
                            coverage list of dataframes. [DataFrame]
     """
@@ -695,7 +704,7 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
             an_dict['PhaseAngle'] = data['Phase']
             an_dict['V_mag'] = data['V_mag']
             an_dict['ExpTime'] = float(round(float(
-                calc_exp_time(an_dict['V_mag'], EXP_TIME_CLEAR_TABLE_PHOTOMETRY))))
+                calc_exp_time(an_dict['V_mag'], EXP_TIME_BB_TABLE_PHOTOMETRY))))
             if an_dict['Period'] is not None:
                 # Duty cycle is % of time spent observing this MP if one exposure per 1/60 of period.
                 an_dict['DutyCyclePct'] = 100.0 * ((an_dict['ExpTime'] + EXP_OVERHEAD) / 60.0) / \
@@ -706,7 +715,7 @@ def make_df_an_table(an_string, site_name='DSW', min_moon_dist=MIN_MOON_DISTANCE
             an_dict['MotionRate'] = data['MotionRate']
         if status.lower() == 'ok':
             an_dict['PhotrixPlanning'] = 'IMAGE MP_' + mpfile.number + \
-                                         ' Clear=' + str(round(an_dict['ExpTime'])) + 's(*) ' + \
+                                         ' BB=' + str(round(an_dict['ExpTime'])) + 's(*) ' + \
                                          ra_as_hours(an_dict['RA'], seconds_decimal_places=1) + ' ' + \
                                          degrees_as_hex(an_dict['Dec'], arcseconds_decimal_places=0)
             if an_dict['Period'] is not None:
@@ -933,12 +942,12 @@ def make_coverage_plots(an_string, site_name, df_an_table, plots_to_console):
             fig_p.savefig(acp_planning_fullpath)
 
 
-def photometry_exp_time_clear_from_v_mag(v_mag):
-    """  Given V mag, return *Clear* filter exposure time suited to lightcurve photometry.
-    :param v_mag: target V magnitude [float]
-    :return: suitable exposure time in Clear filter suited to lightcurve photometry. [float]
-    """
-    return calc_exp_time(v_mag, EXP_TIME_CLEAR_TABLE_PHOTOMETRY)
+# def photometry_exp_time_clear_from_v_mag(v_mag):
+#     """  Given V mag, return *Clear* filter exposure time suited to lightcurve photometry.
+#     :param v_mag: target V magnitude [float]
+#     :return: suitable exposure time in Clear filter suited to lightcurve photometry. [float]
+#     """
+#     return calc_exp_time(v_mag, EXP_TIME_BB_TABLE_PHOTOMETRY)
 
 
 def make_df_coverage(period, obs_jd_ranges, target_jd_ranges, resolution_minutes=COV_RESOLUTION_MINUTES):
@@ -996,8 +1005,6 @@ def make_df_phase_coverage(period, obs_jd_ranges, phase_entries=100):
     :param period: MP lightcurve period, in hours. Required, else this function can't work. [float]
     :param obs_jd_ranges: start,end pairs of Julian Dates for previous obs, this MP.
         Typically obtained from an updated MPfile for that MP. [list of 2-tuples of floats]
-    :param target_jd_ranges: start,end pair of JDs of proposed new observations.
-        Presumably tonight's available observation timespan. [2-tuple or list of floats]
     :param phase_entries: how many equally-spaced entries in phase to be computed. [int]
     :return: 1 row / timepoint in new obs window, columns = JD, DateTimeUTC, Phase, Nobs. [pandas DataFrame]
     """
@@ -1062,7 +1069,7 @@ def make_mpfile(mp_number, utc_date_brightest=None, days=240, mpfile_directory=M
         print(' >>>>> ERROR: MPfile for MP', mp_number, 'already exists, will not be overwritten.')
         return
 
-    datetime_now = datetime.now()
+    # datetime_now = datetime.now()
     # datetime_now_zero_utc = datetime(datetime_now.year, datetime_now.month,
     #                                  datetime_now.day).replace(tzinfo=timezone.utc)
     datetime_start = datetime_brightest - timedelta(days=int(floor(days/2.0)))
@@ -1077,9 +1084,9 @@ def make_mpfile(mp_number, utc_date_brightest=None, days=240, mpfile_directory=M
     parameter_dict['TextArea'] = str(mp_number)
     parameter_dict['i'] = '1'  # interval between lines
     parameter_dict['u'] = 'd'  # units of interval; 'h' for hours, 'd' for days, 'm' for minutes
-    parameter_dict['long'] = '-105.6'.replace("+", "%2B")   # DSW longitude in deg
-    parameter_dict['lat'] = '+35.12'.replace("+", "%2B")  # DSW latitude in deg
-    parameter_dict['alt'] = '2220'    # DSW elevation (MPC "altitude") in m
+    parameter_dict['long'] = '-105.5'.replace("+", "%2B")   # NMS_Dome longitude in deg
+    parameter_dict['lat'] = '+32.9'.replace("+", "%2B")  # NMS_Dome latitude in deg
+    parameter_dict['alt'] = '2180'    # NMS_Dome elevation (MPC "altitude") in m
     parameter_dict['igd'] = 'n'   # 'n' = don't suppress is sun up
     parameter_dict['ibh'] = 'n'   # 'n' = don't suppress line if MP down
     eph_lines = []
@@ -1107,7 +1114,7 @@ def make_mpfile(mp_number, utc_date_brightest=None, days=240, mpfile_directory=M
     # url = 'http://www.minorplanet.info/PHP/generateOneAsteroidInfo.php/'  # old URL (-2021)
     url = 'https://www.minorplanet.info/PHP/generateoneasteroidinfo.php'
     parameter_dict = {'AstNumber': str(mp_number), 'AstName': '',
-                      'Longitude': '-105.5', 'Latitude': '35.3',  # for V28 DSW
+                      'Longitude': '-105.5', 'Latitude': '32.9',  # for NMS_Dome
                       'StartDate': '',  # assign this within loop, below.
                       'UT': '0', 'subOneShot': 'Submit'}
     n_days_per_call = 30
@@ -1392,7 +1399,7 @@ class MPfile:
 
     def eph_from_utc(self, datetime_utc):
         """ Interpolate data from mpfile object's ephemeris; return dict, or None if bad datetime input.
-            Current code requires that ephemeris line spacing spacing = 1 day.
+            Current code requires that ephemeris line spacing = 1 day.
         :param datetime_utc: target utc date and time. [python datetime object]
         :return: dict of results specific to this MP and datetime, or None if bad datetime input. [dict]
         """
